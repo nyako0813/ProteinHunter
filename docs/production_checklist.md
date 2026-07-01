@@ -10,6 +10,7 @@ ProteinHunter_v5 を本番データで実行する前に、このチェックリ
 - [ ] Python 依存パッケージがインストール済み
 - [ ] `config.yaml` の内容が現在の解析に合っている
 - [ ] `config.yaml` の値が空欄や不正な値になっていない
+- [ ] `config.yaml` を `config.demo.yaml` で置き換えていない
 
 確認例:
 
@@ -44,6 +45,14 @@ which makeblastdb
 
 デモ FASTA は `data/demo/` に保存されています。動作確認には使えますが、本番解析では必ず `data/input/target.faa`、`data/databases/positive.faa`、`data/databases/negative.faa` を実データで用意してください。
 
+デモ用ファイル:
+
+- `data/demo/target_demo.faa`
+- `data/demo/positive_demo.faa`
+- `data/demo/negative_demo.faa`
+
+本番解析では、これらのデモ FASTA を使わないでください。
+
 ## 3. `config.yaml` のおすすめ確認項目
 
 - [ ] `paths.target_fasta`
@@ -67,6 +76,9 @@ which makeblastdb
 
 ## 4. 実行方法
 
+### 本番解析
+
+本番解析では、標準で `config.yaml` が使われます。
 WSL 側のターミナルで実行します。
 
 ```bash
@@ -74,6 +86,19 @@ cd /mnt/c/Users/nyako/Documents/GitHub/ProteinHunter_v5
 source .venv/bin/activate
 .venv/bin/python main.py
 ```
+
+### デモ実行
+
+動作確認だけをしたい場合は、`config.demo.yaml` を指定します。
+この実行では `data/demo/` のデモ FASTA が使われ、結果は `data/output/ProteinHunter_demo_results.xlsx` に出力されます。
+
+```bash
+cd /mnt/c/Users/nyako/Documents/GitHub/ProteinHunter_v5
+source .venv/bin/activate
+.venv/bin/python main.py --config config.demo.yaml
+```
+
+本番解析とデモ実行は分けて扱ってください。`config.yaml` を `config.demo.yaml` に置き換えないでください。
 
 ## 5. ログで確認すること
 

@@ -14,6 +14,19 @@
 
 これらはテストや操作確認のためのデモデータです。本番解析では使わないでください。
 
+デモ FASTA で動作確認する場合は、`config.demo.yaml` を指定して実行します。
+
+```bash
+source .venv/bin/activate
+.venv/bin/python main.py --config config.demo.yaml
+```
+
+デモ実行の結果は次に出力されます。
+
+- `data/output/ProteinHunter_demo_results.xlsx`
+
+`config.demo.yaml` はデモ専用です。本番用の `config.yaml` と置き換えないでください。
+
 ## 必要な入力ファイル
 
 ### `data/input/target.faa`
@@ -55,6 +68,14 @@ Excel レポートなど、解析結果の出力ファイルが入ります。
 解析のたびに内容が変わるため、通常は Git にコミットしないでください。
 
 ## 本番解析の前に確認すること
+
+通常の本番解析では、`config.yaml` が使われます。
+次のコマンドで実行します。
+
+```bash
+source .venv/bin/activate
+.venv/bin/python main.py
+```
 
 テスト用やデモ用の FASTA ファイルが入っている場合は、本番解析の前に必ず実際の解析用 FASTA ファイルへ置き換えてください。
 

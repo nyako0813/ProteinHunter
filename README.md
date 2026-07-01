@@ -75,10 +75,40 @@ Excel には候補 ID、説明、スコア、BLAST 結果、CDD/Pfam ドメイ�
 
 WSL / Linux 環境で、プロジェクトのルートディレクトリから実行します。
 
+### 本番解析
+
+通常の本番解析では、何も指定しなければ `config.yaml` が使われます。
+本番解析を行う前に、次の 3 つの FASTA ファイルを実データで用意してください。
+
+- `data/input/target.faa`
+- `data/databases/positive.faa`
+- `data/databases/negative.faa`
+
 ```bash
 source .venv/bin/activate
 .venv/bin/python main.py
 ```
+
+### デモ実行
+
+動作確認だけをしたい場合は、`config.demo.yaml` を指定します。
+この設定では、次のデモ FASTA が使われます。
+
+- `data/demo/target_demo.faa`
+- `data/demo/positive_demo.faa`
+- `data/demo/negative_demo.faa`
+
+```bash
+source .venv/bin/activate
+.venv/bin/python main.py --config config.demo.yaml
+```
+
+デモ実行の Excel 出力先は次のファイルです。
+
+- `data/output/ProteinHunter_demo_results.xlsx`
+
+デモ FASTA は本番解析には使わないでください。
+また、`config.yaml` を `config.demo.yaml` で置き換えず、本番用とデモ用の設定を分けて管理してください。
 
 ## 生成されるファイル
 
