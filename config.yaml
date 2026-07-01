@@ -1,0 +1,107 @@
+# ==========================================================
+# Protein Hunter v5 Configuration File
+# ==========================================================
+
+project:
+  name: ProteinHunter
+  version: "5.0"
+
+# ----------------------------------------------------------
+# Input / Output
+# ----------------------------------------------------------
+paths:
+
+  # Target protein FASTA
+  target_fasta: "./data/input/target.faa"
+
+  # FASTA files used to automatically build BLAST databases
+  positive_fasta: "./data/databases/positive.faa"
+
+  negative_fasta: "./data/databases/negative.faa"
+
+  # Optional genome annotation
+  gff: "./data/input/genome.gff"
+
+  # Output Excel
+  output_excel: "./data/output/ProteinHunter_results.xlsx"
+
+  # Cache directory
+  cache_dir: "./.cache"
+
+  # Log directory
+  log_dir: "./logs"
+
+
+# ----------------------------------------------------------
+# BLAST
+# ----------------------------------------------------------
+
+blast:
+
+  evalue: 1e-5
+
+  max_target_seqs: 10
+
+  threads: auto
+
+
+# ----------------------------------------------------------
+# Annotation
+# ----------------------------------------------------------
+
+annotation:
+
+  enable_cdd: true
+
+  enable_pfam: true
+
+  enable_alphafold: true
+
+  enable_uniprot: true
+
+  enable_gene_context: true
+
+  cdd_threads: 4
+
+  pfam_threads: 4
+
+  alphafold_threads: 4
+
+
+# ----------------------------------------------------------
+# Cache
+# ----------------------------------------------------------
+
+cache:
+
+  enabled: true
+
+  overwrite: false
+
+
+# ----------------------------------------------------------
+# Score
+# ----------------------------------------------------------
+
+score:
+
+  blast_weight: 5
+
+  domain_weight: 4
+
+  motif_weight: 3
+
+  gene_context_weight: 3
+
+  alphafold_weight: 2
+
+
+# ----------------------------------------------------------
+# Logging
+# ----------------------------------------------------------
+
+logging:
+
+  level: INFO
+
+  save_log: true

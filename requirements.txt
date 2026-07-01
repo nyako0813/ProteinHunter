@@ -1,0 +1,22 @@
+# ==========
+# Protein Hunter v5
+# Python 3.12
+# ==========
+
+biopython>=1.85
+pandas>=2.3
+openpyxl>=3.1
+numpy>=2.2
+
+requests>=2.32
+urllib3>=2.5
+
+PyYAML>=6.0
+
+tqdm>=4.67
+
+xlsxwriter>=3.2
+
+typing_extensions>=4.14
+
+colorama>=0.4.6

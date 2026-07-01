@@ -1,0 +1,15 @@
+今後は
+
+source .venvbinactivate
+
+だけで
+
+Python 3.12
+
+になります。
+
+そして
+
+pip install -r requirements.txt
+
+だけで環境が復元できます。
