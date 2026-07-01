@@ -2,6 +2,18 @@
 
 このディレクトリには、ProteinHunter が解析に使う入力ファイルと、実行時に作られる出力ファイルを置きます。
 
+## デモ用 FASTA
+
+### `data/demo/`
+
+`data/demo/` には、動作確認用の小さな FASTA ファイルが入っています。
+
+- `data/demo/target_demo.faa`
+- `data/demo/positive_demo.faa`
+- `data/demo/negative_demo.faa`
+
+これらはテストや操作確認のためのデモデータです。本番解析では使わないでください。
+
 ## 必要な入力ファイル
 
 ### `data/input/target.faa`
@@ -10,17 +22,23 @@
 
 ここに入れた各配列が、ProteinHunter の候補探索の対象になります。たとえば、未機能解析タンパク質や、機能を調べたいタンパク質群を入れます。
 
+本番解析では、ユーザーが実際の解析対象 FASTA をこの場所に用意してください。
+
 ### `data/databases/positive.faa`
 
 「近い機能を持つ可能性がある」と考える参照タンパク質配列を入れる FASTA ファイルです。
 
 ProteinHunter は、このファイルを positive BLAST の参照として使います。対象タンパク質がここに含まれる配列と似ている場合、候補として前向きな根拠になります。
 
+本番解析では、ユーザーが目的に合った positive 参照 FASTA をこの場所に用意してください。
+
 ### `data/databases/negative.faa`
 
 候補から除外したい、または目的の機能とは違うと考える参照タンパク質配列を入れる FASTA ファイルです。
 
 ProteinHunter は、このファイルを negative BLAST の参照として使います。対象タンパク質がここに含まれる配列と似ている場合、目的とは違う候補として扱われる可能性があります。
+
+本番解析では、ユーザーが目的に合った negative 参照 FASTA をこの場所に用意してください。
 
 ## 生成されるファイル
 
@@ -41,3 +59,5 @@ Excel レポートなど、解析結果の出力ファイルが入ります。
 テスト用やデモ用の FASTA ファイルが入っている場合は、本番解析の前に必ず実際の解析用 FASTA ファイルへ置き換えてください。
 
 特に `target.faa`、`positive.faa`、`negative.faa` の内容が目的に合っているかを確認してから実行してください。
+
+`data/demo/` の FASTA を誤って本番解析に使わないように注意してください。
