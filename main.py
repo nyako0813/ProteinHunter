@@ -22,6 +22,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default="config.yaml",
         help="Path to the YAML configuration file. Defaults to config.yaml.",
     )
+    parser.add_argument(
+        "--check-only",
+        action="store_true",
+        help=(
+            "Validate startup, config, and input FASTA files, then stop before "
+            "BLAST and annotation."
+        ),
+    )
     return parser
 
 
@@ -77,6 +85,14 @@ def main(argv: Sequence[str] | None = None) -> None:
             logger.info("Input FASTA summary:")
             for line in format_input_summary(input_summary):
                 logger.info(line)
+
+        if args.check_only:
+            logger.summary()
+            logger.success(
+                "Check-only mode completed successfully. "
+                "No BLAST or annotation was run."
+            )
+            return
 
         with logger.section("BLAST candidate search"):
             with logger.timer("BLAST candidate pipeline"):
