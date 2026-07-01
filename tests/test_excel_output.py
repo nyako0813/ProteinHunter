@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
+from openpyxl import load_workbook
 
 from core.exceptions import ExcelOutputError
 from core.models import BlastHit, CandidateScore, DomainHit, ProteinRecord
@@ -169,6 +170,23 @@ def test_write_records_to_excel_creates_xlsx_file(tmp_path: Path) -> None:
     dataframe = pd.read_excel(result, sheet_name="Candidates")
     assert list(dataframe.columns) == list(EXCEL_COLUMNS)
     assert dataframe.loc[0, "protein_id"] == "protein_1"
+
+
+def test_write_records_to_excel_applies_simple_formatting(tmp_path: Path) -> None:
+    """Excel output should include basic readability formatting."""
+    output_path = tmp_path / "reports" / "formatted_candidates.xlsx"
+
+    result = write_records_to_excel({"protein_1": make_record()}, output_path)
+
+    workbook = load_workbook(result)
+    worksheet = workbook["Candidates"]
+
+    assert worksheet.freeze_panes == "A2"
+    assert worksheet.auto_filter.ref is not None
+    assert worksheet["A1"].font.bold is True
+    assert all(cell.font.bold for cell in worksheet[1])
+    assert [cell.value for cell in worksheet[1]] == list(EXCEL_COLUMNS)
+    assert worksheet.column_dimensions["B"].width >= 35
 
 
 def test_write_records_to_excel_raises_excel_output_error(

@@ -7,6 +7,9 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
+from openpyxl.styles import Alignment, Font
+from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.worksheet import Worksheet
 
 from core.exceptions import ExcelOutputError
 from core.models import BlastHit, ProteinRecord
@@ -59,6 +62,8 @@ def write_records_to_excel(
     try:
         with pd.ExcelWriter(resolved_output, engine="openpyxl") as writer:
             dataframe.to_excel(writer, sheet_name=sheet_name, index=False)
+            worksheet = writer.sheets[sheet_name]
+            _format_worksheet(worksheet, dataframe)
     except Exception as exc:
         message = (
             f"ProteinHunter could not write the Excel file: {resolved_output}. "
@@ -67,6 +72,50 @@ def write_records_to_excel(
         raise ExcelOutputError(message) from exc
 
     return resolved_output
+
+
+def _format_worksheet(worksheet: Worksheet, dataframe: pd.DataFrame) -> None:
+    """Apply simple readability formatting to an Excel worksheet."""
+    worksheet.freeze_panes = "A2"
+    worksheet.auto_filter.ref = worksheet.dimensions
+
+    for header_cell in worksheet[1]:
+        header_cell.font = Font(bold=True)
+
+    wrap_columns = {
+        "description",
+        "domain_descriptions",
+        "score_reasons",
+        "notes",
+    }
+
+    for column_index, column_name in enumerate(dataframe.columns, start=1):
+        column_letter = get_column_letter(column_index)
+        width = _column_width(column_name, dataframe[column_name])
+
+        if column_name in {"description", "domain_descriptions", "score_reasons"}:
+            width = max(width, 35)
+        elif column_name == "notes":
+            width = max(width, 45)
+
+        worksheet.column_dimensions[column_letter].width = width
+
+        if column_name in wrap_columns:
+            for cell in worksheet[column_letter]:
+                cell.alignment = Alignment(wrap_text=True, vertical="top")
+
+
+def _column_width(column_name: str, values: pd.Series) -> int:
+    """Return a practical Excel column width based on header and cell text."""
+    max_length = len(column_name)
+
+    for value in values:
+        if pd.isna(value):
+            continue
+
+        max_length = max(max_length, len(str(value)))
+
+    return min(max(max_length + 2, 10), 60)
 
 
 def _record_to_row(record: ProteinRecord) -> dict[str, Any]:
