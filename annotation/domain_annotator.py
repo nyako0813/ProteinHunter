@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from annotation.cdd import search_cdd_by_sequence
+from annotation.pfam import search_pfam_by_sequence
 from core.cache import JsonCache
 from core.models import AnnotationResult, ProteinRecord
 
@@ -55,7 +56,57 @@ def annotate_records_cdd(
     return records
 
 
+def annotate_pfam_domains(
+    record: ProteinRecord,
+    cache: JsonCache | None = None,
+    timeout: int = 60,
+) -> ProteinRecord:
+    """Annotate one protein record with Pfam domain hits."""
+    try:
+        domains = search_pfam_by_sequence(
+            protein_id=record.protein_id,
+            sequence=record.sequence,
+            cache=cache,
+            timeout=timeout,
+        )
+    except Exception as exc:
+        message = f"Pfam annotation failed for {record.protein_id}: {exc}"
+        record.notes.append(message)
+        record.annotations["pfam"] = AnnotationResult(
+            protein_id=record.protein_id,
+            source="pfam",
+            success=False,
+            error=message,
+        )
+        return record
+
+    record.domains.extend(domains)
+    record.annotations["pfam"] = AnnotationResult(
+        protein_id=record.protein_id,
+        source="pfam",
+        success=True,
+        domains=list(domains),
+        metadata={"domain_count": len(domains)},
+    )
+
+    return record
+
+
+def annotate_records_pfam(
+    records: dict[str, ProteinRecord],
+    cache: JsonCache | None = None,
+    timeout: int = 60,
+) -> dict[str, ProteinRecord]:
+    """Annotate all records with Pfam domains and return the same dictionary."""
+    for record in records.values():
+        annotate_pfam_domains(record, cache=cache, timeout=timeout)
+
+    return records
+
+
 __all__: tuple[str, ...] = (
     "annotate_cdd_domains",
+    "annotate_pfam_domains",
     "annotate_records_cdd",
+    "annotate_records_pfam",
 )
