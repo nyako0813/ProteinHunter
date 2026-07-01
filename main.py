@@ -21,6 +21,7 @@ def main() -> None:
     from core.logger import logger
 
     try:
+        from annotation.domain_annotator import annotate_records_cdd
         from annotation.record_annotator import annotate_records_uniprot_and_alphafold
         from analysis.blast_pipeline import run_blast_candidate_pipeline
         from config import CONFIG
@@ -54,9 +55,23 @@ def main() -> None:
 
             logger.info(f"BLAST positive-only candidates: {len(records)}")
 
-        with logger.section("UniProt and AlphaFold annotation"):
-            cache = JsonCache(CONFIG.paths.cache_dir)
+        cache = JsonCache(CONFIG.paths.cache_dir)
 
+        with logger.section("CDD domain annotation"):
+            with logger.timer("CDD domain annotation"):
+                records = annotate_records_cdd(
+                    records,
+                    cache=cache,
+                )
+
+            total_domain_hits = sum(len(record.domains) for record in records.values())
+            logger.info(f"Records after CDD annotation: {len(records)}")
+            logger.info(f"Total CDD/domain hits: {total_domain_hits}")
+            logger.info(
+                "Individual CDD annotation failures are saved in each record's notes."
+            )
+
+        with logger.section("UniProt and AlphaFold annotation"):
             with logger.timer("UniProt and AlphaFold annotation"):
                 records = annotate_records_uniprot_and_alphafold(
                     records,
