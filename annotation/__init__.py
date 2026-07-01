@@ -1,0 +1,2 @@
+"""Annotation helpers for ProteinHunter."""
+
