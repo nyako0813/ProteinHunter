@@ -1,0 +1,182 @@
+"""Tests for configuration validation."""
+
+from __future__ import annotations
+
+from copy import deepcopy
+from pathlib import Path
+from typing import Any
+
+import pytest
+import yaml
+
+from config import load_config
+from core.exceptions import ConfigError
+
+
+def valid_config_data() -> dict[str, Any]:
+    """Return a complete valid config dictionary for tests."""
+    return {
+        "project": {
+            "name": "ProteinHunter",
+            "version": "5.0",
+        },
+        "paths": {
+            "target_fasta": "./data/input/target.faa",
+            "positive_fasta": "./data/databases/positive.faa",
+            "negative_fasta": "./data/databases/negative.faa",
+            "gff": "./data/input/genome.gff",
+            "output_excel": "./data/output/results.xlsx",
+            "cache_dir": "./.cache",
+            "log_dir": "./logs",
+        },
+        "blast": {
+            "evalue": 1e-5,
+            "max_target_seqs": 10,
+            "threads": "auto",
+        },
+        "annotation": {
+            "enable_cdd": True,
+            "enable_pfam": True,
+            "enable_alphafold": True,
+            "enable_uniprot": True,
+            "enable_gene_context": False,
+            "cdd_threads": 1,
+            "pfam_threads": 1,
+            "alphafold_threads": 1,
+        },
+        "cache": {
+            "enabled": True,
+            "overwrite": False,
+        },
+        "score": {
+            "blast_weight": 5,
+            "domain_weight": 4,
+            "motif_weight": 3,
+            "gene_context_weight": 3,
+            "alphafold_weight": 2,
+        },
+        "logging": {
+            "level": "INFO",
+            "save_log": True,
+        },
+    }
+
+
+def write_config(tmp_path: Path, data: dict[str, Any]) -> Path:
+    """Write a temporary YAML config file."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.safe_dump(data), encoding="utf-8")
+    return config_path
+
+
+def test_valid_config_passes(tmp_path: Path) -> None:
+    """A complete valid config should load successfully."""
+    config_path = write_config(tmp_path, valid_config_data())
+
+    cfg = load_config(config_path, initialize=False)
+
+    assert cfg.project_name == "ProteinHunter"
+    assert cfg.blast.evalue == 1e-5
+    assert cfg.blast.threads >= 1
+
+
+def test_missing_paths_key_raises_config_error(tmp_path: Path) -> None:
+    """Missing required path keys should raise ConfigError."""
+    data = valid_config_data()
+    del data["paths"]["target_fasta"]
+    config_path = write_config(tmp_path, data)
+
+    with pytest.raises(ConfigError, match="paths.target_fasta"):
+        load_config(config_path, initialize=False)
+
+
+def test_empty_path_value_raises_config_error(tmp_path: Path) -> None:
+    """Empty required path values should raise ConfigError."""
+    data = valid_config_data()
+    data["paths"]["positive_fasta"] = ""
+    config_path = write_config(tmp_path, data)
+
+    with pytest.raises(ConfigError, match="paths.positive_fasta"):
+        load_config(config_path, initialize=False)
+
+
+@pytest.mark.parametrize("bad_evalue", [0, -1, "not-a-number"])
+def test_invalid_blast_evalue_raises_config_error(
+    tmp_path: Path,
+    bad_evalue: object,
+) -> None:
+    """blast.evalue must be a positive number."""
+    data = valid_config_data()
+    data["blast"]["evalue"] = bad_evalue
+    config_path = write_config(tmp_path, data)
+
+    with pytest.raises(ConfigError, match="blast.evalue"):
+        load_config(config_path, initialize=False)
+
+
+@pytest.mark.parametrize("bad_max_target_seqs", [0, -1, "ten", True])
+def test_invalid_blast_max_target_seqs_raises_config_error(
+    tmp_path: Path,
+    bad_max_target_seqs: object,
+) -> None:
+    """blast.max_target_seqs must be a positive integer."""
+    data = valid_config_data()
+    data["blast"]["max_target_seqs"] = bad_max_target_seqs
+    config_path = write_config(tmp_path, data)
+
+    with pytest.raises(ConfigError, match="blast.max_target_seqs"):
+        load_config(config_path, initialize=False)
+
+
+@pytest.mark.parametrize("bad_threads", [0, -1, "many", False])
+def test_invalid_blast_threads_raises_config_error(
+    tmp_path: Path,
+    bad_threads: object,
+) -> None:
+    """blast.threads must be auto or a positive integer."""
+    data = valid_config_data()
+    data["blast"]["threads"] = bad_threads
+    config_path = write_config(tmp_path, data)
+
+    with pytest.raises(ConfigError, match="blast.threads"):
+        load_config(config_path, initialize=False)
+
+
+def test_invalid_annotation_boolean_raises_config_error(tmp_path: Path) -> None:
+    """Annotation enable flags must be booleans."""
+    data = valid_config_data()
+    data["annotation"]["enable_cdd"] = "yes"
+    config_path = write_config(tmp_path, data)
+
+    with pytest.raises(ConfigError, match="annotation.enable_cdd"):
+        load_config(config_path, initialize=False)
+
+
+def test_invalid_cache_boolean_raises_config_error(tmp_path: Path) -> None:
+    """Cache flags must be booleans."""
+    data = valid_config_data()
+    data["cache"]["enabled"] = "true"
+    config_path = write_config(tmp_path, data)
+
+    with pytest.raises(ConfigError, match="cache.enabled"):
+        load_config(config_path, initialize=False)
+
+
+def test_invalid_logging_level_raises_config_error(tmp_path: Path) -> None:
+    """logging.level must be one of the supported log levels."""
+    data = valid_config_data()
+    data["logging"]["level"] = "VERBOSE"
+    config_path = write_config(tmp_path, data)
+
+    with pytest.raises(ConfigError, match="logging.level"):
+        load_config(config_path, initialize=False)
+
+
+def test_invalid_logging_save_log_raises_config_error(tmp_path: Path) -> None:
+    """logging.save_log must be a boolean."""
+    data = deepcopy(valid_config_data())
+    data["logging"]["save_log"] = "yes"
+    config_path = write_config(tmp_path, data)
+
+    with pytest.raises(ConfigError, match="logging.save_log"):
+        load_config(config_path, initialize=False)
