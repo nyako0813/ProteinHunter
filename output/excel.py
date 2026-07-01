@@ -15,6 +15,9 @@ from core.models import BlastHit, ProteinRecord
 EXCEL_COLUMNS: tuple[str, ...] = (
     "protein_id",
     "description",
+    "total_score",
+    "score_components",
+    "score_reasons",
     "domain_sources",
     "domain_names",
     "domain_accessions",
@@ -74,6 +77,9 @@ def _record_to_row(record: ProteinRecord) -> dict[str, Any]:
     return {
         "protein_id": record.protein_id,
         "description": record.description,
+        "total_score": record.score.total_score if record.score else 0,
+        "score_components": _score_components(record),
+        "score_reasons": "; ".join(record.score.reasons) if record.score else "",
         "domain_sources": _unique_join(domain.source for domain in record.domains),
         "domain_names": _join(domain.name for domain in record.domains),
         "domain_accessions": _join(domain.accession for domain in record.domains),
@@ -96,6 +102,16 @@ def _record_to_row(record: ProteinRecord) -> dict[str, Any]:
         "alphafold_url": record.alphafold_url,
         "notes": "; ".join(record.notes),
     }
+
+
+def _score_components(record: ProteinRecord) -> str:
+    """Return score components as readable name=value pairs."""
+    if record.score is None:
+        return ""
+
+    return "; ".join(
+        f"{name}={value}" for name, value in record.score.components.items()
+    )
 
 
 def _best_hit(hits: list[BlastHit]) -> BlastHit | None:

@@ -8,7 +8,7 @@ import pandas as pd
 import pytest
 
 from core.exceptions import ExcelOutputError
-from core.models import BlastHit, DomainHit, ProteinRecord
+from core.models import BlastHit, CandidateScore, DomainHit, ProteinRecord
 from output.excel import EXCEL_COLUMNS, records_to_dataframe, write_records_to_excel
 
 
@@ -32,7 +32,7 @@ def make_hit(
 
 def make_record() -> ProteinRecord:
     """Create a protein record with enough fields for Excel tests."""
-    return ProteinRecord(
+    record = ProteinRecord(
         protein_id="protein_1",
         description="candidate protein",
         sequence="MSTNPKPQR",
@@ -67,6 +67,12 @@ def make_record() -> ProteinRecord:
         alphafold_url="https://example.test/model",
         notes=["reviewed", "export ready"],
     )
+    score = CandidateScore(protein_id="protein_1")
+    score.add_component("positive_hit", 5.0, "Positive BLAST hit found")
+    score.add_component("domain_hit", 4.0, "Domain annotation found")
+    record.score = score
+
+    return record
 
 
 def test_records_to_dataframe_column_order() -> None:
@@ -82,6 +88,28 @@ def test_empty_records_returns_expected_columns() -> None:
 
     assert dataframe.empty
     assert list(dataframe.columns) == list(EXCEL_COLUMNS)
+
+
+def test_records_to_dataframe_includes_score_fields() -> None:
+    """Score details should be included in stable Excel columns."""
+    dataframe = records_to_dataframe({"protein_1": make_record()})
+    row = dataframe.iloc[0]
+
+    assert row["total_score"] == 9.0
+    assert row["score_components"] == "positive_hit=5.0; domain_hit=4.0"
+    assert row["score_reasons"] == "Positive BLAST hit found; Domain annotation found"
+
+
+def test_records_to_dataframe_without_score_uses_empty_score_fields() -> None:
+    """Records without scores should use zero and blank score fields."""
+    record = ProteinRecord(protein_id="protein_1")
+
+    dataframe = records_to_dataframe({"protein_1": record})
+    row = dataframe.iloc[0]
+
+    assert row["total_score"] == 0
+    assert row["score_components"] == ""
+    assert row["score_reasons"] == ""
 
 
 def test_records_to_dataframe_includes_domain_fields() -> None:
