@@ -72,44 +72,80 @@ def main() -> None:
         cache = JsonCache(CONFIG.paths.cache_dir)
 
         with logger.section("CDD domain annotation"):
-            with logger.timer("CDD domain annotation"):
-                records = annotate_records_cdd(
-                    records,
-                    cache=cache,
-                )
+            if CONFIG.annotation.enable_cdd:
+                logger.info("CDD annotation is enabled.")
+                with logger.timer("CDD domain annotation"):
+                    records = annotate_records_cdd(
+                        records,
+                        cache=cache,
+                    )
 
-            total_domain_hits = sum(len(record.domains) for record in records.values())
-            logger.info(f"Records after CDD annotation: {len(records)}")
-            logger.info(f"Total CDD/domain hits: {total_domain_hits}")
-            logger.info(
-                "Individual CDD annotation failures are saved in each record's notes."
-            )
+                total_domain_hits = sum(
+                    len(record.domains) for record in records.values()
+                )
+                logger.info(f"Records after CDD annotation: {len(records)}")
+                logger.info(f"Total CDD/domain hits: {total_domain_hits}")
+                logger.info(
+                    "Individual CDD annotation failures are saved in each record's notes."
+                )
+            else:
+                logger.info("CDD annotation is disabled in config.yaml; skipping it.")
 
         with logger.section("Pfam domain annotation"):
-            with logger.timer("Pfam domain annotation"):
-                records = annotate_records_pfam(
-                    records,
-                    cache=cache,
-                )
+            if CONFIG.annotation.enable_pfam:
+                logger.info("Pfam annotation is enabled.")
+                with logger.timer("Pfam domain annotation"):
+                    records = annotate_records_pfam(
+                        records,
+                        cache=cache,
+                    )
 
-            total_domain_hits = sum(len(record.domains) for record in records.values())
-            logger.info(f"Records after Pfam annotation: {len(records)}")
-            logger.info(f"Total domain hits after Pfam: {total_domain_hits}")
-            logger.info(
-                "Individual Pfam annotation failures are saved in each record's notes."
-            )
+                total_domain_hits = sum(
+                    len(record.domains) for record in records.values()
+                )
+                logger.info(f"Records after Pfam annotation: {len(records)}")
+                logger.info(f"Total domain hits after Pfam: {total_domain_hits}")
+                logger.info(
+                    "Individual Pfam annotation failures are saved in each record's notes."
+                )
+            else:
+                logger.info("Pfam annotation is disabled in config.yaml; skipping it.")
 
         with logger.section("UniProt and AlphaFold annotation"):
-            with logger.timer("UniProt and AlphaFold annotation"):
-                records = annotate_records_uniprot_and_alphafold(
-                    records,
-                    cache=cache,
-                )
-
-            logger.info(f"Annotated records: {len(records)}")
-            logger.info(
-                "Individual annotation failures are saved in each record's notes."
+            run_uniprot_alphafold = (
+                CONFIG.annotation.enable_uniprot
+                or CONFIG.annotation.enable_alphafold
             )
+
+            if run_uniprot_alphafold:
+                if CONFIG.annotation.enable_uniprot and CONFIG.annotation.enable_alphafold:
+                    logger.info("UniProt and AlphaFold annotation are enabled.")
+                elif CONFIG.annotation.enable_uniprot:
+                    logger.info(
+                        "UniProt annotation is enabled. AlphaFold may still run because "
+                        "the current annotator keeps them together."
+                    )
+                else:
+                    logger.info(
+                        "AlphaFold annotation is enabled. UniProt lookup is required "
+                        "first to obtain an accession."
+                    )
+
+                with logger.timer("UniProt and AlphaFold annotation"):
+                    records = annotate_records_uniprot_and_alphafold(
+                        records,
+                        cache=cache,
+                    )
+
+                logger.info(f"Annotated records: {len(records)}")
+                logger.info(
+                    "Individual annotation failures are saved in each record's notes."
+                )
+            else:
+                logger.info(
+                    "UniProt and AlphaFold annotation are both disabled in config.yaml; "
+                    "skipping them."
+                )
 
         with logger.section("Candidate scoring"):
             with logger.timer("Candidate scoring"):
