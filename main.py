@@ -21,8 +21,10 @@ def main() -> None:
     from core.logger import logger
 
     try:
+        from annotation.record_annotator import annotate_records_uniprot_and_alphafold
         from analysis.blast_pipeline import run_blast_candidate_pipeline
         from config import CONFIG
+        from core.cache import JsonCache
         from output.excel import write_records_to_excel
 
         logger.info("Protein Hunter started")
@@ -36,6 +38,7 @@ def main() -> None:
             logger.info(f"Negative FASTA: {CONFIG.paths.negative_fasta}")
             logger.info(f"Excel output: {CONFIG.paths.output_excel}")
             logger.info(f"BLAST work directory: {blast_work_dir}")
+            logger.info(f"Cache directory: {CONFIG.paths.cache_dir}")
 
         with logger.section("BLAST candidate search"):
             with logger.timer("BLAST candidate pipeline"):
@@ -49,6 +52,22 @@ def main() -> None:
                     threads=CONFIG.blast.threads,
                 )
 
+            logger.info(f"BLAST positive-only candidates: {len(records)}")
+
+        with logger.section("UniProt and AlphaFold annotation"):
+            cache = JsonCache(CONFIG.paths.cache_dir)
+
+            with logger.timer("UniProt and AlphaFold annotation"):
+                records = annotate_records_uniprot_and_alphafold(
+                    records,
+                    cache=cache,
+                )
+
+            logger.info(f"Annotated records: {len(records)}")
+            logger.info(
+                "Individual annotation failures are saved in each record's notes."
+            )
+
         with logger.section("Excel output"):
             with logger.timer("Write Excel output"):
                 excel_path = write_records_to_excel(
@@ -56,7 +75,7 @@ def main() -> None:
                     output_path=CONFIG.paths.output_excel,
                 )
 
-            logger.info(f"Final candidate count: {len(records)}")
+            logger.info(f"Final annotated candidate count: {len(records)}")
             logger.info(f"Excel file written to: {excel_path}")
 
         logger.summary()
