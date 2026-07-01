@@ -27,6 +27,7 @@ def main() -> None:
         )
         from annotation.record_annotator import annotate_records_uniprot_and_alphafold
         from analysis.blast_pipeline import run_blast_candidate_pipeline
+        from analysis.scoring import get_sorted_records, score_records
         from config import CONFIG
         from core.cache import JsonCache
         from output.excel import write_records_to_excel
@@ -99,6 +100,23 @@ def main() -> None:
             logger.info(
                 "Individual annotation failures are saved in each record's notes."
             )
+
+        with logger.section("Candidate scoring"):
+            with logger.timer("Candidate scoring"):
+                records = score_records(records)
+                sorted_records = get_sorted_records(records, descending=True)
+                records = {record.protein_id: record for record in sorted_records}
+
+            logger.info(f"Records scored: {len(records)}")
+            if sorted_records:
+                top_candidate = sorted_records[0]
+                top_score = (
+                    top_candidate.score.total_score if top_candidate.score else 0.0
+                )
+                logger.info(f"Top candidate: {top_candidate.protein_id}")
+                logger.info(f"Top candidate score: {top_score}")
+            else:
+                logger.info("No candidates were available for scoring.")
 
         with logger.section("Excel output"):
             with logger.timer("Write Excel output"):
