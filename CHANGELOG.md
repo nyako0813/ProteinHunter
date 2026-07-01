@@ -25,6 +25,7 @@ ProteinHunter_v5 の変更履歴です。
 - Excel 出力機能を追加
 - Excel の見やすさを整える書式設定を追加
 - `--config` によるデモ設定ファイル指定を追加
+- `--check-only` による事前確認モードを追加
 - デモ用 FASTA ファイルを本番入力とは別に配置
 - README、data README、本番実行チェックリストなどのドキュメントを追加
 
@@ -50,4 +51,4 @@ ProteinHunter_v5 の変更履歴です。
 - デモ実行では、次を使います。
   - `config.demo.yaml`
   - `data/demo/*.faa`
-- フルテストは `137 passed` で通過済みです。
+- フルテストは `139 passed` で通過済みです。

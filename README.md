@@ -89,6 +89,35 @@ source .venv/bin/activate
 .venv/bin/python main.py
 ```
 
+### 事前チェックだけを行う
+
+`--check-only` を付けると、解析を始める前の確認だけを実行できます。
+
+このモードでは、次の処理だけを行います。
+
+- 起動前チェック
+- 設定ファイルの読み込みと検証
+- 入力 FASTA の件数サマリー表示
+
+BLAST、注釈、スコアリング、Excel 出力は行いません。
+そのため、BLAST の一時ファイルや Excel 出力ファイルも作られません。
+
+本番用の確認:
+
+```bash
+source .venv/bin/activate
+.venv/bin/python main.py --check-only
+```
+
+デモ用の確認:
+
+```bash
+source .venv/bin/activate
+.venv/bin/python main.py --config config.demo.yaml --check-only
+```
+
+本番解析では、まず実データ FASTA を配置し、`--check-only` で件数が正しいことを確認してから、通常実行することをおすすめします。
+
 ### デモ実行
 
 動作確認だけをしたい場合は、`config.demo.yaml` を指定します。

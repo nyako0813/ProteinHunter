@@ -27,6 +27,15 @@ source .venv/bin/activate
 
 `config.demo.yaml` はデモ専用です。本番用の `config.yaml` と置き換えないでください。
 
+デモ FASTA の件数確認だけをしたい場合は、`--check-only` を使います。
+
+```bash
+source .venv/bin/activate
+.venv/bin/python main.py --config config.demo.yaml --check-only
+```
+
+この確認では、BLAST、注釈、スコアリング、Excel 出力は行われません。
+
 ## 必要な入力ファイル
 
 ### `data/input/target.faa`
@@ -70,7 +79,20 @@ Excel レポートなど、解析結果の出力ファイルが入ります。
 ## 本番解析の前に確認すること
 
 通常の本番解析では、`config.yaml` が使われます。
-次のコマンドで実行します。
+まず、次の 3 つの FASTA を実データで用意してください。
+
+- `data/input/target.faa`
+- `data/databases/positive.faa`
+- `data/databases/negative.faa`
+
+次に、`--check-only` で入力件数を確認します。
+
+```bash
+source .venv/bin/activate
+.venv/bin/python main.py --check-only
+```
+
+表示された入力 FASTA の件数が正しいことを確認してから、本番解析を実行します。
 
 ```bash
 source .venv/bin/activate

@@ -76,6 +76,19 @@ which makeblastdb
 
 ## 4. 実行方法
 
+### おすすめの本番手順
+
+1. 実データ FASTA を配置します。
+   - `data/input/target.faa`
+   - `data/databases/positive.faa`
+   - `data/databases/negative.faa`
+2. `--check-only` で事前確認します。
+3. 表示された入力件数が正しいことを確認します。
+4. 問題がなければ通常実行します。
+
+`--check-only` は、起動前チェック、設定ファイルの読み込みと検証、入力 FASTA の件数サマリーだけを行います。
+BLAST、注釈、スコアリング、Excel 出力は行わず、BLAST 一時ファイルや Excel 出力も作りません。
+
 ### 本番解析
 
 本番解析では、標準で `config.yaml` が使われます。
@@ -84,7 +97,18 @@ WSL 側のターミナルで実行します。
 ```bash
 cd /mnt/c/Users/nyako/Documents/GitHub/ProteinHunter_v5
 source .venv/bin/activate
+.venv/bin/python main.py --check-only
 .venv/bin/python main.py
+```
+
+### デモの事前チェック
+
+デモ FASTA の件数確認だけをしたい場合は、次のように実行します。
+
+```bash
+cd /mnt/c/Users/nyako/Documents/GitHub/ProteinHunter_v5
+source .venv/bin/activate
+.venv/bin/python main.py --config config.demo.yaml --check-only
 ```
 
 ### デモ実行
