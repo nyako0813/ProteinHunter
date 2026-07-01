@@ -5,7 +5,7 @@ Main entry point.
 
 from __future__ import annotations
 
-import time
+from pathlib import Path
 
 from core.startup import StartupChecker
 
@@ -20,16 +20,56 @@ def main() -> None:
 
     from core.logger import logger
 
-    logger.info("Protein Hunter started")
-    logger.success("Startup check passed")
+    try:
+        from analysis.blast_pipeline import run_blast_candidate_pipeline
+        from config import CONFIG
+        from output.excel import write_records_to_excel
 
-    with logger.section("Logger Test"):
-        with logger.timer("Example step"):
-            time.sleep(0.5)
+        logger.info("Protein Hunter started")
+        logger.success("Startup check passed")
 
-    logger.summary()
+        blast_work_dir = Path("data") / "temp" / "blast"
 
-    logger.success("Program finished")
+        with logger.section("Configuration"):
+            logger.info(f"Target FASTA: {CONFIG.paths.target_fasta}")
+            logger.info(f"Positive FASTA: {CONFIG.paths.positive_fasta}")
+            logger.info(f"Negative FASTA: {CONFIG.paths.negative_fasta}")
+            logger.info(f"Excel output: {CONFIG.paths.output_excel}")
+            logger.info(f"BLAST work directory: {blast_work_dir}")
+
+        with logger.section("BLAST candidate search"):
+            with logger.timer("BLAST candidate pipeline"):
+                records = run_blast_candidate_pipeline(
+                    target_fasta=CONFIG.paths.target_fasta,
+                    positive_fasta=CONFIG.paths.positive_fasta,
+                    negative_fasta=CONFIG.paths.negative_fasta,
+                    work_dir=blast_work_dir,
+                    evalue=CONFIG.blast.evalue,
+                    max_target_seqs=CONFIG.blast.max_target_seqs,
+                    threads=CONFIG.blast.threads,
+                )
+
+        with logger.section("Excel output"):
+            with logger.timer("Write Excel output"):
+                excel_path = write_records_to_excel(
+                    records=records,
+                    output_path=CONFIG.paths.output_excel,
+                )
+
+            logger.info(f"Final candidate count: {len(records)}")
+            logger.info(f"Excel file written to: {excel_path}")
+
+        logger.summary()
+        logger.success("Protein Hunter finished successfully")
+
+    except Exception as exc:
+        if hasattr(logger, "exception"):
+            logger.exception(exc)
+        else:
+            logger.error(str(exc))
+
+        logger.summary()
+        raise
 
 
 if __name__ == "__main__":
