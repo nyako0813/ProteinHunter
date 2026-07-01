@@ -21,7 +21,10 @@ def main() -> None:
     from core.logger import logger
 
     try:
-        from annotation.domain_annotator import annotate_records_cdd
+        from annotation.domain_annotator import (
+            annotate_records_cdd,
+            annotate_records_pfam,
+        )
         from annotation.record_annotator import annotate_records_uniprot_and_alphafold
         from analysis.blast_pipeline import run_blast_candidate_pipeline
         from config import CONFIG
@@ -69,6 +72,20 @@ def main() -> None:
             logger.info(f"Total CDD/domain hits: {total_domain_hits}")
             logger.info(
                 "Individual CDD annotation failures are saved in each record's notes."
+            )
+
+        with logger.section("Pfam domain annotation"):
+            with logger.timer("Pfam domain annotation"):
+                records = annotate_records_pfam(
+                    records,
+                    cache=cache,
+                )
+
+            total_domain_hits = sum(len(record.domains) for record in records.values())
+            logger.info(f"Records after Pfam annotation: {len(records)}")
+            logger.info(f"Total domain hits after Pfam: {total_domain_hits}")
+            logger.info(
+                "Individual Pfam annotation failures are saved in each record's notes."
             )
 
         with logger.section("UniProt and AlphaFold annotation"):
