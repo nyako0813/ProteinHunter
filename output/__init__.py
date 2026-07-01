@@ -1,0 +1,2 @@
+"""Output helpers for ProteinHunter."""
+
