@@ -42,7 +42,26 @@ def make_record() -> ProteinRecord:
             make_hit("positive_tie_best", 50.0, 1e-20),
         ],
         negative_hits=[make_hit("negative_best", 10.0, 1e-3, source="negative")],
-        domains=[DomainHit(source="pfam", accession="PF00001", name="Domain")],
+        domains=[
+            DomainHit(
+                source="CDD",
+                accession="cd12345",
+                name="Thioredoxin_like",
+                description="redox domain",
+            ),
+            DomainHit(
+                source="Pfam",
+                accession="PF00001",
+                name="Domain",
+                description="",
+            ),
+            DomainHit(
+                source="CDD",
+                accession="cd67890",
+                name="Second_domain",
+                description="second domain",
+            ),
+        ],
         motifs=["CXXC", "HXXH"],
         uniprot_accession="P12345",
         alphafold_url="https://example.test/model",
@@ -63,6 +82,32 @@ def test_empty_records_returns_expected_columns() -> None:
 
     assert dataframe.empty
     assert list(dataframe.columns) == list(EXCEL_COLUMNS)
+
+
+def test_records_to_dataframe_includes_domain_fields() -> None:
+    """Domain details should be joined into stable Excel columns."""
+    dataframe = records_to_dataframe({"protein_1": make_record()})
+    row = dataframe.iloc[0]
+
+    assert row["domain_sources"] == "CDD; Pfam"
+    assert row["domain_names"] == "Thioredoxin_like; Domain; Second_domain"
+    assert row["domain_accessions"] == "cd12345; PF00001; cd67890"
+    assert row["domain_descriptions"] == "redox domain; second domain"
+    assert row["domain_count"] == 3
+
+
+def test_records_to_dataframe_empty_domains_are_blank() -> None:
+    """Records without domains should use blank domain fields and count zero."""
+    record = ProteinRecord(protein_id="protein_1", description="no domains")
+
+    dataframe = records_to_dataframe({"protein_1": record})
+    row = dataframe.iloc[0]
+
+    assert row["domain_sources"] == ""
+    assert row["domain_names"] == ""
+    assert row["domain_accessions"] == ""
+    assert row["domain_descriptions"] == ""
+    assert row["domain_count"] == 0
 
 
 def test_records_to_dataframe_selects_best_positive_hit() -> None:

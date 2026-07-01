@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,11 @@ from core.models import BlastHit, ProteinRecord
 EXCEL_COLUMNS: tuple[str, ...] = (
     "protein_id",
     "description",
+    "domain_sources",
+    "domain_names",
+    "domain_accessions",
+    "domain_descriptions",
+    "domain_count",
     "sequence_length",
     "positive_hit_count",
     "negative_hit_count",
@@ -24,7 +30,6 @@ EXCEL_COLUMNS: tuple[str, ...] = (
     "best_negative_hit",
     "best_negative_bitscore",
     "best_negative_evalue",
-    "domain_count",
     "motifs",
     "uniprot_accession",
     "alphafold_url",
@@ -69,6 +74,13 @@ def _record_to_row(record: ProteinRecord) -> dict[str, Any]:
     return {
         "protein_id": record.protein_id,
         "description": record.description,
+        "domain_sources": _unique_join(domain.source for domain in record.domains),
+        "domain_names": _join(domain.name for domain in record.domains),
+        "domain_accessions": _join(domain.accession for domain in record.domains),
+        "domain_descriptions": _join(
+            domain.description for domain in record.domains if domain.description
+        ),
+        "domain_count": len(record.domains),
         "sequence_length": record.length,
         "positive_hit_count": len(record.positive_hits),
         "negative_hit_count": len(record.negative_hits),
@@ -79,7 +91,6 @@ def _record_to_row(record: ProteinRecord) -> dict[str, Any]:
         "best_negative_hit": best_negative.subject_id if best_negative else None,
         "best_negative_bitscore": best_negative.bitscore if best_negative else None,
         "best_negative_evalue": best_negative.evalue if best_negative else None,
-        "domain_count": len(record.domains),
         "motifs": "; ".join(record.motifs),
         "uniprot_accession": record.uniprot_accession,
         "alphafold_url": record.alphafold_url,
@@ -93,6 +104,27 @@ def _best_hit(hits: list[BlastHit]) -> BlastHit | None:
         return None
 
     return max(hits, key=lambda hit: (hit.bitscore, -hit.evalue))
+
+
+def _join(values: Iterable[object]) -> str:
+    """Join non-empty string values with a semicolon separator."""
+    return "; ".join(str(value) for value in values if str(value))
+
+
+def _unique_join(values: Iterable[object]) -> str:
+    """Join unique non-empty string values while preserving input order."""
+    seen: set[str] = set()
+    unique_values: list[str] = []
+
+    for value in values:
+        text = str(value)
+        if not text or text in seen:
+            continue
+
+        seen.add(text)
+        unique_values.append(text)
+
+    return "; ".join(unique_values)
 
 
 def _blast_status(record: ProteinRecord) -> str:
