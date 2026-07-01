@@ -14,6 +14,17 @@ def annotate_uniprot_and_alphafold(
     timeout: int = 30,
 ) -> ProteinRecord:
     """Annotate one protein record with UniProt and AlphaFold metadata."""
+    annotate_uniprot(record, cache=cache, timeout=timeout)
+    annotate_alphafold(record, cache=cache, timeout=timeout)
+    return record
+
+
+def annotate_uniprot(
+    record: ProteinRecord,
+    cache: JsonCache | None = None,
+    timeout: int = 30,
+) -> ProteinRecord:
+    """Annotate one protein record with UniProt metadata."""
     try:
         metadata = search_uniprot_by_protein_id(
             record.protein_id,
@@ -39,13 +50,36 @@ def annotate_uniprot_and_alphafold(
         )
         return record
 
-    if accession is None:
-        message = "No UniProt accession was found, so AlphaFold was skipped."
+    return record
+
+
+def annotate_records_uniprot(
+    records: dict[str, ProteinRecord],
+    cache: JsonCache | None = None,
+    timeout: int = 30,
+) -> dict[str, ProteinRecord]:
+    """Annotate all records with UniProt metadata and return the same dictionary."""
+    for record in records.values():
+        annotate_uniprot(record, cache=cache, timeout=timeout)
+
+    return records
+
+
+def annotate_alphafold(
+    record: ProteinRecord,
+    cache: JsonCache | None = None,
+    timeout: int = 30,
+) -> ProteinRecord:
+    """Annotate one protein record with an AlphaFold URL when possible."""
+    accession = record.uniprot_accession
+
+    if accession is None or not accession.strip():
+        message = "AlphaFold annotation skipped because UniProt accession is missing."
+        record.notes.append(message)
         record.annotations["alphafold"] = AnnotationResult(
             protein_id=record.protein_id,
             source="alphafold",
-            success=False,
-            error=message,
+            success=True,
             metadata={"accession": None, "url": None, "exists": False},
         )
         return record
@@ -81,19 +115,34 @@ def annotate_uniprot_and_alphafold(
     return record
 
 
+def annotate_records_alphafold(
+    records: dict[str, ProteinRecord],
+    cache: JsonCache | None = None,
+    timeout: int = 30,
+) -> dict[str, ProteinRecord]:
+    """Annotate all records with AlphaFold URLs and return the same dictionary."""
+    for record in records.values():
+        annotate_alphafold(record, cache=cache, timeout=timeout)
+
+    return records
+
+
 def annotate_records_uniprot_and_alphafold(
     records: dict[str, ProteinRecord],
     cache: JsonCache | None = None,
     timeout: int = 30,
 ) -> dict[str, ProteinRecord]:
     """Annotate all records and return the same dictionary."""
-    for record in records.values():
-        annotate_uniprot_and_alphafold(record, cache=cache, timeout=timeout)
-
+    annotate_records_uniprot(records, cache=cache, timeout=timeout)
+    annotate_records_alphafold(records, cache=cache, timeout=timeout)
     return records
 
 
 __all__: tuple[str, ...] = (
+    "annotate_alphafold",
+    "annotate_records_alphafold",
+    "annotate_records_uniprot",
     "annotate_records_uniprot_and_alphafold",
+    "annotate_uniprot",
     "annotate_uniprot_and_alphafold",
 )
