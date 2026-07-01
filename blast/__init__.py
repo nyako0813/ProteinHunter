@@ -1,0 +1,2 @@
+"""BLAST utilities for ProteinHunter."""
+
