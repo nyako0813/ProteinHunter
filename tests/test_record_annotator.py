@@ -1,0 +1,181 @@
+"""Tests for applying UniProt and AlphaFold annotations to records."""
+
+from __future__ import annotations
+
+from unittest.mock import Mock
+
+import pytest
+
+from annotation.record_annotator import (
+    annotate_records_uniprot_and_alphafold,
+    annotate_uniprot_and_alphafold,
+)
+from core.exceptions import AlphaFoldAnnotationError, UniProtAnnotationError
+from core.models import ProteinRecord
+
+
+def make_record(protein_id: str = "protein_1") -> ProteinRecord:
+    """Create a small ProteinRecord for annotation tests."""
+    return ProteinRecord(protein_id=protein_id, sequence="MSTNPKPQR")
+
+
+def test_successful_uniprot_accession_assignment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """UniProt metadata should set the record accession and annotation result."""
+    metadata = {
+        "query": "protein_1",
+        "accession": "P12345",
+        "id": "TEST_PROTEIN",
+        "protein_name": "Test protein",
+        "organism": "Test organism",
+        "reviewed": True,
+    }
+    monkeypatch.setattr(
+        "annotation.record_annotator.search_uniprot_by_protein_id",
+        Mock(return_value=metadata),
+    )
+    monkeypatch.setattr(
+        "annotation.record_annotator.get_alphafold_url_if_exists",
+        Mock(return_value=None),
+    )
+    record = make_record()
+
+    result = annotate_uniprot_and_alphafold(record, timeout=5)
+
+    assert result is record
+    assert record.uniprot_accession == "P12345"
+    assert record.annotations["uniprot"].success is True
+    assert record.annotations["uniprot"].metadata == metadata
+
+
+def test_successful_alphafold_url_assignment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AlphaFold URL should be stored when available."""
+    monkeypatch.setattr(
+        "annotation.record_annotator.search_uniprot_by_protein_id",
+        Mock(return_value={"query": "protein_1", "accession": "P12345"}),
+    )
+    alphafold_mock = Mock(return_value="https://alphafold.ebi.ac.uk/entry/P12345")
+    monkeypatch.setattr(
+        "annotation.record_annotator.get_alphafold_url_if_exists",
+        alphafold_mock,
+    )
+    record = make_record()
+
+    annotate_uniprot_and_alphafold(record, timeout=7)
+
+    assert record.alphafold_url == "https://alphafold.ebi.ac.uk/entry/P12345"
+    assert record.annotations["alphafold"].success is True
+    assert record.annotations["alphafold"].metadata["exists"] is True
+    alphafold_mock.assert_called_once_with("P12345", cache=None, timeout=7)
+
+
+def test_no_uniprot_accession_skips_alphafold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AlphaFold should not be checked when UniProt has no accession."""
+    monkeypatch.setattr(
+        "annotation.record_annotator.search_uniprot_by_protein_id",
+        Mock(return_value={"query": "protein_1", "accession": None}),
+    )
+    alphafold_mock = Mock()
+    monkeypatch.setattr(
+        "annotation.record_annotator.get_alphafold_url_if_exists",
+        alphafold_mock,
+    )
+    record = make_record()
+
+    annotate_uniprot_and_alphafold(record)
+
+    assert record.uniprot_accession is None
+    assert record.alphafold_url is None
+    assert record.annotations["alphafold"].success is False
+    assert "skipped" in str(record.annotations["alphafold"].error)
+    alphafold_mock.assert_not_called()
+
+
+def test_uniprot_failure_adds_note_and_failed_annotation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """UniProt failures should be recorded without raising."""
+    monkeypatch.setattr(
+        "annotation.record_annotator.search_uniprot_by_protein_id",
+        Mock(side_effect=UniProtAnnotationError("network failed")),
+    )
+    alphafold_mock = Mock()
+    monkeypatch.setattr(
+        "annotation.record_annotator.get_alphafold_url_if_exists",
+        alphafold_mock,
+    )
+    record = make_record()
+
+    result = annotate_uniprot_and_alphafold(record)
+
+    assert result is record
+    assert record.annotations["uniprot"].success is False
+    assert "UniProt annotation failed" in str(record.annotations["uniprot"].error)
+    assert any("UniProt annotation failed" in note for note in record.notes)
+    alphafold_mock.assert_not_called()
+
+
+def test_alphafold_failure_adds_note_and_failed_annotation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AlphaFold failures should be recorded without raising."""
+    monkeypatch.setattr(
+        "annotation.record_annotator.search_uniprot_by_protein_id",
+        Mock(return_value={"query": "protein_1", "accession": "P12345"}),
+    )
+    monkeypatch.setattr(
+        "annotation.record_annotator.get_alphafold_url_if_exists",
+        Mock(side_effect=AlphaFoldAnnotationError("server error")),
+    )
+    record = make_record()
+
+    annotate_uniprot_and_alphafold(record)
+
+    assert record.uniprot_accession == "P12345"
+    assert record.annotations["uniprot"].success is True
+    assert record.annotations["alphafold"].success is False
+    assert "AlphaFold annotation failed" in str(record.annotations["alphafold"].error)
+    assert any("AlphaFold annotation failed" in note for note in record.notes)
+
+
+def test_annotate_records_uniprot_and_alphafold_annotates_multiple_records(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Batch annotation should annotate each record and return the same dict."""
+    metadata_by_id = {
+        "protein_1": {"query": "protein_1", "accession": "P11111"},
+        "protein_2": {"query": "protein_2", "accession": "P22222"},
+    }
+
+    def fake_uniprot(
+        protein_id: str,
+        *args: object,
+        **kwargs: object,
+    ) -> dict[str, str]:
+        return metadata_by_id[protein_id]
+
+    monkeypatch.setattr(
+        "annotation.record_annotator.search_uniprot_by_protein_id",
+        fake_uniprot,
+    )
+    monkeypatch.setattr(
+        "annotation.record_annotator.get_alphafold_url_if_exists",
+        Mock(return_value=None),
+    )
+    records = {
+        "protein_1": make_record("protein_1"),
+        "protein_2": make_record("protein_2"),
+    }
+
+    result = annotate_records_uniprot_and_alphafold(records, timeout=9)
+
+    assert result is records
+    assert records["protein_1"].uniprot_accession == "P11111"
+    assert records["protein_2"].uniprot_accession == "P22222"
+    assert records["protein_1"].annotations["uniprot"].success is True
+    assert records["protein_2"].annotations["uniprot"].success is True
