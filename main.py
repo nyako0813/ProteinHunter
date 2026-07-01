@@ -27,6 +27,7 @@ def main() -> None:
         )
         from annotation.record_annotator import annotate_records_uniprot_and_alphafold
         from analysis.blast_pipeline import run_blast_candidate_pipeline
+        from analysis.input_summary import format_input_summary, summarize_input_fastas
         from analysis.scoring import get_sorted_records, score_records
         from config import CONFIG
         from core.cache import JsonCache
@@ -44,6 +45,15 @@ def main() -> None:
             logger.info(f"Excel output: {CONFIG.paths.output_excel}")
             logger.info(f"BLAST work directory: {blast_work_dir}")
             logger.info(f"Cache directory: {CONFIG.paths.cache_dir}")
+
+            input_summary = summarize_input_fastas(
+                target_fasta=CONFIG.paths.target_fasta,
+                positive_fasta=CONFIG.paths.positive_fasta,
+                negative_fasta=CONFIG.paths.negative_fasta,
+            )
+            logger.info("Input FASTA summary:")
+            for line in format_input_summary(input_summary):
+                logger.info(line)
 
         with logger.section("BLAST candidate search"):
             with logger.timer("BLAST candidate pipeline"):
