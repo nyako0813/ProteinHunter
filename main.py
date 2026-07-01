@@ -25,7 +25,10 @@ def main() -> None:
             annotate_records_cdd,
             annotate_records_pfam,
         )
-        from annotation.record_annotator import annotate_records_uniprot_and_alphafold
+        from annotation.record_annotator import (
+            annotate_records_alphafold,
+            annotate_records_uniprot,
+        )
         from analysis.blast_pipeline import run_blast_candidate_pipeline
         from analysis.input_summary import format_input_summary, summarize_input_fastas
         from analysis.scoring import get_sorted_records, score_records
@@ -112,39 +115,39 @@ def main() -> None:
                 logger.info("Pfam annotation is disabled in config.yaml; skipping it.")
 
         with logger.section("UniProt and AlphaFold annotation"):
-            run_uniprot_alphafold = (
-                CONFIG.annotation.enable_uniprot
-                or CONFIG.annotation.enable_alphafold
-            )
-
-            if run_uniprot_alphafold:
-                if CONFIG.annotation.enable_uniprot and CONFIG.annotation.enable_alphafold:
-                    logger.info("UniProt and AlphaFold annotation are enabled.")
-                elif CONFIG.annotation.enable_uniprot:
-                    logger.info(
-                        "UniProt annotation is enabled. AlphaFold may still run because "
-                        "the current annotator keeps them together."
-                    )
-                else:
-                    logger.info(
-                        "AlphaFold annotation is enabled. UniProt lookup is required "
-                        "first to obtain an accession."
-                    )
-
-                with logger.timer("UniProt and AlphaFold annotation"):
-                    records = annotate_records_uniprot_and_alphafold(
+            if CONFIG.annotation.enable_uniprot:
+                logger.info("UniProt annotation is enabled.")
+                with logger.timer("UniProt annotation"):
+                    records = annotate_records_uniprot(
                         records,
                         cache=cache,
                     )
 
-                logger.info(f"Annotated records: {len(records)}")
+                logger.info(f"Records after UniProt annotation: {len(records)}")
                 logger.info(
-                    "Individual annotation failures are saved in each record's notes."
+                    "Individual UniProt annotation failures are saved in each record's notes."
                 )
             else:
                 logger.info(
-                    "UniProt and AlphaFold annotation are both disabled in config.yaml; "
-                    "skipping them."
+                    "UniProt annotation is disabled in config.yaml; skipping it."
+                )
+
+            if CONFIG.annotation.enable_alphafold:
+                logger.info("AlphaFold annotation is enabled.")
+                with logger.timer("AlphaFold annotation"):
+                    records = annotate_records_alphafold(
+                        records,
+                        cache=cache,
+                    )
+
+                logger.info(f"Records after AlphaFold annotation: {len(records)}")
+                logger.info(
+                    "If UniProt accessions are missing, AlphaFold skip notes are saved "
+                    "in each record's notes."
+                )
+            else:
+                logger.info(
+                    "AlphaFold annotation is disabled in config.yaml; skipping it."
                 )
 
         with logger.section("Candidate scoring"):
