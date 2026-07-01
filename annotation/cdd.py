@@ -193,6 +193,7 @@ def _description_from_parts(parts: list[str], accession_index: int) -> str:
         if not _looks_like_labeled_value(part)
         and _optional_float(part) is None
         and _optional_int(part) is None
+        and _find_coordinate_pair([part]) is None
     ]
     return " ".join(description_parts)
 
@@ -263,7 +264,7 @@ def _second_float_after(parts: list[str], index: int) -> float | None:
 def _find_coordinate_pair(parts: list[str]) -> tuple[int, int] | None:
     """Find a simple coordinate field such as 10-80."""
     for part in parts:
-        match = re.fullmatch(r"(\d+)\s*[-.]+\s*(\d+)", part)
+        match = re.fullmatch(r"(\d+)\s*-\s*(\d+)", part)
         if match:
             return int(match.group(1)), int(match.group(2))
 

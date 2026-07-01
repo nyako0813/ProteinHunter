@@ -162,15 +162,15 @@ def test_get_sorted_records_sorts_by_total_score() -> None:
 
     assert [record.protein_id for record in sorted_records] == [
         "high",
-        "low",
         "middle",
+        "low",
         "unscored",
     ]
 
     ascending_records = get_sorted_records(records, descending=False)
     assert [record.protein_id for record in ascending_records] == [
         "unscored",
-        "middle",
         "low",
+        "middle",
         "high",
     ]

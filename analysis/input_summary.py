@@ -13,7 +13,13 @@ from core.fasta import validate_fasta_file
 def count_fasta_records(path: str | Path) -> int:
     """Validate a FASTA file and return its record count."""
     fasta_path = validate_fasta_file(path)
-    count = sum(1 for _record in SeqIO.parse(fasta_path, "fasta"))
+
+    try:
+        count = sum(1 for _record in SeqIO.parse(fasta_path, "fasta"))
+    except ValueError as exc:
+        raise FileValidationError(
+            f"The FASTA file contains no readable records: {fasta_path}"
+        ) from exc
 
     if count == 0:
         raise FileValidationError(

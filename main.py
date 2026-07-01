@@ -5,13 +5,29 @@ Main entry point.
 
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
+from collections.abc import Sequence
 
 from core.startup import StartupChecker
 
 
-def main() -> None:
+def build_arg_parser() -> argparse.ArgumentParser:
+    """Build the command-line parser for Protein Hunter."""
+    parser = argparse.ArgumentParser(
+        description="Run the ProteinHunter_v5 analysis pipeline.",
+    )
+    parser.add_argument(
+        "--config",
+        default="config.yaml",
+        help="Path to the YAML configuration file. Defaults to config.yaml.",
+    )
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> None:
     """Run Protein Hunter."""
+    args = build_arg_parser().parse_args(argv)
 
     checker = StartupChecker()
 
@@ -32,27 +48,31 @@ def main() -> None:
         from analysis.blast_pipeline import run_blast_candidate_pipeline
         from analysis.input_summary import format_input_summary, summarize_input_fastas
         from analysis.scoring import get_sorted_records, score_records
-        from config import CONFIG
+        from config import load_config
         from core.cache import JsonCache
         from output.excel import write_records_to_excel
 
+        config_path = Path(args.config)
+        config = load_config(config_path)
+
         logger.info("Protein Hunter started")
         logger.success("Startup check passed")
+        logger.info(f"Using config file: {config_path}")
 
         blast_work_dir = Path("data") / "temp" / "blast"
 
         with logger.section("Configuration"):
-            logger.info(f"Target FASTA: {CONFIG.paths.target_fasta}")
-            logger.info(f"Positive FASTA: {CONFIG.paths.positive_fasta}")
-            logger.info(f"Negative FASTA: {CONFIG.paths.negative_fasta}")
-            logger.info(f"Excel output: {CONFIG.paths.output_excel}")
+            logger.info(f"Target FASTA: {config.paths.target_fasta}")
+            logger.info(f"Positive FASTA: {config.paths.positive_fasta}")
+            logger.info(f"Negative FASTA: {config.paths.negative_fasta}")
+            logger.info(f"Excel output: {config.paths.output_excel}")
             logger.info(f"BLAST work directory: {blast_work_dir}")
-            logger.info(f"Cache directory: {CONFIG.paths.cache_dir}")
+            logger.info(f"Cache directory: {config.paths.cache_dir}")
 
             input_summary = summarize_input_fastas(
-                target_fasta=CONFIG.paths.target_fasta,
-                positive_fasta=CONFIG.paths.positive_fasta,
-                negative_fasta=CONFIG.paths.negative_fasta,
+                target_fasta=config.paths.target_fasta,
+                positive_fasta=config.paths.positive_fasta,
+                negative_fasta=config.paths.negative_fasta,
             )
             logger.info("Input FASTA summary:")
             for line in format_input_summary(input_summary):
@@ -61,21 +81,21 @@ def main() -> None:
         with logger.section("BLAST candidate search"):
             with logger.timer("BLAST candidate pipeline"):
                 records = run_blast_candidate_pipeline(
-                    target_fasta=CONFIG.paths.target_fasta,
-                    positive_fasta=CONFIG.paths.positive_fasta,
-                    negative_fasta=CONFIG.paths.negative_fasta,
+                    target_fasta=config.paths.target_fasta,
+                    positive_fasta=config.paths.positive_fasta,
+                    negative_fasta=config.paths.negative_fasta,
                     work_dir=blast_work_dir,
-                    evalue=CONFIG.blast.evalue,
-                    max_target_seqs=CONFIG.blast.max_target_seqs,
-                    threads=CONFIG.blast.threads,
+                    evalue=config.blast.evalue,
+                    max_target_seqs=config.blast.max_target_seqs,
+                    threads=config.blast.threads,
                 )
 
             logger.info(f"BLAST positive-only candidates: {len(records)}")
 
-        cache = JsonCache(CONFIG.paths.cache_dir)
+        cache = JsonCache(config.paths.cache_dir)
 
         with logger.section("CDD domain annotation"):
-            if CONFIG.annotation.enable_cdd:
+            if config.annotation.enable_cdd:
                 logger.info("CDD annotation is enabled.")
                 with logger.timer("CDD domain annotation"):
                     records = annotate_records_cdd(
@@ -95,7 +115,7 @@ def main() -> None:
                 logger.info("CDD annotation is disabled in config.yaml; skipping it.")
 
         with logger.section("Pfam domain annotation"):
-            if CONFIG.annotation.enable_pfam:
+            if config.annotation.enable_pfam:
                 logger.info("Pfam annotation is enabled.")
                 with logger.timer("Pfam domain annotation"):
                     records = annotate_records_pfam(
@@ -115,7 +135,7 @@ def main() -> None:
                 logger.info("Pfam annotation is disabled in config.yaml; skipping it.")
 
         with logger.section("UniProt and AlphaFold annotation"):
-            if CONFIG.annotation.enable_uniprot:
+            if config.annotation.enable_uniprot:
                 logger.info("UniProt annotation is enabled.")
                 with logger.timer("UniProt annotation"):
                     records = annotate_records_uniprot(
@@ -132,7 +152,7 @@ def main() -> None:
                     "UniProt annotation is disabled in config.yaml; skipping it."
                 )
 
-            if CONFIG.annotation.enable_alphafold:
+            if config.annotation.enable_alphafold:
                 logger.info("AlphaFold annotation is enabled.")
                 with logger.timer("AlphaFold annotation"):
                     records = annotate_records_alphafold(
@@ -171,7 +191,7 @@ def main() -> None:
             with logger.timer("Write Excel output"):
                 excel_path = write_records_to_excel(
                     records=records,
-                    output_path=CONFIG.paths.output_excel,
+                    output_path=config.paths.output_excel,
                 )
 
             logger.info(f"Final annotated candidate count: {len(records)}")

@@ -1,0 +1,46 @@
+# ==========================================================
+# Protein Hunter v5 Demo Configuration File
+# ==========================================================
+
+project:
+  name: ProteinHunter
+  version: "5.0-demo"
+
+paths:
+  target_fasta: "./data/demo/target_demo.faa"
+  positive_fasta: "./data/demo/positive_demo.faa"
+  negative_fasta: "./data/demo/negative_demo.faa"
+  gff: "./data/input/genome.gff"
+  output_excel: "./data/output/ProteinHunter_demo_results.xlsx"
+  cache_dir: "./.cache"
+  log_dir: "./logs"
+
+blast:
+  evalue: 1e-5
+  max_target_seqs: 10
+  threads: auto
+
+annotation:
+  enable_cdd: false
+  enable_pfam: false
+  enable_alphafold: false
+  enable_uniprot: false
+  enable_gene_context: false
+  cdd_threads: 1
+  pfam_threads: 1
+  alphafold_threads: 1
+
+cache:
+  enabled: true
+  overwrite: false
+
+score:
+  blast_weight: 5
+  domain_weight: 4
+  motif_weight: 3
+  gene_context_weight: 3
+  alphafold_weight: 2
+
+logging:
+  level: INFO
+  save_log: true

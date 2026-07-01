@@ -58,7 +58,13 @@ def read_fasta_as_components(
 def _read_records(path: str | Path) -> list[SeqIO.SeqRecord]:
     """Validate and read FASTA records, raising a friendly error if empty."""
     fasta_path = validate_fasta_file(path)
-    records = list(SeqIO.parse(fasta_path, "fasta"))
+
+    try:
+        records = list(SeqIO.parse(fasta_path, "fasta"))
+    except ValueError as exc:
+        raise FileValidationError(
+            f"The FASTA file contains no readable records: {fasta_path}"
+        ) from exc
 
     if not records:
         raise FileValidationError(

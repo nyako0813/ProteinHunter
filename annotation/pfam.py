@@ -283,7 +283,7 @@ def _second_float_after(parts: list[str], index: int) -> float | None:
 def _find_coordinate_pair(parts: list[str]) -> tuple[int, int] | None:
     """Find a simple coordinate field such as 10-80."""
     for part in parts:
-        match = re.fullmatch(r"(\d+)\s*[-.]+\s*(\d+)", part)
+        match = re.fullmatch(r"(\d+)\s*-\s*(\d+)", part)
         if match:
             return int(match.group(1)), int(match.group(2))
 
