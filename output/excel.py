@@ -79,6 +79,39 @@ def write_records_to_excel(
     return resolved_output
 
 
+def write_classification_workbook(
+    candidates: dict[str, ProteinRecord],
+    output_path: str | Path,
+    negative_unmatched: dict[str, ProteinRecord] | None = None,
+    no_hit: dict[str, ProteinRecord] | None = None,
+    negative_hit: dict[str, ProteinRecord] | None = None,
+) -> Path:
+    """Write candidate records and BLAST classification sheets to Excel."""
+    resolved_output = Path(output_path).expanduser().resolve()
+    resolved_output.parent.mkdir(parents=True, exist_ok=True)
+    sheets = {
+        "Candidates": records_to_dataframe(candidates),
+        "Negative_unmatched": records_to_dataframe(negative_unmatched or {}),
+        "No_hit": records_to_dataframe(no_hit or {}),
+        "Negative_hit": records_to_dataframe(negative_hit or {}),
+    }
+
+    try:
+        with pd.ExcelWriter(resolved_output, engine="openpyxl") as writer:
+            for sheet_name, dataframe in sheets.items():
+                dataframe.to_excel(writer, sheet_name=sheet_name, index=False)
+                worksheet = writer.sheets[sheet_name]
+                _format_worksheet(worksheet, dataframe)
+    except Exception as exc:
+        message = (
+            f"ProteinHunter could not write the Excel file: {resolved_output}. "
+            "Please check that the folder is writable and the file is not open."
+        )
+        raise ExcelOutputError(message) from exc
+
+    return resolved_output
+
+
 def _format_worksheet(worksheet: Worksheet, dataframe: pd.DataFrame) -> None:
     """Apply simple readability formatting to an Excel worksheet."""
     worksheet.freeze_panes = "A2"
@@ -248,5 +281,6 @@ def _blast_status(record: ProteinRecord) -> str:
 __all__: tuple[str, ...] = (
     "EXCEL_COLUMNS",
     "records_to_dataframe",
+    "write_classification_workbook",
     "write_records_to_excel",
 )

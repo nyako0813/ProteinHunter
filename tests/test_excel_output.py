@@ -10,7 +10,12 @@ from openpyxl import load_workbook
 
 from core.exceptions import ExcelOutputError
 from core.models import BlastHit, CandidateScore, DomainHit, ProteinRecord
-from output.excel import EXCEL_COLUMNS, records_to_dataframe, write_records_to_excel
+from output.excel import (
+    EXCEL_COLUMNS,
+    records_to_dataframe,
+    write_classification_workbook,
+    write_records_to_excel,
+)
 
 
 def make_hit(
@@ -230,6 +235,56 @@ def test_write_records_to_excel_creates_xlsx_file(tmp_path: Path) -> None:
     dataframe = pd.read_excel(result, sheet_name="Candidates")
     assert list(dataframe.columns) == list(EXCEL_COLUMNS)
     assert dataframe.loc[0, "protein_id"] == "protein_1"
+
+
+def test_write_classification_workbook_creates_expected_sheets(
+    tmp_path: Path,
+) -> None:
+    """Classification workbook should include all BLAST category sheets."""
+    candidate = ProteinRecord(
+        protein_id="A_positive_only",
+        positive_hits=[make_hit("positive", 50.0, 1e-20)],
+    )
+    no_hit = ProteinRecord(protein_id="B_no_hits")
+    negative_only = ProteinRecord(
+        protein_id="C_negative_only",
+        negative_hits=[make_hit("negative", 40.0, 1e-10, source="negative")],
+    )
+    both = ProteinRecord(
+        protein_id="D_both",
+        positive_hits=[make_hit("positive", 50.0, 1e-20)],
+        negative_hits=[make_hit("negative", 40.0, 1e-10, source="negative")],
+    )
+    output_path = tmp_path / "reports" / "classification.xlsx"
+
+    result = write_classification_workbook(
+        candidates={"A_positive_only": candidate},
+        output_path=output_path,
+        negative_unmatched={
+            "A_positive_only": candidate,
+            "B_no_hits": no_hit,
+        },
+        no_hit={"B_no_hits": no_hit},
+        negative_hit={
+            "C_negative_only": negative_only,
+            "D_both": both,
+        },
+    )
+
+    workbook = load_workbook(result)
+    assert workbook.sheetnames == [
+        "Candidates",
+        "Negative_unmatched",
+        "No_hit",
+        "Negative_hit",
+    ]
+    assert workbook["Candidates"].max_row == 2
+    assert workbook["Negative_unmatched"].max_row == 3
+    assert workbook["No_hit"].max_row == 2
+    assert workbook["Negative_hit"].max_row == 3
+
+    negative_hit = pd.read_excel(result, sheet_name="Negative_hit")
+    assert set(negative_hit["protein_id"]) == {"C_negative_only", "D_both"}
 
 
 def test_write_records_to_excel_applies_simple_formatting(tmp_path: Path) -> None:

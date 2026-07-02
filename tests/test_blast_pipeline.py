@@ -5,7 +5,10 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import patch
 
-from analysis.blast_pipeline import run_blast_candidate_pipeline
+from analysis.blast_pipeline import (
+    run_blast_candidate_pipeline,
+    run_blast_classification_pipeline,
+)
 from core.models import BlastHit
 
 
@@ -132,3 +135,62 @@ def test_blast_candidate_pipeline_returns_filtered_positive_only_records(
     assert set(records) == {"positive_only"}
     assert records["positive_only"].positive_hits == [positive_hits[0]]
     assert records["positive_only"].negative_hits == []
+
+
+def test_blast_classification_pipeline_returns_all_classification_groups(
+    tmp_path: Path,
+) -> None:
+    """Targets should be split into Candidates, No_hit, and Negative_hit groups."""
+    positive_hits = [
+        make_hit("A_positive_only", "positive"),
+        make_hit("D_both", "positive"),
+    ]
+    negative_hits = [
+        make_hit("C_negative_only", "negative"),
+        make_hit("D_both", "negative"),
+    ]
+
+    with (
+        patch(
+            "analysis.blast_pipeline.read_fasta_as_components",
+            return_value=(
+                ["A_positive_only", "B_no_hits", "C_negative_only", "D_both"],
+                {
+                    "A_positive_only": "A desc",
+                    "B_no_hits": "B desc",
+                    "C_negative_only": "C desc",
+                    "D_both": "D desc",
+                },
+                {
+                    "A_positive_only": "AAAA",
+                    "B_no_hits": "BBBB",
+                    "C_negative_only": "CCCC",
+                    "D_both": "DDDD",
+                },
+            ),
+        ),
+        patch(
+            "analysis.blast_pipeline.run_blast_pipeline",
+            side_effect=[positive_hits, negative_hits],
+        ),
+    ):
+        result = run_blast_classification_pipeline(
+            target_fasta=tmp_path / "targets.faa",
+            positive_fasta=tmp_path / "positive.faa",
+            negative_fasta=tmp_path / "negative.faa",
+            work_dir=tmp_path / "work",
+        )
+
+    assert set(result.all_records) == {
+        "A_positive_only",
+        "B_no_hits",
+        "C_negative_only",
+        "D_both",
+    }
+    assert set(result.positive_only_records) == {"A_positive_only"}
+    assert set(result.negative_unmatched_records) == {
+        "A_positive_only",
+        "B_no_hits",
+    }
+    assert set(result.no_hit_records) == {"B_no_hits"}
+    assert set(result.negative_hit_records) == {"C_negative_only", "D_both"}

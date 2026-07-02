@@ -67,13 +67,13 @@ def main(argv: Sequence[str] | None = None) -> None:
             annotate_records_with_gff_locus_tags,
             load_gff_locus_map,
         )
-        from analysis.blast_pipeline import run_blast_candidate_pipeline
+        from analysis.blast_pipeline import run_blast_classification_pipeline
         from analysis.input_summary import format_input_summary, summarize_input_fastas
         from analysis.scoring import get_sorted_records, score_records
         from config import load_config
         from core.cache import JsonCache
         from core.fasta_sources import DirectoryFastaResult, prepare_directory_fasta
-        from output.excel import write_records_to_excel
+        from output.excel import write_classification_workbook
 
         config_path = Path(args.config)
         config = load_config(config_path)
@@ -185,7 +185,7 @@ def main(argv: Sequence[str] | None = None) -> None:
 
         with logger.section("BLAST candidate search"):
             with logger.timer("BLAST candidate pipeline"):
-                records = run_blast_candidate_pipeline(
+                blast_classification = run_blast_classification_pipeline(
                     target_fasta=target_fasta,
                     positive_fasta=positive_fasta,
                     negative_fasta=negative_fasta,
@@ -194,8 +194,18 @@ def main(argv: Sequence[str] | None = None) -> None:
                     max_target_seqs=config.blast.max_target_seqs,
                     threads=config.blast.threads,
                 )
+                records = blast_classification.positive_only_records
 
+            logger.info(f"Total target proteins: {len(blast_classification.all_records)}")
             logger.info(f"BLAST positive-only candidates: {len(records)}")
+            logger.info(
+                "Negative-unmatched proteins: "
+                f"{len(blast_classification.negative_unmatched_records)}"
+            )
+            logger.info(f"No-hit proteins: {len(blast_classification.no_hit_records)}")
+            logger.info(
+                f"Negative-hit proteins: {len(blast_classification.negative_hit_records)}"
+            )
 
         cache = JsonCache(config.paths.cache_dir)
 
@@ -211,7 +221,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 with logger.timer("GFF old locus tag annotation"):
                     gff_mapping = load_gff_locus_map(gff_path)
                     updated_records = annotate_records_with_gff_locus_tags(
-                        records,
+                        blast_classification.all_records,
                         gff_mapping,
                     )
 
@@ -330,12 +340,18 @@ def main(argv: Sequence[str] | None = None) -> None:
 
         with logger.section("Excel output"):
             with logger.timer("Write Excel output"):
-                excel_path = write_records_to_excel(
-                    records=records,
+                excel_path = write_classification_workbook(
+                    candidates=records,
                     output_path=config.paths.output_excel,
+                    negative_unmatched=(
+                        blast_classification.negative_unmatched_records
+                    ),
+                    no_hit=blast_classification.no_hit_records,
+                    negative_hit=blast_classification.negative_hit_records,
                 )
 
             logger.info(f"Final annotated candidate count: {len(records)}")
+            logger.info("Excel sheets written: Candidates, Negative_unmatched, No_hit, Negative_hit")
             logger.info(f"Excel file written to: {excel_path}")
 
         logger.summary()
