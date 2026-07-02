@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,9 @@ EXCEL_COLUMNS: tuple[str, ...] = (
     "domain_accessions",
     "domain_descriptions",
     "domain_count",
+    "unique_domain_count",
+    "unique_domain_accessions",
+    "unique_domain_names",
     "sequence_length",
     "positive_hit_count",
     "negative_hit_count",
@@ -138,6 +142,11 @@ def _record_to_row(record: ProteinRecord) -> dict[str, Any]:
             domain.description for domain in record.domains if domain.description
         ),
         "domain_count": len(record.domains),
+        "unique_domain_count": _unique_domain_count(record),
+        "unique_domain_accessions": _unique_join(
+            domain.accession for domain in record.domains
+        ),
+        "unique_domain_names": _unique_domain_names(record),
         "sequence_length": record.length,
         "positive_hit_count": len(record.positive_hits),
         "negative_hit_count": len(record.negative_hits),
@@ -163,6 +172,31 @@ def _score_components(record: ProteinRecord) -> str:
     return "; ".join(
         f"{name}={value}" for name, value in record.score.components.items()
     )
+
+
+def _unique_domain_count(record: ProteinRecord) -> int:
+    """Return the number of unique domain accessions in first-seen order."""
+    return len(
+        {
+            str(domain.accession)
+            for domain in record.domains
+            if str(domain.accession)
+        }
+    )
+
+
+def _unique_domain_names(record: ProteinRecord) -> str:
+    """Return unique readable domain names while skipping internal numeric ids."""
+    return _unique_join(
+        domain.name
+        for domain in record.domains
+        if not _looks_like_internal_domain_name(domain.name)
+    )
+
+
+def _looks_like_internal_domain_name(value: object) -> bool:
+    """Return True for numeric/internal-looking domain names."""
+    return bool(re.fullmatch(r"\d{6,}", str(value).strip()))
 
 
 def _best_hit(hits: list[BlastHit]) -> BlastHit | None:

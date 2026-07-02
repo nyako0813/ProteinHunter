@@ -73,6 +73,8 @@ annotation:
 
   pfam_threads: 4
 
+  pfam_evalue_threshold: 1e-5
+
   alphafold_threads: 4
 
 

@@ -80,6 +80,29 @@ def test_valid_config_passes(tmp_path: Path) -> None:
     assert cfg.blast.evalue == 1e-5
     assert cfg.blast.threads >= 1
     assert cfg.paths.gff_file == Path("./data/input/genome.gff")
+    assert cfg.annotation.pfam_evalue_threshold == 1e-5
+
+
+def test_optional_pfam_evalue_threshold_can_be_set(tmp_path: Path) -> None:
+    """Pfam e-value threshold should be configurable when present."""
+    data = valid_config_data()
+    data["annotation"]["pfam_evalue_threshold"] = 1e-20
+    config_path = write_config(tmp_path, data)
+
+    cfg = load_config(config_path, initialize=False)
+
+    assert cfg.annotation.pfam_evalue_threshold == 1e-20
+
+
+def test_missing_pfam_evalue_threshold_uses_default(tmp_path: Path) -> None:
+    """Missing Pfam e-value threshold should remain backward compatible."""
+    data = valid_config_data()
+    data["annotation"].pop("pfam_evalue_threshold", None)
+    config_path = write_config(tmp_path, data)
+
+    cfg = load_config(config_path, initialize=False)
+
+    assert cfg.annotation.pfam_evalue_threshold == 1e-5
 
 
 def test_missing_optional_gff_does_not_fail_config_validation(tmp_path: Path) -> None:

@@ -83,6 +83,12 @@ def test_records_to_dataframe_column_order() -> None:
 
     assert list(dataframe.columns) == list(EXCEL_COLUMNS)
     assert list(dataframe.columns)[2] == "old_locus_tag"
+    domain_count_index = list(dataframe.columns).index("domain_count")
+    assert list(dataframe.columns)[domain_count_index + 1 : domain_count_index + 4] == [
+        "unique_domain_count",
+        "unique_domain_accessions",
+        "unique_domain_names",
+    ]
 
 
 def test_empty_records_returns_expected_columns() -> None:
@@ -135,6 +141,45 @@ def test_records_to_dataframe_includes_domain_fields() -> None:
     assert row["domain_accessions"] == "cd12345; PF00001; cd67890"
     assert row["domain_descriptions"] == "redox domain; second domain"
     assert row["domain_count"] == 3
+    assert row["unique_domain_count"] == 3
+    assert row["unique_domain_accessions"] == "cd12345; PF00001; cd67890"
+    assert row["unique_domain_names"] == "Thioredoxin_like; Domain; Second_domain"
+
+
+def test_records_to_dataframe_includes_unique_domain_summary() -> None:
+    """Duplicate domain accessions and names should be summarized once."""
+    record = ProteinRecord(
+        protein_id="protein_1",
+        domains=[
+            DomainHit(source="Pfam", accession="PF00001", name="ABC"),
+            DomainHit(source="Pfam", accession="PF00001", name="ABC"),
+            DomainHit(source="CDD", accession="cd12345", name="CDD domain"),
+        ],
+    )
+
+    dataframe = records_to_dataframe({"protein_1": record})
+    row = dataframe.iloc[0]
+
+    assert row["domain_count"] == 3
+    assert row["unique_domain_count"] == 2
+    assert row["unique_domain_accessions"] == "PF00001; cd12345"
+    assert row["unique_domain_names"] == "ABC; CDD domain"
+
+
+def test_records_to_dataframe_unique_names_skip_numeric_internal_ids() -> None:
+    """Unique domain names should not include numeric-only internal ids."""
+    record = ProteinRecord(
+        protein_id="protein_1",
+        domains=[
+            DomainHit(source="Pfam", accession="PF01637.24", name="000001295"),
+            DomainHit(source="Pfam", accession="PF03008.20", name="ABC_transporter"),
+        ],
+    )
+
+    dataframe = records_to_dataframe({"protein_1": record})
+    row = dataframe.iloc[0]
+
+    assert row["unique_domain_names"] == "ABC_transporter"
 
 
 def test_records_to_dataframe_empty_domains_are_blank() -> None:
@@ -149,6 +194,9 @@ def test_records_to_dataframe_empty_domains_are_blank() -> None:
     assert row["domain_accessions"] == ""
     assert row["domain_descriptions"] == ""
     assert row["domain_count"] == 0
+    assert row["unique_domain_count"] == 0
+    assert row["unique_domain_accessions"] == ""
+    assert row["unique_domain_names"] == ""
 
 
 def test_records_to_dataframe_selects_best_positive_hit() -> None:

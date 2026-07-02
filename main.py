@@ -247,6 +247,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                     records = annotate_records_pfam(
                         records,
                         cache=cache,
+                        evalue_threshold=config.annotation.pfam_evalue_threshold,
                     )
 
                 total_domain_hits = sum(

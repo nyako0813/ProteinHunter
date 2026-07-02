@@ -52,6 +52,7 @@ class AnnotationConfig:
     cdd_threads: int
     pfam_threads: int
     alphafold_threads: int
+    pfam_evalue_threshold: float = 1e-5
 
 
 @dataclass
@@ -150,6 +151,9 @@ def load_config(config_file: str | Path = CONFIG_FILE, initialize: bool = True) 
         cdd_threads=int(raw["annotation"].get("cdd_threads", 1)),
         pfam_threads=int(raw["annotation"].get("pfam_threads", 1)),
         alphafold_threads=int(raw["annotation"].get("alphafold_threads", 1)),
+        pfam_evalue_threshold=float(
+            raw["annotation"].get("pfam_evalue_threshold", 1e-5)
+        ),
     )
 
     cache = CacheConfig(**raw["cache"])
@@ -297,6 +301,19 @@ def _validate_annotation_section(raw: dict[object, object]) -> None:
             raise ConfigError(
                 f"config.yaml value 'annotation.{key}' must be true or false."
             )
+
+    threshold = annotation.get("pfam_evalue_threshold", 1e-5)
+    try:
+        threshold_number = float(threshold)
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(
+            "config.yaml value 'annotation.pfam_evalue_threshold' must be a positive number."
+        ) from exc
+
+    if threshold_number <= 0:
+        raise ConfigError(
+            "config.yaml value 'annotation.pfam_evalue_threshold' must be greater than 0."
+        )
 
 
 def _validate_cache_section(raw: dict[object, object]) -> None:

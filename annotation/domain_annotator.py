@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 from annotation.cdd import search_cdd_by_sequence
-from annotation.pfam import search_pfam_by_sequence
+from annotation.pfam import enrich_pfam_domains_with_metadata, search_pfam_by_sequence
 from core.cache import JsonCache
-from core.models import AnnotationResult, ProteinRecord
+from core.models import AnnotationResult, DomainHit, ProteinRecord
+
+
+DEFAULT_PFAM_EVALUE_THRESHOLD = 1e-5
 
 
 def annotate_cdd_domains(
@@ -60,6 +63,7 @@ def annotate_pfam_domains(
     record: ProteinRecord,
     cache: JsonCache | None = None,
     timeout: int = 60,
+    evalue_threshold: float = DEFAULT_PFAM_EVALUE_THRESHOLD,
 ) -> ProteinRecord:
     """Annotate one protein record with Pfam domain hits."""
     try:
@@ -80,6 +84,12 @@ def annotate_pfam_domains(
         )
         return record
 
+    domains = filter_pfam_domains(domains, evalue_threshold=evalue_threshold)
+    domains = enrich_pfam_domains_with_metadata(
+        domains,
+        cache=cache,
+        timeout=timeout,
+    )
     record.domains.extend(domains)
     record.annotations["pfam"] = AnnotationResult(
         protein_id=record.protein_id,
@@ -96,12 +106,36 @@ def annotate_records_pfam(
     records: dict[str, ProteinRecord],
     cache: JsonCache | None = None,
     timeout: int = 60,
+    evalue_threshold: float = DEFAULT_PFAM_EVALUE_THRESHOLD,
 ) -> dict[str, ProteinRecord]:
     """Annotate all records with Pfam domains and return the same dictionary."""
     for record in records.values():
-        annotate_pfam_domains(record, cache=cache, timeout=timeout)
+        annotate_pfam_domains(
+            record,
+            cache=cache,
+            timeout=timeout,
+            evalue_threshold=evalue_threshold,
+        )
 
     return records
+
+
+def filter_pfam_domains(
+    domains: list[DomainHit],
+    evalue_threshold: float = DEFAULT_PFAM_EVALUE_THRESHOLD,
+) -> list[DomainHit]:
+    """Keep Pfam hits at or below the e-value threshold.
+
+    Pfam hits with missing e-values are kept for now because some HMMER response
+    shapes may omit e-values even when the accession/name is useful.
+    """
+    filtered: list[DomainHit] = []
+
+    for domain in domains:
+        if domain.evalue is None or domain.evalue <= evalue_threshold:
+            filtered.append(domain)
+
+    return filtered
 
 
 __all__: tuple[str, ...] = (
@@ -109,4 +143,5 @@ __all__: tuple[str, ...] = (
     "annotate_pfam_domains",
     "annotate_records_cdd",
     "annotate_records_pfam",
+    "filter_pfam_domains",
 )
