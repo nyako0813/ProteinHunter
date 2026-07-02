@@ -1,0 +1,5 @@
+0a0800cb2db056bebbd93fff3e515bb1  ncbi_dataset/data/data_summary.tsv
+a64f049862e808ab09f33ceed546326e  ncbi_dataset/data/assembly_data_report.jsonl
+8fe21c0680b8ef6781ffdf37f9d2e9ef  ncbi_dataset/data/GCA_000025685.1/protein.faa
+8067785bef355ae7ffccea4690edb083  ncbi_dataset/data/GCF_000025685.1/protein.faa
+10fbd10959c1f5a7442a6ac616fadb48  ncbi_dataset/data/dataset_catalog.json

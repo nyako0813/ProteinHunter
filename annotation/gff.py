@@ -10,6 +10,7 @@ from core.models import ProteinRecord
 
 
 OLD_LOCUS_TAG_PATTERN = re.compile(r"\bMA_\d{4}\b")
+COMPACT_OLD_LOCUS_TAG_PATTERN = re.compile(r"\bMA(\d{4})\b")
 
 
 def parse_gff_attributes(attribute_text: str) -> dict[str, list[str]]:
@@ -25,7 +26,8 @@ def parse_gff_attributes(attribute_text: str) -> dict[str, list[str]]:
         else:
             key, value = part, ""
 
-        values = [unquote(item.strip()) for item in value.split(",") if item.strip()]
+        decoded_value = unquote(value.strip())
+        values = [item.strip() for item in decoded_value.split(",") if item.strip()]
         attributes.setdefault(key.strip(), []).extend(values)
 
     return attributes
@@ -35,8 +37,10 @@ def normalize_protein_id(value: str) -> str:
     """Normalize common GFF protein identifier forms for matching."""
     normalized = value.strip()
 
-    for prefix in ("Genbank:", "RefSeq:", "gb:", "ref:"):
-        if normalized.startswith(prefix):
+    normalized = normalized.split()[0] if normalized else ""
+
+    for prefix in ("GenBank:", "Genbank:", "RefSeq:", "NCBI_GP:", "gb:", "ref:"):
+        if normalized.lower().startswith(prefix.lower()):
             normalized = normalized[len(prefix) :]
 
     for prefix in ("cds-", "gene-"):
@@ -50,6 +54,8 @@ def load_gff_locus_map(path: str | Path) -> dict[str, str]:
     """Load a protein_id to old/locus tag mapping from a GFF file."""
     gff_path = Path(path).expanduser().resolve()
     mapping: dict[str, str] = {}
+    gene_old_locus_tags: dict[str, str] = {}
+    cds_attributes: list[dict[str, list[str]]] = []
 
     with gff_path.open(encoding="utf-8") as handle:
         for line in handle:
@@ -65,12 +71,23 @@ def load_gff_locus_map(path: str | Path) -> dict[str, str]:
                 continue
 
             attributes = parse_gff_attributes(columns[8])
-            locus_tag = _locus_tag_from_attributes(attributes)
-            if locus_tag is None:
+            if feature_type == "gene":
+                gene_id = _first_value(attributes, "ID")
+                old_locus_tag = _old_locus_tag_from_attributes(attributes)
+                if gene_id is not None and old_locus_tag is not None:
+                    gene_old_locus_tags[gene_id] = old_locus_tag
                 continue
 
-            for protein_id in _protein_ids_from_attributes(attributes):
-                mapping.setdefault(protein_id, locus_tag)
+            cds_attributes.append(attributes)
+
+    for attributes in cds_attributes:
+        locus_tag = _cds_locus_tag_from_attributes(attributes, gene_old_locus_tags)
+        if locus_tag is None:
+            continue
+
+        for protein_id in _protein_ids_from_attributes(attributes):
+            for key in _protein_id_lookup_keys(protein_id):
+                mapping.setdefault(key, locus_tag)
 
     return mapping
 
@@ -83,7 +100,10 @@ def annotate_records_with_gff_locus_tags(
     updated = 0
 
     for record in records.values():
-        locus_tag = mapping.get(normalize_protein_id(record.protein_id))
+        protein_id = normalize_protein_id(record.protein_id)
+        locus_tag = mapping.get(protein_id)
+        if locus_tag is None:
+            locus_tag = mapping.get(_without_version(protein_id))
         if locus_tag is None:
             continue
 
@@ -112,6 +132,28 @@ def _locus_tag_from_attributes(attributes: dict[str, list[str]]) -> str | None:
     return None
 
 
+def _cds_locus_tag_from_attributes(
+    attributes: dict[str, list[str]],
+    gene_old_locus_tags: dict[str, str],
+) -> str | None:
+    """Return the best old/locus tag for a CDS feature."""
+    direct_old_locus_tag = _old_locus_tag_from_attributes(attributes)
+    if direct_old_locus_tag is not None:
+        return direct_old_locus_tag
+
+    for parent_id in attributes.get("Parent", []):
+        parent_old_locus_tag = gene_old_locus_tags.get(parent_id)
+        if parent_old_locus_tag is not None:
+            return parent_old_locus_tag
+
+    return _locus_tag_from_attributes(attributes)
+
+
+def _old_locus_tag_from_attributes(attributes: dict[str, list[str]]) -> str | None:
+    """Return the preferred old_locus_tag from GFF attributes."""
+    return _first_ma_tag(attributes.get("old_locus_tag", []))
+
+
 def _protein_ids_from_attributes(attributes: dict[str, list[str]]) -> list[str]:
     """Return normalized protein IDs found in GFF attributes."""
     candidates: list[str] = []
@@ -136,12 +178,41 @@ def _protein_ids_from_attributes(attributes: dict[str, list[str]]) -> list[str]:
     return normalized_ids
 
 
+def _protein_id_lookup_keys(protein_id: str) -> list[str]:
+    """Return versioned and unversioned lookup keys for a protein ID."""
+    keys = [protein_id]
+    unversioned = _without_version(protein_id)
+    if unversioned != protein_id:
+        keys.append(unversioned)
+
+    return keys
+
+
+def _without_version(protein_id: str) -> str:
+    """Return a protein ID without a trailing numeric version."""
+    return re.sub(r"\.\d+$", "", protein_id)
+
+
+def _first_value(attributes: dict[str, list[str]], key: str) -> str | None:
+    """Return the first attribute value for a key."""
+    values = attributes.get(key, [])
+    if not values:
+        return None
+
+    return values[0]
+
+
 def _first_ma_tag(values: list[str]) -> str | None:
     """Return the first MA_#### tag found in a list of strings."""
     for value in values:
         match = OLD_LOCUS_TAG_PATTERN.search(value)
         if match:
             return match.group(0)
+
+    for value in values:
+        match = COMPACT_OLD_LOCUS_TAG_PATTERN.search(value)
+        if match:
+            return f"MA_{match.group(1)}"
 
     return None
 

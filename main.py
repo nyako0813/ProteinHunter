@@ -219,6 +219,20 @@ def main(argv: Sequence[str] | None = None) -> None:
                     f"GFF protein_id to locus tag mappings loaded: {len(gff_mapping)}"
                 )
                 logger.info(f"Candidate records updated from GFF: {updated_records}")
+                if gff_mapping and updated_records == 0:
+                    candidate_examples = list(records.keys())[:5]
+                    gff_key_examples = list(gff_mapping.keys())[:5]
+                    logger.warning(
+                        "GFF mappings were loaded but no candidate records matched."
+                    )
+                    logger.warning(
+                        "Example candidate IDs: "
+                        f"{', '.join(candidate_examples) if candidate_examples else 'none'}"
+                    )
+                    logger.warning(
+                        "Example GFF protein ID keys: "
+                        f"{', '.join(gff_key_examples) if gff_key_examples else 'none'}"
+                    )
 
         with logger.section("CDD domain annotation"):
             if config.annotation.enable_cdd:
