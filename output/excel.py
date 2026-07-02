@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
@@ -145,7 +146,7 @@ def _record_to_row(record: ProteinRecord) -> dict[str, Any]:
         "unique_domain_accessions": _unique_join(
             domain.accession for domain in record.domains
         ),
-        "unique_domain_names": _unique_join(domain.name for domain in record.domains),
+        "unique_domain_names": _unique_domain_names(record),
         "sequence_length": record.length,
         "positive_hit_count": len(record.positive_hits),
         "negative_hit_count": len(record.negative_hits),
@@ -182,6 +183,20 @@ def _unique_domain_count(record: ProteinRecord) -> int:
             if str(domain.accession)
         }
     )
+
+
+def _unique_domain_names(record: ProteinRecord) -> str:
+    """Return unique readable domain names while skipping internal numeric ids."""
+    return _unique_join(
+        domain.name
+        for domain in record.domains
+        if not _looks_like_internal_domain_name(domain.name)
+    )
+
+
+def _looks_like_internal_domain_name(value: object) -> bool:
+    """Return True for numeric/internal-looking domain names."""
+    return bool(re.fullmatch(r"\d{6,}", str(value).strip()))
 
 
 def _best_hit(hits: list[BlastHit]) -> BlastHit | None:

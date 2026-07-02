@@ -593,15 +593,12 @@ def _domain_hit_from_json_dict(data: dict[str, object]) -> DomainHit | None:
     return DomainHit(
         source="Pfam",
         accession=accession,
-        name=_find_json_string(
+        name=_find_json_name(
             data,
-            ("name", "target_name", "hmm_name", "model_name", "ali_name", "id"),
             accession,
         ),
-        description=_find_json_string(
+        description=_find_json_description(
             data,
-            ("description", "desc", "target_desc", "model_desc", "summary"),
-            "",
         ),
         evalue=_find_json_float(
             data,
@@ -664,17 +661,100 @@ def _find_json_string(
 ) -> str:
     """Return the first useful string from a JSON object."""
     for key in keys:
-        value = data.get(key)
+        value = _find_json_value(data, key)
         if isinstance(value, str) and value.strip():
             return value.strip()
 
     return default
 
 
+def _find_json_name(data: dict[str, object], accession: str) -> str:
+    """Return a human-readable Pfam name, avoiding numeric internal ids."""
+    name = _find_json_readable_string(
+        data,
+        (
+            "pfam_name",
+            "hmm_name",
+            "target_name",
+            "model_name",
+            "display_name",
+            "short_name",
+            "name",
+            "ali_name",
+            "clan",
+            "desc",
+            "description",
+            "target_desc",
+            "model_desc",
+        ),
+    )
+
+    if name:
+        return name
+
+    return accession
+
+
+def _find_json_description(data: dict[str, object]) -> str:
+    """Return a human-readable Pfam description when present."""
+    return _find_json_string(
+        data,
+        ("desc", "description", "target_desc", "model_desc", "summary"),
+        "",
+    )
+
+
+def _find_json_readable_string(
+    data: dict[str, object],
+    keys: Iterable[str],
+) -> str:
+    """Return the first non-internal-looking string from nested JSON fields."""
+    for key in keys:
+        value = _find_json_value(data, key)
+        if not isinstance(value, str):
+            continue
+
+        text = value.strip()
+        if text and not _looks_like_internal_name(text):
+            return text
+
+    return ""
+
+
+def _find_json_value(data: object, key: str) -> object:
+    """Find a key in nested dict/list JSON data."""
+    if isinstance(data, dict):
+        for data_key, value in data.items():
+            if str(data_key).lower() == key.lower():
+                return value
+
+        for value in data.values():
+            nested = _find_json_value(value, key)
+            if nested is not None:
+                return nested
+
+    if isinstance(data, list):
+        for item in data:
+            nested = _find_json_value(item, key)
+            if nested is not None:
+                return nested
+
+    return None
+
+
+def _looks_like_internal_name(value: str) -> bool:
+    """Return True for numeric/internal-looking HMMER identifiers."""
+    text = value.strip()
+    if not text:
+        return True
+
+    return bool(re.fullmatch(r"\d{6,}", text))
+
+
 def _find_json_float(data: dict[str, object], keys: Iterable[str]) -> float | None:
     """Return the first useful float from a JSON object."""
     for key in keys:
-        value = _optional_float(data.get(key))
+        value = _optional_float(_find_json_value(data, key))
         if value is not None:
             return value
 
@@ -684,7 +764,7 @@ def _find_json_float(data: dict[str, object], keys: Iterable[str]) -> float | No
 def _find_json_int(data: dict[str, object], keys: Iterable[str]) -> int | None:
     """Return the first useful int from a JSON object."""
     for key in keys:
-        value = _optional_int(data.get(key))
+        value = _optional_int(_find_json_value(data, key))
         if value is not None:
             return value
 

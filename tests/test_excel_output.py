@@ -166,6 +166,22 @@ def test_records_to_dataframe_includes_unique_domain_summary() -> None:
     assert row["unique_domain_names"] == "ABC; CDD domain"
 
 
+def test_records_to_dataframe_unique_names_skip_numeric_internal_ids() -> None:
+    """Unique domain names should not include numeric-only internal ids."""
+    record = ProteinRecord(
+        protein_id="protein_1",
+        domains=[
+            DomainHit(source="Pfam", accession="PF01637.24", name="000001295"),
+            DomainHit(source="Pfam", accession="PF03008.20", name="ABC_transporter"),
+        ],
+    )
+
+    dataframe = records_to_dataframe({"protein_1": record})
+    row = dataframe.iloc[0]
+
+    assert row["unique_domain_names"] == "ABC_transporter"
+
+
 def test_records_to_dataframe_empty_domains_are_blank() -> None:
     """Records without domains should use blank domain fields and count zero."""
     record = ProteinRecord(protein_id="protein_1", description="no domains")

@@ -285,6 +285,97 @@ def test_search_pfam_by_sequence_parses_hmmer_result_hits(
     ]
 
 
+def test_search_pfam_by_sequence_avoids_numeric_internal_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Numeric HMMER ids should not become Pfam domain names when desc exists."""
+    response = Mock()
+    response.status_code = 200
+    response.text = json.dumps(
+        dict(
+            status="SUCCESS",
+            result=dict(
+                hits=[
+                    dict(
+                        acc="PF01637.24",
+                        name="000001295",
+                        desc="Cytidylyltransferase-like domain",
+                        full_evalue="1e-12",
+                    )
+                ]
+            ),
+        )
+    )
+    response.raise_for_status.return_value = None
+    monkeypatch.setattr("annotation.pfam.requests.post", Mock(return_value=response))
+
+    hits = search_pfam_by_sequence("protein_1", "MSTNPKPQR")
+
+    assert hits[0].accession == "PF01637.24"
+    assert hits[0].name == "Cytidylyltransferase-like domain"
+    assert hits[0].description == "Cytidylyltransferase-like domain"
+
+
+def test_search_pfam_by_sequence_prefers_hmmer_name_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """target_name or hmm_name should be used before generic numeric names."""
+    response = Mock()
+    response.status_code = 200
+    response.text = json.dumps(
+        dict(
+            status="SUCCESS",
+            result=dict(
+                hits=[
+                    dict(
+                        acc="PF03008.20",
+                        name="000005196",
+                        hmm_name="ABC_transporter",
+                        description="ABC transporter family",
+                        full_evalue="1e-20",
+                    )
+                ]
+            ),
+        )
+    )
+    response.raise_for_status.return_value = None
+    monkeypatch.setattr("annotation.pfam.requests.post", Mock(return_value=response))
+
+    hits = search_pfam_by_sequence("protein_1", "MSTNPKPQR")
+
+    assert hits[0].name == "ABC_transporter"
+    assert hits[0].description == "ABC transporter family"
+
+
+def test_search_pfam_by_sequence_numeric_name_falls_back_to_accession(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If only a numeric/internal name exists, use accession instead."""
+    response = Mock()
+    response.status_code = 200
+    response.text = json.dumps(
+        dict(
+            status="SUCCESS",
+            result=dict(
+                hits=[
+                    dict(
+                        acc="PF13173.12",
+                        name="000000131",
+                        full_evalue="1e-9",
+                    )
+                ]
+            ),
+        )
+    )
+    response.raise_for_status.return_value = None
+    monkeypatch.setattr("annotation.pfam.requests.post", Mock(return_value=response))
+
+    hits = search_pfam_by_sequence("protein_1", "MSTNPKPQR")
+
+    assert hits[0].accession == "PF13173.12"
+    assert hits[0].name == "PF13173.12"
+
+
 def test_search_pfam_by_sequence_parses_hmmer_hit_domains(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
