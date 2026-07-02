@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import requests
@@ -12,6 +13,7 @@ from core.exceptions import UniProtAnnotationError
 
 Metadata = dict[str, str | int | float | bool | None]
 UNIPROT_SEARCH_URL = "https://rest.uniprot.org/uniprotkb/search"
+OLD_LOCUS_TAG_PATTERN = re.compile(r"\bMA_\d{4}\b")
 
 
 def search_uniprot_by_protein_id(
@@ -75,7 +77,7 @@ def extract_uniprot_old_locus_tag(metadata: dict[str, object]) -> str | None:
     if isinstance(old_locus_tag, str) and old_locus_tag.strip():
         return old_locus_tag
 
-    return None
+    return _find_old_locus_tag_in_text(metadata)
 
 
 def _parse_uniprot_payload(protein_id: str, payload: Any) -> Metadata:
@@ -96,11 +98,14 @@ def _parse_uniprot_payload(protein_id: str, payload: Any) -> Metadata:
             "organism": None,
             "reviewed": False,
             "old_locus_tag": None,
+            "old_locus_tag_note": _old_locus_tag_note(None),
         }
 
     first_result = results[0]
     if not isinstance(first_result, dict):
         raise TypeError("UniProt result must be a JSON object.")
+
+    old_locus_tag = _old_locus_tag(first_result)
 
     return {
         "query": protein_id,
@@ -109,21 +114,28 @@ def _parse_uniprot_payload(protein_id: str, payload: Any) -> Metadata:
         "protein_name": _protein_name(first_result),
         "organism": _organism_name(first_result),
         "reviewed": _is_reviewed(first_result),
-        "old_locus_tag": _old_locus_tag(first_result),
+        "old_locus_tag": old_locus_tag,
+        "old_locus_tag_note": _old_locus_tag_note(old_locus_tag),
     }
 
 
 def _coerce_metadata(value: dict[str, Any]) -> Metadata:
     """Return cached metadata with the expected value type."""
-    return {
+    old_locus_tag = _optional_string(value.get("old_locus_tag"))
+    metadata: Metadata = {
         "query": _optional_string(value.get("query")),
         "accession": _optional_string(value.get("accession")),
         "id": _optional_string(value.get("id")),
         "protein_name": _optional_string(value.get("protein_name")),
         "organism": _optional_string(value.get("organism")),
         "reviewed": bool(value.get("reviewed")),
-        "old_locus_tag": _optional_string(value.get("old_locus_tag")),
+        "old_locus_tag": old_locus_tag,
     }
+
+    inferred_tag = extract_uniprot_old_locus_tag(metadata)
+    metadata["old_locus_tag"] = inferred_tag
+    metadata["old_locus_tag_note"] = _old_locus_tag_note(inferred_tag)
+    return metadata
 
 
 def _optional_string(value: object) -> str | None:
@@ -174,26 +186,24 @@ def _is_reviewed(result: dict[str, Any]) -> bool:
 def _old_locus_tag(result: dict[str, Any]) -> str | None:
     """Extract the first ordered locus name, falling back to the first ORF name."""
     genes = result.get("genes")
-    if not isinstance(genes, list):
-        return None
+    if isinstance(genes, list):
+        for gene in genes:
+            if not isinstance(gene, dict):
+                continue
 
-    for gene in genes:
-        if not isinstance(gene, dict):
-            continue
+            tag = _first_gene_name(gene.get("orderedLocusNames"))
+            if tag is not None:
+                return tag
 
-        tag = _first_gene_name(gene.get("orderedLocusNames"))
-        if tag is not None:
-            return tag
+        for gene in genes:
+            if not isinstance(gene, dict):
+                continue
 
-    for gene in genes:
-        if not isinstance(gene, dict):
-            continue
+            tag = _first_gene_name(gene.get("orfNames"))
+            if tag is not None:
+                return tag
 
-        tag = _first_gene_name(gene.get("orfNames"))
-        if tag is not None:
-            return tag
-
-    return None
+    return _find_old_locus_tag_in_text(result)
 
 
 def _first_gene_name(value: object) -> str | None:
@@ -202,18 +212,66 @@ def _first_gene_name(value: object) -> str | None:
         return None
 
     for item in value:
+        if isinstance(item, str):
+            name = _old_locus_tag_from_string(item)
+            if name is not None:
+                return name
+
+            continue
+
         if not isinstance(item, dict):
             continue
 
         name = _optional_string(item.get("value"))
         if name is not None:
-            return name
+            tag = _old_locus_tag_from_string(name)
+            if tag is not None:
+                return tag
 
     return None
 
 
+def _find_old_locus_tag_in_text(value: object) -> str | None:
+    """Search nested UniProt metadata text for an MA_#### locus tag."""
+    if isinstance(value, str):
+        return _old_locus_tag_from_string(value)
+
+    if isinstance(value, dict):
+        for item in value.values():
+            tag = _find_old_locus_tag_in_text(item)
+            if tag is not None:
+                return tag
+
+    if isinstance(value, list):
+        for item in value:
+            tag = _find_old_locus_tag_in_text(item)
+            if tag is not None:
+                return tag
+
+    return None
+
+
+def _old_locus_tag_from_string(value: str) -> str | None:
+    """Return the first MA_#### tag in one text value."""
+    match = OLD_LOCUS_TAG_PATTERN.search(value)
+
+    if match:
+        return match.group(0)
+
+    return None
+
+
+def _old_locus_tag_note(old_locus_tag: str | None) -> str | None:
+    """Return a diagnostic note when UniProt did not provide an MA tag."""
+    if old_locus_tag is not None:
+        return None
+
+    return "UniProt metadata did not contain an MA_#### old locus tag."
+
+
 __all__: tuple[str, ...] = (
     "Metadata",
+    "OLD_LOCUS_TAG_PATTERN",
     "UNIPROT_SEARCH_URL",
     "extract_uniprot_accession",
     "extract_uniprot_old_locus_tag",

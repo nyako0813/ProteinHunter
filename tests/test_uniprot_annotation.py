@@ -9,6 +9,7 @@ import requests
 
 from annotation.uniprot import (
     extract_uniprot_accession,
+    extract_uniprot_old_locus_tag,
     search_uniprot_by_protein_id,
 )
 from core.cache import JsonCache
@@ -51,8 +52,10 @@ def test_uniprot_successful_response_parsing(monkeypatch: pytest.MonkeyPatch) ->
         "organism": "Test organism",
         "reviewed": True,
         "old_locus_tag": "MA_1234",
+        "old_locus_tag_note": None,
     }
     assert extract_uniprot_accession(metadata) == "P12345"
+    assert extract_uniprot_old_locus_tag(metadata) == "MA_1234"
     get_mock.assert_called_once()
     assert get_mock.call_args.kwargs["timeout"] == 5
 
@@ -71,7 +74,11 @@ def test_uniprot_no_results_returns_accession_none(
     assert metadata["query"] == "missing"
     assert metadata["accession"] is None
     assert metadata["old_locus_tag"] is None
+    assert metadata["old_locus_tag_note"] == (
+        "UniProt metadata did not contain an MA_#### old locus tag."
+    )
     assert extract_uniprot_accession(metadata) is None
+    assert extract_uniprot_old_locus_tag(metadata) is None
 
 
 def test_uniprot_cache_hit_avoids_request(
@@ -101,13 +108,64 @@ def test_uniprot_cache_hit_avoids_request(
     assert metadata["accession"] == "Q99999"
     assert metadata["id"] == "CACHED"
     assert metadata["old_locus_tag"] == "MA_7777"
+    assert metadata["old_locus_tag_note"] is None
     get_mock.assert_not_called()
 
 
-def test_uniprot_orf_name_is_used_when_ordered_locus_name_is_missing(
+def test_uniprot_cache_hit_infers_old_locus_tag_from_cached_text(
+    tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """UniProt ORF names should be a fallback for old_locus_tag."""
+    """Compact cached metadata should be searched for MA_#### text."""
+    cache = JsonCache(tmp_path)
+    cache.set(
+        "uniprot",
+        "protein_1",
+        {
+            "query": "protein_1",
+            "accession": "Q99999",
+            "id": "CACHED",
+            "protein_name": "Putative RNase MA_0101",
+            "organism": "Cached organism",
+            "reviewed": False,
+        },
+    )
+    get_mock = Mock()
+    monkeypatch.setattr("annotation.uniprot.requests.get", get_mock)
+
+    metadata = search_uniprot_by_protein_id("protein_1", cache=cache)
+
+    assert metadata["old_locus_tag"] == "MA_0101"
+    assert metadata["old_locus_tag_note"] is None
+    get_mock.assert_not_called()
+
+
+def test_uniprot_ordered_locus_name_as_string_populates_old_locus_tag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Plain string ordered locus names should populate old_locus_tag."""
+    response = Mock()
+    response.raise_for_status.return_value = None
+    response.json.return_value = {
+        "results": [
+            {
+                "primaryAccession": "P12345",
+                "genes": [{"orderedLocusNames": ["MA_2468"]}],
+            }
+        ]
+    }
+    monkeypatch.setattr("annotation.uniprot.requests.get", Mock(return_value=response))
+
+    metadata = search_uniprot_by_protein_id("protein_1")
+
+    assert metadata["old_locus_tag"] == "MA_2468"
+    assert extract_uniprot_old_locus_tag(metadata) == "MA_2468"
+
+
+def test_uniprot_orf_name_dict_is_used_when_ordered_locus_name_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """UniProt ORF names as dicts should be a fallback for old_locus_tag."""
     response = Mock()
     response.raise_for_status.return_value = None
     response.json.return_value = {
@@ -123,6 +181,83 @@ def test_uniprot_orf_name_is_used_when_ordered_locus_name_is_missing(
     metadata = search_uniprot_by_protein_id("protein_1")
 
     assert metadata["old_locus_tag"] == "MA_4321"
+
+
+def test_uniprot_orf_name_string_is_used_when_ordered_locus_name_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """UniProt ORF names as plain strings should also be supported."""
+    response = Mock()
+    response.raise_for_status.return_value = None
+    response.json.return_value = {
+        "results": [
+            {
+                "primaryAccession": "P12345",
+                "genes": [{"orfNames": ["MA_6789"]}],
+            }
+        ]
+    }
+    monkeypatch.setattr("annotation.uniprot.requests.get", Mock(return_value=response))
+
+    metadata = search_uniprot_by_protein_id("protein_1")
+
+    assert metadata["old_locus_tag"] == "MA_6789"
+
+
+def test_uniprot_metadata_text_fallback_finds_old_locus_tag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Any UniProt text field with MA_#### should be used as a final fallback."""
+    response = Mock()
+    response.raise_for_status.return_value = None
+    response.json.return_value = {
+        "results": [
+            {
+                "primaryAccession": "P12345",
+                "proteinDescription": {
+                    "recommendedName": {
+                        "fullName": {"value": "Putative hydrolase MA_5555"}
+                    }
+                },
+            }
+        ]
+    }
+    monkeypatch.setattr("annotation.uniprot.requests.get", Mock(return_value=response))
+
+    metadata = search_uniprot_by_protein_id("protein_1")
+
+    assert metadata["old_locus_tag"] == "MA_5555"
+    assert extract_uniprot_old_locus_tag(
+        {"protein_name": "Putative hydrolase MA_5555"}
+    ) == "MA_5555"
+
+
+def test_uniprot_old_locus_tag_stays_blank_when_no_ma_tag_exists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Metadata without MA_#### should keep old_locus_tag blank."""
+    response = Mock()
+    response.raise_for_status.return_value = None
+    response.json.return_value = {
+        "results": [
+            {
+                "primaryAccession": "P12345",
+                "proteinDescription": {
+                    "recommendedName": {"fullName": {"value": "ATPase"}}
+                },
+                "genes": [{"orderedLocusNames": ["not-an-ma-tag"]}],
+            }
+        ]
+    }
+    monkeypatch.setattr("annotation.uniprot.requests.get", Mock(return_value=response))
+
+    metadata = search_uniprot_by_protein_id("protein_1")
+
+    assert metadata["old_locus_tag"] is None
+    assert metadata["old_locus_tag_note"] == (
+        "UniProt metadata did not contain an MA_#### old locus tag."
+    )
+    assert extract_uniprot_old_locus_tag(metadata) is None
 
 
 def test_uniprot_request_error_raises_annotation_error(
