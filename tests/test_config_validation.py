@@ -78,6 +78,30 @@ def test_valid_config_passes(tmp_path: Path) -> None:
     assert cfg.project_name == "ProteinHunter"
     assert cfg.blast.evalue == 1e-5
     assert cfg.blast.threads >= 1
+    assert cfg.paths.gff_file == Path("./data/input/genome.gff")
+
+
+def test_missing_optional_gff_does_not_fail_config_validation(tmp_path: Path) -> None:
+    """Optional GFF path should not be required."""
+    data = valid_config_data()
+    del data["paths"]["gff"]
+    config_path = write_config(tmp_path, data)
+
+    cfg = load_config(config_path, initialize=False)
+
+    assert cfg.paths.gff_file is None
+
+
+def test_optional_gff_file_key_is_supported(tmp_path: Path) -> None:
+    """paths.gff_file should be accepted as the preferred optional GFF key."""
+    data = valid_config_data()
+    del data["paths"]["gff"]
+    data["paths"]["gff_file"] = "./data/input/custom.gff"
+    config_path = write_config(tmp_path, data)
+
+    cfg = load_config(config_path, initialize=False)
+
+    assert cfg.paths.gff_file == Path("./data/input/custom.gff")
 
 
 def test_missing_paths_key_raises_config_error(tmp_path: Path) -> None:

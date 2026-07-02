@@ -24,7 +24,8 @@ class PathConfig:
     target_fasta: Path
     positive_fasta: Path
     negative_fasta: Path
-    gff: Path
+    gff: Path | None
+    gff_file: Path | None
     output_excel: Path
     cache_dir: Path
     log_dir: Path
@@ -112,11 +113,16 @@ def load_config(config_file: str | Path = CONFIG_FILE, initialize: bool = True) 
 
     validate_config(raw)
 
+    optional_gff = _optional_path(raw["paths"].get("gff_file"))
+    if optional_gff is None:
+        optional_gff = _optional_path(raw["paths"].get("gff"))
+
     paths = PathConfig(
         target_fasta=Path(raw["paths"]["target_fasta"]),
         positive_fasta=Path(raw["paths"]["positive_fasta"]),
         negative_fasta=Path(raw["paths"]["negative_fasta"]),
-        gff=Path(raw["paths"].get("gff", "")),
+        gff=optional_gff,
+        gff_file=optional_gff,
         output_excel=Path(raw["paths"]["output_excel"]),
         cache_dir=Path(raw["paths"]["cache_dir"]),
         log_dir=Path(raw["paths"]["log_dir"]),
@@ -210,6 +216,13 @@ def _validate_paths_section(raw: dict[object, object]) -> None:
                 f"config.yaml value 'paths.{key}' must be a non-empty string."
             )
 
+    for key in ("gff", "gff_file"):
+        value = paths.get(key)
+        if value is not None and not isinstance(value, str):
+            raise ConfigError(
+                f"config.yaml value 'paths.{key}' must be a string when provided."
+            )
+
 
 def _validate_blast_section(raw: dict[object, object]) -> None:
     """Validate BLAST settings."""
@@ -285,6 +298,14 @@ def _is_positive_int(value: object) -> bool:
         return False
 
     return number > 0 and str(value).strip() == str(number)
+
+
+def _optional_path(value: object) -> Path | None:
+    """Return a Path for an optional non-empty string value."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+
+    return Path(value)
 
 
 # ==========================================================

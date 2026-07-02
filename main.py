@@ -53,6 +53,10 @@ def main(argv: Sequence[str] | None = None) -> None:
             annotate_records_alphafold,
             annotate_records_uniprot,
         )
+        from annotation.gff import (
+            annotate_records_with_gff_locus_tags,
+            load_gff_locus_map,
+        )
         from analysis.blast_pipeline import run_blast_candidate_pipeline
         from analysis.input_summary import format_input_summary, summarize_input_fastas
         from analysis.scoring import get_sorted_records, score_records
@@ -76,6 +80,10 @@ def main(argv: Sequence[str] | None = None) -> None:
             logger.info(f"Excel output: {config.paths.output_excel}")
             logger.info(f"BLAST work directory: {blast_work_dir}")
             logger.info(f"Cache directory: {config.paths.cache_dir}")
+            if config.paths.gff_file is not None:
+                logger.info(f"Optional GFF file: {config.paths.gff_file}")
+            else:
+                logger.info("Optional GFF file: not configured")
 
             input_summary = summarize_input_fastas(
                 target_fasta=config.paths.target_fasta,
@@ -109,6 +117,27 @@ def main(argv: Sequence[str] | None = None) -> None:
             logger.info(f"BLAST positive-only candidates: {len(records)}")
 
         cache = JsonCache(config.paths.cache_dir)
+
+        with logger.section("GFF old locus tag annotation"):
+            gff_path = config.paths.gff_file
+            if gff_path is None:
+                logger.info("No optional GFF file is configured; skipping GFF annotation.")
+            elif not gff_path.exists():
+                logger.info(f"Optional GFF file was not found: {gff_path}")
+                logger.info("Skipping GFF annotation; the pipeline will continue.")
+            else:
+                logger.info(f"GFF annotation is enabled: {gff_path}")
+                with logger.timer("GFF old locus tag annotation"):
+                    gff_mapping = load_gff_locus_map(gff_path)
+                    updated_records = annotate_records_with_gff_locus_tags(
+                        records,
+                        gff_mapping,
+                    )
+
+                logger.info(
+                    f"GFF protein_id to locus tag mappings loaded: {len(gff_mapping)}"
+                )
+                logger.info(f"Candidate records updated from GFF: {updated_records}")
 
         with logger.section("CDD domain annotation"):
             if config.annotation.enable_cdd:

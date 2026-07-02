@@ -38,7 +38,7 @@ def annotate_uniprot(
         accession = extract_uniprot_accession(metadata)
         old_locus_tag = extract_uniprot_old_locus_tag(metadata)
         record.uniprot_accession = accession
-        if old_locus_tag is not None:
+        if old_locus_tag is not None and not record.old_locus_tag:
             record.old_locus_tag = old_locus_tag
         record.annotations["uniprot"] = AnnotationResult(
             protein_id=record.protein_id,

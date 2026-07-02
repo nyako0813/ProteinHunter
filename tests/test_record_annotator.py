@@ -76,6 +76,49 @@ def test_uniprot_annotation_keeps_existing_old_locus_tag_when_missing(
     assert record.old_locus_tag == "MA_9999"
 
 
+def test_uniprot_annotation_does_not_overwrite_gff_old_locus_tag_when_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A GFF-derived tag should stay when UniProt has no MA locus tag."""
+    metadata = {
+        "query": "protein_1",
+        "accession": "P12345",
+        "protein_name": "ATPase",
+        "old_locus_tag": None,
+    }
+    monkeypatch.setattr(
+        "annotation.record_annotator.search_uniprot_by_protein_id",
+        Mock(return_value=metadata),
+    )
+    record = make_record()
+    record.old_locus_tag = "MA_0050"
+
+    annotate_uniprot(record)
+
+    assert record.old_locus_tag == "MA_0050"
+
+
+def test_uniprot_annotation_does_not_overwrite_existing_gff_old_locus_tag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A GFF-derived tag should stay even if UniProt reports another tag."""
+    metadata = {
+        "query": "protein_1",
+        "accession": "P12345",
+        "old_locus_tag": "MA_9999",
+    }
+    monkeypatch.setattr(
+        "annotation.record_annotator.search_uniprot_by_protein_id",
+        Mock(return_value=metadata),
+    )
+    record = make_record()
+    record.old_locus_tag = "MA_0050"
+
+    annotate_uniprot(record)
+
+    assert record.old_locus_tag == "MA_0050"
+
+
 def test_successful_alphafold_url_assignment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
