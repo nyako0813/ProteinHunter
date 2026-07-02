@@ -29,6 +29,12 @@ def test_uniprot_successful_response_parsing(monkeypatch: pytest.MonkeyPatch) ->
                     "recommendedName": {"fullName": {"value": "Test protein"}}
                 },
                 "organism": {"scientificName": "Test organism"},
+                "genes": [
+                    {
+                        "orderedLocusNames": [{"value": "MA_1234"}],
+                        "orfNames": [{"value": "MA_9999"}],
+                    }
+                ],
             }
         ]
     }
@@ -44,6 +50,7 @@ def test_uniprot_successful_response_parsing(monkeypatch: pytest.MonkeyPatch) ->
         "protein_name": "Test protein",
         "organism": "Test organism",
         "reviewed": True,
+        "old_locus_tag": "MA_1234",
     }
     assert extract_uniprot_accession(metadata) == "P12345"
     get_mock.assert_called_once()
@@ -63,6 +70,7 @@ def test_uniprot_no_results_returns_accession_none(
 
     assert metadata["query"] == "missing"
     assert metadata["accession"] is None
+    assert metadata["old_locus_tag"] is None
     assert extract_uniprot_accession(metadata) is None
 
 
@@ -82,6 +90,7 @@ def test_uniprot_cache_hit_avoids_request(
             "protein_name": "Cached protein",
             "organism": "Cached organism",
             "reviewed": False,
+            "old_locus_tag": "MA_7777",
         },
     )
     get_mock = Mock()
@@ -91,7 +100,29 @@ def test_uniprot_cache_hit_avoids_request(
 
     assert metadata["accession"] == "Q99999"
     assert metadata["id"] == "CACHED"
+    assert metadata["old_locus_tag"] == "MA_7777"
     get_mock.assert_not_called()
+
+
+def test_uniprot_orf_name_is_used_when_ordered_locus_name_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """UniProt ORF names should be a fallback for old_locus_tag."""
+    response = Mock()
+    response.raise_for_status.return_value = None
+    response.json.return_value = {
+        "results": [
+            {
+                "primaryAccession": "P12345",
+                "genes": [{"orfNames": [{"value": "MA_4321"}]}],
+            }
+        ]
+    }
+    monkeypatch.setattr("annotation.uniprot.requests.get", Mock(return_value=response))
+
+    metadata = search_uniprot_by_protein_id("protein_1")
+
+    assert metadata["old_locus_tag"] == "MA_4321"
 
 
 def test_uniprot_request_error_raises_annotation_error(

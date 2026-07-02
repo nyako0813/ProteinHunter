@@ -36,6 +36,7 @@ def make_record() -> ProteinRecord:
     record = ProteinRecord(
         protein_id="protein_1",
         description="candidate protein",
+        old_locus_tag="MA_1234",
         sequence="MSTNPKPQR",
         positive_hits=[
             make_hit("positive_low", 20.0, 1e-50),
@@ -81,6 +82,7 @@ def test_records_to_dataframe_column_order() -> None:
     dataframe = records_to_dataframe({"protein_1": make_record()})
 
     assert list(dataframe.columns) == list(EXCEL_COLUMNS)
+    assert list(dataframe.columns)[2] == "old_locus_tag"
 
 
 def test_empty_records_returns_expected_columns() -> None:
@@ -111,6 +113,16 @@ def test_records_to_dataframe_without_score_uses_empty_score_fields() -> None:
     assert row["total_score"] == 0
     assert row["score_components"] == ""
     assert row["score_reasons"] == ""
+    assert row["old_locus_tag"] == ""
+
+
+def test_records_to_dataframe_includes_old_locus_tag() -> None:
+    """old_locus_tag should be exported immediately after description."""
+    dataframe = records_to_dataframe({"protein_1": make_record()})
+    row = dataframe.iloc[0]
+
+    assert row["old_locus_tag"] == "MA_1234"
+    assert list(dataframe.columns)[1:3] == ["description", "old_locus_tag"]
 
 
 def test_records_to_dataframe_includes_domain_fields() -> None:

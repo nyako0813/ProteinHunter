@@ -34,6 +34,7 @@ def test_successful_uniprot_accession_assignment(
         "protein_name": "Test protein",
         "organism": "Test organism",
         "reviewed": True,
+        "old_locus_tag": "MA_1234",
     }
     monkeypatch.setattr(
         "annotation.record_annotator.search_uniprot_by_protein_id",
@@ -49,8 +50,30 @@ def test_successful_uniprot_accession_assignment(
 
     assert result is record
     assert record.uniprot_accession == "P12345"
+    assert record.old_locus_tag == "MA_1234"
     assert record.annotations["uniprot"].success is True
     assert record.annotations["uniprot"].metadata == metadata
+
+
+def test_uniprot_annotation_keeps_existing_old_locus_tag_when_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Missing UniProt old_locus_tag should not erase a FASTA-derived tag."""
+    metadata = {
+        "query": "protein_1",
+        "accession": "P12345",
+        "old_locus_tag": None,
+    }
+    monkeypatch.setattr(
+        "annotation.record_annotator.search_uniprot_by_protein_id",
+        Mock(return_value=metadata),
+    )
+    record = make_record()
+    record.old_locus_tag = "MA_9999"
+
+    annotate_uniprot(record)
+
+    assert record.old_locus_tag == "MA_9999"
 
 
 def test_successful_alphafold_url_assignment(

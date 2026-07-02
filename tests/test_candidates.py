@@ -74,21 +74,33 @@ def test_build_candidate_records_attaches_available_data() -> None:
 
     records = build_candidate_records(
         protein_ids=["protein_1", "protein_2"],
-        descriptions={"protein_1": "Known-like candidate"},
+        descriptions={"protein_1": "Known-like candidate MA_1234"},
         sequences={"protein_1": "MSTN", "protein_2": "AAAA"},
         positive_hits=[positive, unused],
         negative_hits=[negative],
     )
 
     assert set(records) == {"protein_1", "protein_2"}
-    assert records["protein_1"].description == "Known-like candidate"
+    assert records["protein_1"].description == "Known-like candidate MA_1234"
+    assert records["protein_1"].old_locus_tag == "MA_1234"
     assert records["protein_1"].sequence == "MSTN"
     assert records["protein_1"].positive_hits == [positive]
     assert records["protein_1"].negative_hits == [negative]
     assert records["protein_2"].description == ""
+    assert records["protein_2"].old_locus_tag is None
     assert records["protein_2"].sequence == "AAAA"
     assert records["protein_2"].positive_hits == []
     assert records["protein_2"].negative_hits == []
+
+
+def test_build_candidate_records_leaves_old_locus_tag_blank_when_missing() -> None:
+    """Descriptions without MA-style tags should not set old_locus_tag."""
+    records = build_candidate_records(
+        protein_ids=["protein_1"],
+        descriptions={"protein_1": "candidate without old tag"},
+    )
+
+    assert records["protein_1"].old_locus_tag is None
 
 
 def test_filter_positive_without_negative_returns_positive_only_records() -> None:
