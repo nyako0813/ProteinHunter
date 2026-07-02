@@ -415,6 +415,46 @@ def test_enrich_pfam_domains_uses_metadata_short_name(
     assert cache.has("pfam_metadata", "PF01637") is True
 
 
+def test_enrich_pfam_domains_reads_actual_interpro_metadata_shape(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """InterPro metadata.name dict and description list should be parsed."""
+    domain = DomainHit(source="Pfam", accession="PF01637.24", name="PF01637.24")
+    response = Mock()
+    response.status_code = 200
+    response.text = json.dumps(
+        dict(
+            metadata=dict(
+                accession="PF01637",
+                entry_id=None,
+                type="domain",
+                name=dict(
+                    name="ATPase domain predominantly from Archaea",
+                    short="ATPase_2",
+                ),
+                description=[
+                    dict(
+                        text=(
+                            "<p>This family contain a conserved P-loop motif "
+                            "that is involved in binding ATP.</p>"
+                        ),
+                        llm=False,
+                    )
+                ],
+            )
+        )
+    )
+    response.raise_for_status.return_value = None
+    monkeypatch.setattr("annotation.pfam.requests.get", Mock(return_value=response))
+
+    enrich_pfam_domains_with_metadata([domain])
+
+    assert domain.name == "ATPase_2"
+    assert domain.description == (
+        "This family contain a conserved P-loop motif that is involved in binding ATP."
+    )
+
+
 def test_enrich_pfam_domains_uses_metadata_name_without_short_name(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -432,6 +472,71 @@ def test_enrich_pfam_domains_uses_metadata_name_without_short_name(
 
     assert domain.name == "DUF2345"
     assert domain.description == "Domain of unknown function"
+
+
+def test_enrich_pfam_domains_uses_entry_id_name_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """metadata.entry_id should be used when short_name/name are missing."""
+    domain = DomainHit(source="Pfam", accession="PF03008.20", name="PF03008.20")
+    response = Mock()
+    response.status_code = 200
+    response.text = json.dumps(dict(metadata=dict(entry_id="DUF1643")))
+    response.raise_for_status.return_value = None
+    monkeypatch.setattr("annotation.pfam.requests.get", Mock(return_value=response))
+
+    enrich_pfam_domains_with_metadata([domain])
+
+    assert domain.name == "DUF1643"
+
+
+def test_enrich_pfam_domains_reads_nested_abstract_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Nested abstract dictionaries should become readable description text."""
+    domain = DomainHit(source="Pfam", accession="PF13173.12", name="PF13173.12")
+    response = Mock()
+    response.status_code = 200
+    response.text = json.dumps(
+        dict(
+            metadata=dict(
+                accession="PF13173",
+                abstract=dict(text="<p>Protein kinase-like domain.</p>"),
+            )
+        )
+    )
+    response.raise_for_status.return_value = None
+    monkeypatch.setattr("annotation.pfam.requests.get", Mock(return_value=response))
+
+    enrich_pfam_domains_with_metadata([domain])
+
+    assert domain.name == "PF13173"
+    assert domain.description == "Protein kinase-like domain."
+
+
+def test_enrich_pfam_domains_refetches_accession_only_cached_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Old accession-only cached metadata should be refreshed."""
+    cache = JsonCache(tmp_path)
+    cache.set("pfam_metadata", "PF01637", {"name": "PF01637", "description": ""})
+    domain = DomainHit(source="Pfam", accession="PF01637.24", name="PF01637.24")
+    response = Mock()
+    response.status_code = 200
+    response.text = json.dumps(dict(metadata=dict(name=dict(short="ATPase_2"))))
+    response.raise_for_status.return_value = None
+    get_mock = Mock(return_value=response)
+    monkeypatch.setattr("annotation.pfam.requests.get", get_mock)
+
+    enrich_pfam_domains_with_metadata([domain], cache=cache)
+
+    assert get_mock.call_count == 1
+    assert domain.name == "ATPase_2"
+    assert cache.get("pfam_metadata", "PF01637") == {
+        "name": "ATPase_2",
+        "description": "",
+    }
 
 
 def test_enrich_pfam_domains_failure_is_non_fatal(

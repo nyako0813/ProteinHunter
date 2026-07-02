@@ -6,6 +6,7 @@ import csv
 import json
 import re
 import time
+from html import unescape
 from collections.abc import Iterable
 from io import StringIO
 
@@ -310,10 +311,12 @@ def _get_pfam_metadata(
     if cache is not None and cache.has(PFAM_METADATA_NAMESPACE, accession):
         cached = cache.get(PFAM_METADATA_NAMESPACE, accession)
         if isinstance(cached, dict):
-            return {
+            metadata = {
                 "name": _string_or_default(cached.get("name"), ""),
                 "description": _string_or_default(cached.get("description"), ""),
             }
+            if _cached_pfam_metadata_is_useful(metadata, accession):
+                return metadata
 
     try:
         response = requests.get(
@@ -352,17 +355,10 @@ def _parse_pfam_metadata_response(text: str, accession: str) -> dict[str, str]:
 
     for candidate in candidates:
         if not name:
-            name = _find_json_readable_string(
-                candidate,
-                ("short_name", "name", "accession"),
-            )
+            name = _metadata_name(candidate)
 
         if not description:
-            description = _find_json_string(
-                candidate,
-                ("description", "abstract"),
-                "",
-            )
+            description = _metadata_description(candidate)
 
     if not name:
         name = accession
@@ -371,6 +367,76 @@ def _parse_pfam_metadata_response(text: str, accession: str) -> dict[str, str]:
         "name": name,
         "description": description,
     }
+
+
+def _cached_pfam_metadata_is_useful(metadata: dict[str, str], accession: str) -> bool:
+    """Return True when cached metadata has more than an accession fallback."""
+    name = metadata.get("name", "")
+    description = metadata.get("description", "")
+    return bool(description) or bool(name and name != accession)
+
+
+def _metadata_name(data: dict[str, object]) -> str:
+    """Return short_name > name > entry_id > accession from InterPro metadata."""
+    nested_name = data.get("name")
+    if isinstance(nested_name, dict):
+        nested_short = _text_from_metadata_value(nested_name.get("short"))
+        if nested_short and not _looks_like_internal_name(nested_short):
+            return nested_short
+
+        nested_full = _text_from_metadata_value(nested_name.get("name"))
+        if nested_full and not _looks_like_internal_name(nested_full):
+            return nested_full
+
+    for key in ("short_name", "name", "entry_id", "accession"):
+        value = _text_from_metadata_value(data.get(key))
+        if value and not _looks_like_internal_name(value):
+            return value
+
+    return ""
+
+
+def _metadata_description(data: dict[str, object]) -> str:
+    """Return description > abstract from InterPro metadata."""
+    for key in ("description", "abstract"):
+        value = _text_from_metadata_value(data.get(key))
+        if value:
+            return value
+
+    return ""
+
+
+def _text_from_metadata_value(value: object) -> str:
+    """Convert InterPro metadata strings/lists/dicts into readable text."""
+    if value is None or isinstance(value, bool):
+        return ""
+
+    if isinstance(value, str):
+        return _clean_metadata_text(value)
+
+    if isinstance(value, (int, float)):
+        return str(value)
+
+    if isinstance(value, list):
+        parts = [
+            _text_from_metadata_value(item)
+            for item in value
+        ]
+        return " ".join(part for part in parts if part)
+
+    if isinstance(value, dict):
+        for key in ("short", "name", "text", "description", "abstract", "entry_id", "accession"):
+            text = _text_from_metadata_value(value.get(key))
+            if text:
+                return text
+
+    return ""
+
+
+def _clean_metadata_text(text: str) -> str:
+    """Strip simple HTML tags and collapse whitespace from metadata text."""
+    without_tags = re.sub(r"<[^>]+>", " ", unescape(text))
+    return " ".join(without_tags.split())
 
 
 def _should_replace_domain_name(name: str, accession: str) -> bool:
