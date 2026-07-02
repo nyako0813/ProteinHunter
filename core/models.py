@@ -92,6 +92,7 @@ class ProteinRecord:
     score: CandidateScore | None = None
     alphafold_url: str | None = None
     uniprot_accession: str | None = None
+    old_locus_tag: str | None = None
     notes: list[str] = field(default_factory=list)
 
     @property

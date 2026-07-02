@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+import re
+
 from core.models import BlastHit, ProteinRecord
+
+
+OLD_LOCUS_TAG_PATTERN = re.compile(r"\bMA_\d{4}\b")
 
 
 def group_hits_by_query(hits: list[BlastHit]) -> dict[str, list[BlastHit]]:
@@ -39,15 +44,27 @@ def build_candidate_records(
     records: dict[str, ProteinRecord] = {}
 
     for protein_id in protein_ids:
+        description = descriptions.get(protein_id, "")
         records[protein_id] = ProteinRecord(
             protein_id=protein_id,
-            description=descriptions.get(protein_id, ""),
+            description=description,
             sequence=sequences.get(protein_id, ""),
             positive_hits=list(grouped_positive.get(protein_id, [])),
             negative_hits=list(grouped_negative.get(protein_id, [])),
+            old_locus_tag=extract_old_locus_tag(description),
         )
 
     return records
+
+
+def extract_old_locus_tag(description: str) -> str | None:
+    """Return the first old/locus tag found in a FASTA description."""
+    match = OLD_LOCUS_TAG_PATTERN.search(description)
+
+    if match:
+        return match.group(0)
+
+    return None
 
 
 def filter_positive_without_negative(
@@ -80,6 +97,7 @@ def summarize_blast_status(record: ProteinRecord) -> str:
 
 __all__: tuple[str, ...] = (
     "build_candidate_records",
+    "extract_old_locus_tag",
     "filter_positive_without_negative",
     "get_best_hit",
     "group_hits_by_query",

@@ -29,7 +29,7 @@ def search_uniprot_by_protein_id(
         "query": protein_id,
         "format": "json",
         "size": "1",
-        "fields": "accession,id,protein_name,organism_name,reviewed",
+        "fields": "accession,id,protein_name,organism_name,reviewed,gene_names",
     }
 
     try:
@@ -68,6 +68,16 @@ def extract_uniprot_accession(metadata: dict[str, object]) -> str | None:
     return None
 
 
+def extract_uniprot_old_locus_tag(metadata: dict[str, object]) -> str | None:
+    """Return a UniProt old/locus tag string when present and usable."""
+    old_locus_tag = metadata.get("old_locus_tag")
+
+    if isinstance(old_locus_tag, str) and old_locus_tag.strip():
+        return old_locus_tag
+
+    return None
+
+
 def _parse_uniprot_payload(protein_id: str, payload: Any) -> Metadata:
     """Convert a UniProt search response into compact metadata."""
     if not isinstance(payload, dict):
@@ -85,6 +95,7 @@ def _parse_uniprot_payload(protein_id: str, payload: Any) -> Metadata:
             "protein_name": None,
             "organism": None,
             "reviewed": False,
+            "old_locus_tag": None,
         }
 
     first_result = results[0]
@@ -98,6 +109,7 @@ def _parse_uniprot_payload(protein_id: str, payload: Any) -> Metadata:
         "protein_name": _protein_name(first_result),
         "organism": _organism_name(first_result),
         "reviewed": _is_reviewed(first_result),
+        "old_locus_tag": _old_locus_tag(first_result),
     }
 
 
@@ -110,6 +122,7 @@ def _coerce_metadata(value: dict[str, Any]) -> Metadata:
         "protein_name": _optional_string(value.get("protein_name")),
         "organism": _optional_string(value.get("organism")),
         "reviewed": bool(value.get("reviewed")),
+        "old_locus_tag": _optional_string(value.get("old_locus_tag")),
     }
 
 
@@ -158,9 +171,51 @@ def _is_reviewed(result: dict[str, Any]) -> bool:
     return bool(reviewed)
 
 
+def _old_locus_tag(result: dict[str, Any]) -> str | None:
+    """Extract the first ordered locus name, falling back to the first ORF name."""
+    genes = result.get("genes")
+    if not isinstance(genes, list):
+        return None
+
+    for gene in genes:
+        if not isinstance(gene, dict):
+            continue
+
+        tag = _first_gene_name(gene.get("orderedLocusNames"))
+        if tag is not None:
+            return tag
+
+    for gene in genes:
+        if not isinstance(gene, dict):
+            continue
+
+        tag = _first_gene_name(gene.get("orfNames"))
+        if tag is not None:
+            return tag
+
+    return None
+
+
+def _first_gene_name(value: object) -> str | None:
+    """Return the first gene name from UniProt gene-name structures."""
+    if not isinstance(value, list):
+        return None
+
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+
+        name = _optional_string(item.get("value"))
+        if name is not None:
+            return name
+
+    return None
+
+
 __all__: tuple[str, ...] = (
     "Metadata",
     "UNIPROT_SEARCH_URL",
     "extract_uniprot_accession",
+    "extract_uniprot_old_locus_tag",
     "search_uniprot_by_protein_id",
 )

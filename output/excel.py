@@ -18,6 +18,7 @@ from core.models import BlastHit, ProteinRecord
 EXCEL_COLUMNS: tuple[str, ...] = (
     "protein_id",
     "description",
+    "old_locus_tag",
     "total_score",
     "score_components",
     "score_reasons",
@@ -126,6 +127,7 @@ def _record_to_row(record: ProteinRecord) -> dict[str, Any]:
     return {
         "protein_id": record.protein_id,
         "description": record.description,
+        "old_locus_tag": record.old_locus_tag or "",
         "total_score": record.score.total_score if record.score else 0,
         "score_components": _score_components(record),
         "score_reasons": "; ".join(record.score.reasons) if record.score else "",

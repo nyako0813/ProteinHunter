@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import json
 import re
 from io import StringIO
 
@@ -60,17 +61,68 @@ def search_pfam_by_sequence(
 
     try:
         response = requests.post(PFAM_SEARCH_URL, data=data, timeout=timeout)
-        response.raise_for_status()
+    except requests.Timeout as exc:
+        raise PfamAnnotationError(
+            _format_pfam_error(
+                protein_id=protein_id,
+                phase="request",
+                detail=f"The request timed out after {timeout} seconds.",
+                timeout=timeout,
+            )
+        ) from exc
     except requests.RequestException as exc:
         raise PfamAnnotationError(
-            f"Pfam search failed for '{protein_id}'. Please check the network connection."
+            _format_pfam_error(
+                protein_id=protein_id,
+                phase="request",
+                detail=f"The request could not be completed: {exc}",
+                timeout=timeout,
+            )
+        ) from exc
+
+    status_code = _response_status_code(response)
+    response_text = _response_text(response)
+
+    if status_code is not None and status_code >= 400:
+        raise PfamAnnotationError(
+            _format_pfam_error(
+                protein_id=protein_id,
+                phase="request",
+                detail="Pfam returned an HTTP error response.",
+                status_code=status_code,
+                response_text=response_text,
+                timeout=timeout,
+            )
+        )
+
+    try:
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        error_response = getattr(exc, "response", None) or response
+        raise PfamAnnotationError(
+            _format_pfam_error(
+                protein_id=protein_id,
+                phase="request",
+                detail=f"Pfam request failed: {exc}",
+                status_code=_response_status_code(error_response),
+                response_text=_response_text(error_response),
+                timeout=timeout,
+            )
         ) from exc
 
     try:
-        hits = parse_pfam_response(response.text)
+        _validate_response_before_parse(response_text)
+        hits = parse_pfam_response(response_text)
     except Exception as exc:
         raise PfamAnnotationError(
-            f"Pfam returned an unexpected response for '{protein_id}'."
+            _format_pfam_error(
+                protein_id=protein_id,
+                phase="parse",
+                detail=f"Pfam response could not be parsed: {exc}",
+                status_code=status_code,
+                response_text=response_text,
+                timeout=timeout,
+            )
         ) from exc
 
     if cache is not None:
@@ -105,6 +157,81 @@ def domain_hit_from_dict(data: dict[str, object]) -> DomainHit:
         start=_optional_int(data.get("start")),
         end=_optional_int(data.get("end")),
     )
+
+
+def _format_pfam_error(
+    protein_id: str,
+    phase: str,
+    detail: str,
+    status_code: int | None = None,
+    response_text: str | None = None,
+    timeout: int | None = None,
+) -> str:
+    """Build a beginner-readable Pfam diagnostic message."""
+    parts = [
+        f"Pfam search failed for '{protein_id}' during the {phase} phase.",
+        f"Endpoint: {PFAM_SEARCH_URL}",
+    ]
+
+    if status_code is not None:
+        parts.append(f"HTTP status: {status_code}")
+
+    if timeout is not None:
+        parts.append(f"Timeout setting: {timeout} seconds")
+
+    if response_text is not None:
+        parts.append(f"Response preview: {_response_preview(response_text)}")
+
+    parts.append(f"Details: {detail}")
+    return " ".join(parts)
+
+
+def _response_status_code(response: object) -> int | None:
+    """Return an HTTP status code when it is available."""
+    status_code = getattr(response, "status_code", None)
+
+    if isinstance(status_code, int):
+        return status_code
+
+    return None
+
+
+def _response_text(response: object) -> str:
+    """Return response text as a safe string."""
+    text = getattr(response, "text", "")
+
+    if isinstance(text, str):
+        return text
+
+    return str(text)
+
+
+def _response_preview(text: str, limit: int = 300) -> str:
+    """Return a short one-line response preview."""
+    preview = " ".join(text.split())
+
+    if len(preview) > limit:
+        return preview[:limit] + "..."
+
+    return preview
+
+
+def _validate_response_before_parse(text: str) -> None:
+    """Reject response formats that the tolerant text parser cannot handle."""
+    stripped = text.lstrip()
+
+    if not stripped:
+        return
+
+    if stripped.startswith(("{", "[")):
+        try:
+            json.loads(stripped)
+        except json.JSONDecodeError as exc:
+            raise ValueError("Pfam returned invalid JSON instead of text output.") from exc
+
+        raise ValueError(
+            "Pfam returned JSON, but this parser currently expects text or tabular output."
+        )
 
 
 def _parse_pfam_line(line: str) -> DomainHit | None:

@@ -112,6 +112,86 @@ def test_search_pfam_by_sequence_request_failure_raises_pfam_annotation_error(
         search_pfam_by_sequence("protein_1", "MSTNPKPQR")
 
 
+def test_search_pfam_by_sequence_http_error_includes_status_and_preview(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """HTTP errors should include the status code and short response text."""
+    response = Mock()
+    response.status_code = 405
+    response.text = "Method Not Allowed: please use a supported Pfam endpoint."
+    post_mock = Mock(return_value=response)
+    monkeypatch.setattr("annotation.pfam.requests.post", post_mock)
+
+    with pytest.raises(PfamAnnotationError) as exc_info:
+        search_pfam_by_sequence("protein_1", "MSTNPKPQR", timeout=12)
+
+    message = str(exc_info.value)
+    assert "request phase" in message
+    assert "https://www.ebi.ac.uk/Tools/hmmer/search/hmmscan" in message
+    assert "HTTP status: 405" in message
+    assert "Method Not Allowed" in message
+    assert "Timeout setting: 12 seconds" in message
+
+
+def test_search_pfam_by_sequence_timeout_includes_timeout_information(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Timeout errors should say that the request timed out."""
+    monkeypatch.setattr(
+        "annotation.pfam.requests.post",
+        Mock(side_effect=requests.Timeout("timed out")),
+    )
+
+    with pytest.raises(PfamAnnotationError) as exc_info:
+        search_pfam_by_sequence("protein_1", "MSTNPKPQR", timeout=7)
+
+    message = str(exc_info.value)
+    assert "request phase" in message
+    assert "timed out after 7 seconds" in message
+    assert "Timeout setting: 7 seconds" in message
+    assert "https://www.ebi.ac.uk/Tools/hmmer/search/hmmscan" in message
+
+
+def test_search_pfam_by_sequence_invalid_json_gives_parse_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Invalid JSON-like responses should produce a clear parse diagnostic."""
+    response = Mock()
+    response.status_code = 200
+    response.text = "{not valid json"
+    response.raise_for_status.return_value = None
+    post_mock = Mock(return_value=response)
+    monkeypatch.setattr("annotation.pfam.requests.post", post_mock)
+
+    with pytest.raises(PfamAnnotationError) as exc_info:
+        search_pfam_by_sequence("protein_1", "MSTNPKPQR")
+
+    message = str(exc_info.value)
+    assert "parse phase" in message
+    assert "invalid JSON" in message
+    assert "Response preview: {not valid json" in message
+
+
+def test_search_pfam_by_sequence_unexpected_json_format_gives_parse_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unexpected JSON responses should explain that text output was expected."""
+    response = Mock()
+    response.status_code = 200
+    response.text = '{"results": []}'
+    response.raise_for_status.return_value = None
+    post_mock = Mock(return_value=response)
+    monkeypatch.setattr("annotation.pfam.requests.post", post_mock)
+
+    with pytest.raises(PfamAnnotationError) as exc_info:
+        search_pfam_by_sequence("protein_1", "MSTNPKPQR")
+
+    message = str(exc_info.value)
+    assert "parse phase" in message
+    assert "expects text or tabular output" in message
+    assert "Response preview:" in message
+
+
 def test_search_pfam_by_sequence_parses_and_caches_response(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

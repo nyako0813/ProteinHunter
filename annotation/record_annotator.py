@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 from annotation.alphafold import get_alphafold_url_if_exists
-from annotation.uniprot import extract_uniprot_accession, search_uniprot_by_protein_id
+from annotation.uniprot import (
+    extract_uniprot_accession,
+    extract_uniprot_old_locus_tag,
+    search_uniprot_by_protein_id,
+)
 from core.cache import JsonCache
 from core.models import AnnotationResult, ProteinRecord
 
@@ -32,7 +36,10 @@ def annotate_uniprot(
             timeout=timeout,
         )
         accession = extract_uniprot_accession(metadata)
+        old_locus_tag = extract_uniprot_old_locus_tag(metadata)
         record.uniprot_accession = accession
+        if old_locus_tag is not None:
+            record.old_locus_tag = old_locus_tag
         record.annotations["uniprot"] = AnnotationResult(
             protein_id=record.protein_id,
             source="uniprot",
