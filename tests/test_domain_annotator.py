@@ -11,6 +11,7 @@ from annotation.domain_annotator import (
     annotate_pfam_domains,
     annotate_records_cdd,
     annotate_records_pfam,
+    filter_pfam_domains,
 )
 from core.exceptions import CDDAnnotationError, PfamAnnotationError
 from core.models import DomainHit, ProteinRecord
@@ -187,6 +188,47 @@ def test_successful_pfam_domain_assignment(monkeypatch: pytest.MonkeyPatch) -> N
         cache=None,
         timeout=5,
     )
+
+
+def test_pfam_evalue_filter_keeps_strong_hit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pfam hits at or below the e-value threshold should be kept."""
+    strong = make_pfam_domain("PF00001")
+    strong.evalue = 1e-10
+    monkeypatch.setattr(
+        "annotation.domain_annotator.search_pfam_by_sequence",
+        Mock(return_value=[strong]),
+    )
+    record = make_record()
+
+    annotate_pfam_domains(record, evalue_threshold=1e-5)
+
+    assert record.domains == [strong]
+    assert record.annotations["pfam"].metadata == {"domain_count": 1}
+
+
+def test_pfam_evalue_filter_removes_weak_hit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pfam hits above the e-value threshold should be filtered out."""
+    weak = make_pfam_domain("PF00002")
+    weak.evalue = 0.01
+    monkeypatch.setattr(
+        "annotation.domain_annotator.search_pfam_by_sequence",
+        Mock(return_value=[weak]),
+    )
+    record = make_record()
+
+    annotate_pfam_domains(record, evalue_threshold=1e-5)
+
+    assert record.domains == []
+    assert record.annotations["pfam"].domains == []
+    assert record.annotations["pfam"].metadata == {"domain_count": 0}
+
+
+def test_pfam_evalue_filter_keeps_missing_evalue() -> None:
+    """Pfam hits without e-values are kept for now."""
+    missing = make_pfam_domain("PF00003")
+    missing.evalue = None
+
+    assert filter_pfam_domains([missing], evalue_threshold=1e-5) == [missing]
 
 
 def test_no_pfam_domains_stores_successful_empty_annotation(
