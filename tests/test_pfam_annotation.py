@@ -153,10 +153,10 @@ def test_search_pfam_by_sequence_timeout_includes_timeout_information(
     assert "https://www.ebi.ac.uk/Tools/hmmer/api/v1/search/hmmscan" in message
 
 
-def test_search_pfam_by_sequence_uses_api_endpoint_and_form_data(
+def test_search_pfam_by_sequence_uses_api_endpoint_and_json_body(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Pfam searches should use the HMMER API endpoint and API form fields."""
+    """Pfam searches should use the HMMER API endpoint and JSON body first."""
     response = Mock()
     response.status_code = 200
     response.text = "# no hits\n"
@@ -168,9 +168,39 @@ def test_search_pfam_by_sequence_uses_api_endpoint_and_form_data(
 
     call = post_mock.call_args
     assert call.args[0] == "https://www.ebi.ac.uk/Tools/hmmer/api/v1/search/hmmscan"
-    assert call.kwargs["data"] == {"input": "MSTNPKPQR", "database": "pfam"}
-    assert call.kwargs["headers"] == {"Accept": "application/json"}
+    assert call.kwargs["json"] == {"input": "MSTNPKPQR", "database": "pfam"}
+    assert call.kwargs["headers"] == {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
     assert call.kwargs["timeout"] == 9
+
+
+def test_search_pfam_by_sequence_retries_form_body_when_json_body_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A JSON body parse error from HMMER should trigger one form retry."""
+    json_response = Mock()
+    json_response.status_code = 400
+    json_response.text = '{"detail": "Cannot parse request body"}'
+    form_response = Mock()
+    form_response.status_code = 200
+    form_response.text = "# no hits\n"
+    form_response.raise_for_status.return_value = None
+    post_mock = Mock(side_effect=[json_response, form_response])
+    monkeypatch.setattr("annotation.pfam.requests.post", post_mock)
+
+    assert search_pfam_by_sequence("protein_1", "MSTNPKPQR") == []
+
+    first_call = post_mock.call_args_list[0]
+    second_call = post_mock.call_args_list[1]
+    assert first_call.kwargs["json"] == {"input": "MSTNPKPQR", "database": "pfam"}
+    assert first_call.kwargs["headers"] == {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+    assert second_call.kwargs["data"] == {"input": "MSTNPKPQR", "database": "pfam"}
+    assert second_call.kwargs["headers"] == {"Accept": "application/json"}
 
 
 def test_search_pfam_by_sequence_parses_json_hit(
@@ -214,6 +244,82 @@ def test_search_pfam_by_sequence_parses_json_hit(
     ]
 
 
+def test_search_pfam_by_sequence_fetches_result_when_initial_response_has_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An asynchronous job id should be resolved through the result endpoint."""
+    submit_response = Mock()
+    submit_response.status_code = 200
+    submit_response.text = json.dumps(dict(id="job-123", status="RUNNING"))
+    submit_response.raise_for_status.return_value = None
+    result_response = Mock()
+    result_response.status_code = 200
+    result_response.text = json.dumps(
+        dict(
+            status="SUCCESS",
+            results=[
+                dict(
+                    accession="PF00002",
+                    name="ABC_tran",
+                    description="ABC transporter",
+                    i_evalue="3e-12",
+                    bitscore=72.0,
+                    ali_from=4,
+                    ali_to=95,
+                )
+            ],
+        )
+    )
+    result_response.raise_for_status.return_value = None
+    post_mock = Mock(return_value=submit_response)
+    get_mock = Mock(return_value=result_response)
+    monkeypatch.setattr("annotation.pfam.requests.post", post_mock)
+    monkeypatch.setattr("annotation.pfam.requests.get", get_mock)
+
+    hits = search_pfam_by_sequence("protein_1", "MSTNPKPQR")
+
+    assert get_mock.call_args.args[0] == (
+        "https://www.ebi.ac.uk/Tools/hmmer/api/v1/result/job-123"
+    )
+    assert hits == [
+        DomainHit(
+            source="Pfam",
+            accession="PF00002",
+            name="ABC_tran",
+            description="ABC transporter",
+            evalue=3e-12,
+            bitscore=72.0,
+            start=4,
+            end=95,
+        )
+    ]
+
+
+def test_search_pfam_by_sequence_result_error_status_raises_clear_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FAILURE or ERROR result statuses should be reported as result failures."""
+    submit_response = Mock()
+    submit_response.status_code = 200
+    submit_response.text = json.dumps(dict(id="job-123"))
+    submit_response.raise_for_status.return_value = None
+    result_response = Mock()
+    result_response.status_code = 200
+    result_response.text = json.dumps(dict(status="ERROR", detail="Job failed"))
+    result_response.raise_for_status.return_value = None
+    monkeypatch.setattr("annotation.pfam.requests.post", Mock(return_value=submit_response))
+    monkeypatch.setattr("annotation.pfam.requests.get", Mock(return_value=result_response))
+
+    with pytest.raises(PfamAnnotationError) as exc_info:
+        search_pfam_by_sequence("protein_1", "MSTNPKPQR")
+
+    message = str(exc_info.value)
+    assert "result phase" in message
+    assert "status ERROR" in message
+    assert "https://www.ebi.ac.uk/Tools/hmmer/api/v1/result/job-123" in message
+    assert "Response preview:" in message
+
+
 def test_search_pfam_by_sequence_invalid_json_gives_parse_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -240,7 +346,7 @@ def test_search_pfam_by_sequence_unexpected_json_format_gives_parse_error(
     """Unexpected JSON responses should include available top-level keys."""
     response = Mock()
     response.status_code = 200
-    response.text = json.dumps(dict(job_id="abc123", status="DONE"))
+    response.text = json.dumps(dict(message="done", status="DONE"))
     response.raise_for_status.return_value = None
     post_mock = Mock(return_value=response)
     monkeypatch.setattr("annotation.pfam.requests.post", post_mock)
@@ -251,7 +357,7 @@ def test_search_pfam_by_sequence_unexpected_json_format_gives_parse_error(
     message = str(exc_info.value)
     assert "parse phase" in message
     assert "no Pfam domain fields were recognized" in message
-    assert "Available top-level keys: job_id, status" in message
+    assert "Available top-level keys: message, status" in message
     assert "Response preview:" in message
 
 
