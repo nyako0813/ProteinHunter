@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from annotation.cdd import search_cdd_by_sequence
-from annotation.pfam import search_pfam_by_sequence
+from annotation.pfam import enrich_pfam_domains_with_metadata, search_pfam_by_sequence
 from core.cache import JsonCache
 from core.models import AnnotationResult, DomainHit, ProteinRecord
 
@@ -85,6 +85,11 @@ def annotate_pfam_domains(
         return record
 
     domains = filter_pfam_domains(domains, evalue_threshold=evalue_threshold)
+    domains = enrich_pfam_domains_with_metadata(
+        domains,
+        cache=cache,
+        timeout=timeout,
+    )
     record.domains.extend(domains)
     record.annotations["pfam"] = AnnotationResult(
         protein_id=record.protein_id,

@@ -12,6 +12,8 @@ import requests
 from annotation.pfam import (
     domain_hit_from_dict,
     domain_hit_to_dict,
+    enrich_pfam_domains_with_metadata,
+    normalize_pfam_accession,
     parse_pfam_response,
     search_pfam_by_sequence,
 )
@@ -61,6 +63,11 @@ def test_parse_pfam_response_with_labeled_values() -> None:
 def test_parse_pfam_response_with_no_hits_returns_empty_list() -> None:
     """Text without Pfam accessions should return no hits."""
     assert parse_pfam_response("# no hits\nquery complete\n") == []
+
+
+def test_normalize_pfam_accession_removes_version() -> None:
+    """Pfam metadata lookup should use the versionless accession."""
+    assert normalize_pfam_accession("PF01637.24") == "PF01637"
 
 
 def test_search_pfam_by_sequence_returns_cached_hits_without_request(
@@ -374,6 +381,97 @@ def test_search_pfam_by_sequence_numeric_name_falls_back_to_accession(
 
     assert hits[0].accession == "PF13173.12"
     assert hits[0].name == "PF13173.12"
+
+
+def test_enrich_pfam_domains_uses_metadata_short_name(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """InterPro metadata.short_name should replace numeric Pfam names."""
+    cache = JsonCache(tmp_path)
+    domain = DomainHit(source="Pfam", accession="PF01637.24", name="000001295")
+    response = Mock()
+    response.status_code = 200
+    response.text = json.dumps(
+        dict(
+            metadata=dict(
+                accession="PF01637",
+                short_name="Cytidylyltransf",
+                description="Cytidylyltransferase family",
+            )
+        )
+    )
+    response.raise_for_status.return_value = None
+    get_mock = Mock(return_value=response)
+    monkeypatch.setattr("annotation.pfam.requests.get", get_mock)
+
+    enrich_pfam_domains_with_metadata([domain], cache=cache, timeout=8)
+
+    assert get_mock.call_args.args[0] == (
+        "https://www.ebi.ac.uk/interpro/api/entry/pfam/PF01637/"
+    )
+    assert domain.name == "Cytidylyltransf"
+    assert domain.description == "Cytidylyltransferase family"
+    assert cache.has("pfam_metadata", "PF01637") is True
+
+
+def test_enrich_pfam_domains_uses_metadata_name_without_short_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """metadata.name should be used when short_name is missing."""
+    domain = DomainHit(source="Pfam", accession="PF03008.20", name="PF03008.20")
+    response = Mock()
+    response.status_code = 200
+    response.text = json.dumps(
+        dict(metadata=dict(name="DUF2345", abstract="Domain of unknown function"))
+    )
+    response.raise_for_status.return_value = None
+    monkeypatch.setattr("annotation.pfam.requests.get", Mock(return_value=response))
+
+    enrich_pfam_domains_with_metadata([domain])
+
+    assert domain.name == "DUF2345"
+    assert domain.description == "Domain of unknown function"
+
+
+def test_enrich_pfam_domains_failure_is_non_fatal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Metadata lookup failures should leave the domain usable."""
+    domain = DomainHit(source="Pfam", accession="PF13173.12", name="000000131")
+    monkeypatch.setattr(
+        "annotation.pfam.requests.get",
+        Mock(side_effect=requests.RequestException("metadata down")),
+    )
+
+    assert enrich_pfam_domains_with_metadata([domain]) == [domain]
+    assert domain.name == "PF13173.12"
+    assert domain.description == ""
+
+
+def test_enrich_pfam_domains_uses_cache_for_repeated_accession(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The same normalized Pfam accession should not be fetched repeatedly."""
+    cache = JsonCache(tmp_path)
+    first = DomainHit(source="Pfam", accession="PF01637.24", name="000001295")
+    second = DomainHit(source="Pfam", accession="PF01637.24", name="")
+    response = Mock()
+    response.status_code = 200
+    response.text = json.dumps(dict(metadata=dict(short_name="Cached_name")))
+    response.raise_for_status.return_value = None
+    get_mock = Mock(return_value=response)
+    monkeypatch.setattr("annotation.pfam.requests.get", get_mock)
+
+    enrich_pfam_domains_with_metadata([first, second], cache=cache)
+    third = DomainHit(source="Pfam", accession="PF01637.24", name="")
+    enrich_pfam_domains_with_metadata([third], cache=cache)
+
+    assert get_mock.call_count == 1
+    assert first.name == "Cached_name"
+    assert second.name == "Cached_name"
+    assert third.name == "Cached_name"
 
 
 def test_search_pfam_by_sequence_parses_hmmer_hit_domains(

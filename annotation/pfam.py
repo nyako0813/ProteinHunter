@@ -18,6 +18,8 @@ from core.models import DomainHit
 
 PFAM_SEARCH_URL = "https://www.ebi.ac.uk/Tools/hmmer/api/v1/search/hmmscan"
 PFAM_RESULT_URL = "https://www.ebi.ac.uk/Tools/hmmer/api/v1/result"
+PFAM_METADATA_URL = "https://www.ebi.ac.uk/interpro/api/entry/pfam"
+PFAM_METADATA_NAMESPACE = "pfam_metadata"
 PFAM_REQUEST_HEADERS = {"Accept": "application/json"}
 PFAM_JSON_HEADERS = {
     "Accept": "application/json",
@@ -236,6 +238,149 @@ def domain_hit_from_dict(data: dict[str, object]) -> DomainHit:
         bitscore=_optional_float(data.get("bitscore")),
         start=_optional_int(data.get("start")),
         end=_optional_int(data.get("end")),
+    )
+
+
+def enrich_pfam_domains_with_metadata(
+    domains: list[DomainHit],
+    cache: JsonCache | None = None,
+    timeout: int = 60,
+) -> list[DomainHit]:
+    """Fill Pfam names/descriptions from InterPro metadata when available.
+
+    Metadata lookup is intentionally non-fatal. Network, cache, or schema
+    problems leave the original domain hit in place.
+    """
+    metadata_by_accession: dict[str, dict[str, str]] = {}
+
+    for domain in domains:
+        if not _domain_needs_metadata(domain):
+            continue
+
+        normalized_accession = normalize_pfam_accession(domain.accession)
+        if normalized_accession is None or normalized_accession in metadata_by_accession:
+            continue
+
+        metadata_by_accession[normalized_accession] = _get_pfam_metadata(
+            normalized_accession,
+            cache=cache,
+            timeout=timeout,
+        )
+
+    for domain in domains:
+        normalized_accession = normalize_pfam_accession(domain.accession)
+        if normalized_accession is None:
+            continue
+
+        metadata = metadata_by_accession.get(normalized_accession, {})
+        metadata_name = metadata.get("name", "")
+        metadata_description = metadata.get("description", "")
+
+        if metadata_name and _should_replace_domain_name(domain.name, domain.accession):
+            domain.name = metadata_name
+        elif _looks_like_internal_name(domain.name):
+            domain.name = domain.accession
+
+        if metadata_description and not domain.description:
+            domain.description = metadata_description
+
+    return domains
+
+
+def _domain_needs_metadata(domain: DomainHit) -> bool:
+    """Return True when metadata could improve the domain display fields."""
+    return _should_replace_domain_name(domain.name, domain.accession) or not domain.description
+
+
+def normalize_pfam_accession(accession: str) -> str | None:
+    """Return a versionless Pfam accession such as PF01637 from PF01637.24."""
+    match = re.search(r"\bPF\d{5}\b", accession, re.IGNORECASE)
+    if match is None:
+        return None
+
+    return match.group(0).upper()
+
+
+def _get_pfam_metadata(
+    accession: str,
+    cache: JsonCache | None = None,
+    timeout: int = 60,
+) -> dict[str, str]:
+    """Return cached or fetched Pfam metadata for one normalized accession."""
+    if cache is not None and cache.has(PFAM_METADATA_NAMESPACE, accession):
+        cached = cache.get(PFAM_METADATA_NAMESPACE, accession)
+        if isinstance(cached, dict):
+            return {
+                "name": _string_or_default(cached.get("name"), ""),
+                "description": _string_or_default(cached.get("description"), ""),
+            }
+
+    try:
+        response = requests.get(
+            f"{PFAM_METADATA_URL}/{accession}/",
+            headers=PFAM_REQUEST_HEADERS,
+            timeout=timeout,
+        )
+        if _response_status_code(response) is not None and response.status_code >= 400:
+            return {}
+
+        response.raise_for_status()
+        metadata = _parse_pfam_metadata_response(_response_text(response), accession)
+    except Exception:
+        return {}
+
+    if cache is not None:
+        cache.set(PFAM_METADATA_NAMESPACE, accession, metadata)
+
+    return metadata
+
+
+def _parse_pfam_metadata_response(text: str, accession: str) -> dict[str, str]:
+    """Extract readable name and description from InterPro/Pfam entry JSON."""
+    data = json.loads(text)
+    metadata = data.get("metadata") if isinstance(data, dict) else None
+    candidates: list[dict[str, object]] = []
+
+    if isinstance(metadata, dict):
+        candidates.append(metadata)
+
+    if isinstance(data, dict):
+        candidates.append(data)
+
+    name = ""
+    description = ""
+
+    for candidate in candidates:
+        if not name:
+            name = _find_json_readable_string(
+                candidate,
+                ("short_name", "name", "accession"),
+            )
+
+        if not description:
+            description = _find_json_string(
+                candidate,
+                ("description", "abstract"),
+                "",
+            )
+
+    if not name:
+        name = accession
+
+    return {
+        "name": name,
+        "description": description,
+    }
+
+
+def _should_replace_domain_name(name: str, accession: str) -> bool:
+    """Return True when the current domain name is blank, internal, or accession-only."""
+    text = name.strip()
+    normalized_accession = normalize_pfam_accession(accession)
+    return (
+        not text
+        or _looks_like_internal_name(text)
+        or text.upper() in {accession.upper(), normalized_accession}
     )
 
 
