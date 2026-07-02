@@ -24,6 +24,7 @@ PFAM_JSON_HEADERS = {
     "Content-Type": "application/json",
 }
 PFAM_POLL_ATTEMPTS = 5
+PFAM_RESULT_CONTAINER_KEYS = {"result", "results", "hits", "domains", "matches"}
 
 
 def parse_pfam_response(text: str) -> list[DomainHit]:
@@ -527,11 +528,7 @@ def _parse_pfam_json_response(data: object) -> list[DomainHit]:
     if _json_clearly_has_no_hits(data):
         return []
 
-    keys = _json_top_level_keys(data)
-    raise ValueError(
-        "Pfam returned JSON, but no Pfam domain fields were recognized. "
-        f"Available top-level keys: {keys}."
-    )
+    raise ValueError(_json_schema_error_message(data))
 
 
 def _collect_json_domain_hits(
@@ -568,7 +565,7 @@ def _collect_json_children(
     hits: list[DomainHit] = []
 
     for key, value in data.items():
-        if key.lower() in {"results", "hits", "domains", "matches"}:
+        if key.lower() in PFAM_RESULT_CONTAINER_KEYS:
             hits.extend(_collect_json_domain_hits(value, parent))
 
     return hits
@@ -598,30 +595,53 @@ def _domain_hit_from_json_dict(data: dict[str, object]) -> DomainHit | None:
         accession=accession,
         name=_find_json_string(
             data,
-            ("name", "target_name", "hmm_name", "model_name", "id"),
+            ("name", "target_name", "hmm_name", "model_name", "ali_name", "id"),
             accession,
         ),
-        description=_find_json_string(data, ("description", "desc", "summary"), ""),
+        description=_find_json_string(
+            data,
+            ("description", "desc", "target_desc", "model_desc", "summary"),
+            "",
+        ),
         evalue=_find_json_float(
             data,
             (
                 "evalue",
                 "e_value",
                 "i_evalue",
+                "c_evalue",
                 "ievalue",
+                "domain_i_evalue",
+                "full_evalue",
                 "independent_evalue",
                 "conditional_evalue",
             ),
         ),
-        bitscore=_find_json_float(data, ("bitscore", "bit_score", "score", "domain_score")),
-        start=_find_json_int(data, ("start", "from", "ali_from", "env_from", "hmm_from")),
-        end=_find_json_int(data, ("end", "to", "ali_to", "env_to", "hmm_to")),
+        bitscore=_find_json_float(
+            data,
+            ("bitscore", "bit_score", "score", "full_score", "domain_score"),
+        ),
+        start=_find_json_int(
+            data,
+            ("start", "from", "ali_from", "env_from", "hmm_from", "seq_from"),
+        ),
+        end=_find_json_int(
+            data,
+            ("end", "to", "ali_to", "env_to", "hmm_to", "seq_to"),
+        ),
     )
 
 
 def _find_json_accession(data: dict[str, object]) -> str | None:
     """Find a Pfam accession in common accession fields or string values."""
-    for key in ("accession", "acc", "target_accession", "hmm_acc", "model_acc"):
+    for key in (
+        "accession",
+        "acc",
+        "target_acc",
+        "target_accession",
+        "hmm_acc",
+        "model_acc",
+    ):
         value = data.get(key)
         if isinstance(value, str):
             accession = _clean_accession(value)
@@ -679,7 +699,11 @@ def _json_clearly_has_no_hits(data: object) -> bool:
     if not isinstance(data, dict):
         return False
 
-    for key in ("results", "hits", "domains", "matches"):
+    status = _find_json_status(data)
+    if status == "SUCCESS" and _count_hit_candidates(data) == 0:
+        return True
+
+    for key in PFAM_RESULT_CONTAINER_KEYS:
         value = data.get(key)
         if value == []:
             return True
@@ -699,6 +723,58 @@ def _json_top_level_keys(data: object) -> str:
         return "(JSON list)"
 
     return f"({type(data).__name__})"
+
+
+def _json_result_level_keys(data: object) -> str:
+    """Return readable keys from the top-level HMMER result object."""
+    if not isinstance(data, dict):
+        return "(none)"
+
+    result = data.get("result")
+    if not isinstance(result, dict):
+        return "(none)"
+
+    keys = sorted(str(key) for key in result.keys())
+    return ", ".join(keys) if keys else "(none)"
+
+
+def _json_schema_error_message(data: object) -> str:
+    """Build a clear message for unrecognized HMMER JSON schemas."""
+    return (
+        "Pfam returned JSON, but no Pfam domain fields were recognized. "
+        f"Available top-level keys: {_json_top_level_keys(data)}. "
+        f"Result keys: {_json_result_level_keys(data)}. "
+        f"Hit count candidate: {_count_hit_candidates(data)}."
+    )
+
+
+def _count_hit_candidates(data: object) -> int:
+    """Count list items under common HMMER hit/domain containers."""
+    return _count_hit_candidates_recursive(data, in_hit_container=False)
+
+
+def _count_hit_candidates_recursive(data: object, in_hit_container: bool) -> int:
+    """Count likely hit objects without treating stats-only metadata as hits."""
+    if isinstance(data, list):
+        if in_hit_container:
+            return len(data)
+
+        return sum(
+            _count_hit_candidates_recursive(item, in_hit_container=False)
+            for item in data
+        )
+
+    if not isinstance(data, dict):
+        return 0
+
+    count = 0
+    for key, value in data.items():
+        is_hit_container = key.lower() in {"results", "hits", "domains", "matches"}
+        should_recurse = is_hit_container or key.lower() == "result" or in_hit_container
+        if should_recurse:
+            count += _count_hit_candidates_recursive(value, is_hit_container)
+
+    return count
 
 
 def _find_result_job_id(data: object) -> str | None:

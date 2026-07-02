@@ -244,6 +244,188 @@ def test_search_pfam_by_sequence_parses_json_hit(
     ]
 
 
+def test_search_pfam_by_sequence_parses_hmmer_result_hits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A SUCCESS HMMER result object with hits should parse into DomainHit."""
+    response = Mock()
+    response.status_code = 200
+    response.text = json.dumps(
+        dict(
+            status="SUCCESS",
+            page_count=1,
+            result=dict(
+                stats=dict(algo="hmmscan", database="pfam", domZ=14.0),
+                hits=[
+                    dict(
+                        acc="PF00001.23",
+                        name="ABC",
+                        desc="ABC transporter domain",
+                        full_evalue="2e-30",
+                        full_score=88.0,
+                    )
+                ],
+            ),
+        )
+    )
+    response.raise_for_status.return_value = None
+    monkeypatch.setattr("annotation.pfam.requests.post", Mock(return_value=response))
+
+    hits = search_pfam_by_sequence("protein_1", "MSTNPKPQR")
+
+    assert hits == [
+        DomainHit(
+            source="Pfam",
+            accession="PF00001.23",
+            name="ABC",
+            description="ABC transporter domain",
+            evalue=2e-30,
+            bitscore=88.0,
+        )
+    ]
+
+
+def test_search_pfam_by_sequence_parses_hmmer_hit_domains(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hit-level Pfam fields should be combined with domain coordinates."""
+    response = Mock()
+    response.status_code = 200
+    response.text = json.dumps(
+        dict(
+            status="SUCCESS",
+            result=dict(
+                hits=[
+                    dict(
+                        name="ABC",
+                        acc="PF00001",
+                        target_desc="ABC transporter",
+                        domains=[
+                            dict(
+                                ali_from=12,
+                                ali_to=90,
+                                domain_i_evalue="4e-8",
+                                domain_score=41.5,
+                            )
+                        ],
+                    )
+                ]
+            ),
+        )
+    )
+    response.raise_for_status.return_value = None
+    monkeypatch.setattr("annotation.pfam.requests.post", Mock(return_value=response))
+
+    hits = search_pfam_by_sequence("protein_1", "MSTNPKPQR")
+
+    assert hits == [
+        DomainHit(
+            source="Pfam",
+            accession="PF00001",
+            name="ABC",
+            description="ABC transporter",
+            evalue=4e-8,
+            bitscore=41.5,
+            start=12,
+            end=90,
+        )
+    ]
+
+
+def test_search_pfam_by_sequence_parses_nested_hmmer_results_hits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Nested result.results.hits should be inspected."""
+    response = Mock()
+    response.status_code = 200
+    response.text = json.dumps(
+        dict(
+            status="SUCCESS",
+            result=dict(
+                results=dict(
+                    hits=[
+                        dict(
+                            target_acc="PF12345",
+                            target_name="Nested",
+                            model_desc="Nested Pfam hit",
+                            c_evalue="7e-6",
+                            bit_score=33.0,
+                            seq_from=5,
+                            seq_to=50,
+                        )
+                    ]
+                )
+            ),
+        )
+    )
+    response.raise_for_status.return_value = None
+    monkeypatch.setattr("annotation.pfam.requests.post", Mock(return_value=response))
+
+    hits = search_pfam_by_sequence("protein_1", "MSTNPKPQR")
+
+    assert hits == [
+        DomainHit(
+            source="Pfam",
+            accession="PF12345",
+            name="Nested",
+            description="Nested Pfam hit",
+            evalue=7e-6,
+            bitscore=33.0,
+            start=5,
+            end=50,
+        )
+    ]
+
+
+def test_search_pfam_by_sequence_success_empty_hits_returns_empty_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A successful HMMER result with empty hits should be a valid no-hit result."""
+    response = Mock()
+    response.status_code = 200
+    response.text = json.dumps(
+        dict(
+            status="SUCCESS",
+            result=dict(stats=dict(domZ=14.0), hits=[]),
+            page_count=0,
+        )
+    )
+    response.raise_for_status.return_value = None
+    monkeypatch.setattr("annotation.pfam.requests.post", Mock(return_value=response))
+
+    assert search_pfam_by_sequence("protein_1", "MSTNPKPQR") == []
+
+
+def test_search_pfam_by_sequence_success_unrecognized_hits_gives_schema_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-empty hit-like structures should fail clearly when fields are unknown."""
+    response = Mock()
+    response.status_code = 200
+    response.text = json.dumps(
+        dict(
+            status="SUCCESS",
+            result=dict(
+                stats=dict(domZ=14.0),
+                hits=[dict(unexpected="value")],
+            ),
+            page_count=1,
+        )
+    )
+    response.raise_for_status.return_value = None
+    monkeypatch.setattr("annotation.pfam.requests.post", Mock(return_value=response))
+
+    with pytest.raises(PfamAnnotationError) as exc_info:
+        search_pfam_by_sequence("protein_1", "MSTNPKPQR")
+
+    message = str(exc_info.value)
+    assert "parse phase" in message
+    assert "Available top-level keys: page_count, result, status" in message
+    assert "Result keys: hits, stats" in message
+    assert "Hit count candidate: 1" in message
+    assert "Response preview:" in message
+
+
 def test_search_pfam_by_sequence_fetches_result_when_initial_response_has_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
