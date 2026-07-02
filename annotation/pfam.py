@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import json
 import re
+from collections.abc import Iterable
 from io import StringIO
 
 import requests
@@ -14,7 +15,8 @@ from core.exceptions import PfamAnnotationError
 from core.models import DomainHit
 
 
-PFAM_SEARCH_URL = "https://www.ebi.ac.uk/Tools/hmmer/search/hmmscan"
+PFAM_SEARCH_URL = "https://www.ebi.ac.uk/Tools/hmmer/api/v1/search/hmmscan"
+PFAM_REQUEST_HEADERS = {"Accept": "application/json"}
 
 
 def parse_pfam_response(text: str) -> list[DomainHit]:
@@ -54,13 +56,17 @@ def search_pfam_by_sequence(
         return []
 
     data = {
-        "seq": sequence.strip(),
-        "seqdb": "pfam",
-        "output": "text",
+        "input": sequence.strip(),
+        "database": "pfam",
     }
 
     try:
-        response = requests.post(PFAM_SEARCH_URL, data=data, timeout=timeout)
+        response = requests.post(
+            PFAM_SEARCH_URL,
+            data=data,
+            headers=PFAM_REQUEST_HEADERS,
+            timeout=timeout,
+        )
     except requests.Timeout as exc:
         raise PfamAnnotationError(
             _format_pfam_error(
@@ -111,8 +117,7 @@ def search_pfam_by_sequence(
         ) from exc
 
     try:
-        _validate_response_before_parse(response_text)
-        hits = parse_pfam_response(response_text)
+        hits = _parse_pfam_search_response(response_text)
     except Exception as exc:
         raise PfamAnnotationError(
             _format_pfam_error(
@@ -216,22 +221,206 @@ def _response_preview(text: str, limit: int = 300) -> str:
     return preview
 
 
-def _validate_response_before_parse(text: str) -> None:
-    """Reject response formats that the tolerant text parser cannot handle."""
+def _parse_pfam_search_response(text: str) -> list[DomainHit]:
+    """Parse either HMMER API JSON or older text/tabular output."""
     stripped = text.lstrip()
 
     if not stripped:
-        return
+        return []
 
     if stripped.startswith(("{", "[")):
         try:
-            json.loads(stripped)
+            data = json.loads(stripped)
         except json.JSONDecodeError as exc:
             raise ValueError("Pfam returned invalid JSON instead of text output.") from exc
 
-        raise ValueError(
-            "Pfam returned JSON, but this parser currently expects text or tabular output."
-        )
+        return _parse_pfam_json_response(data)
+
+    return parse_pfam_response(text)
+
+
+def _parse_pfam_json_response(data: object) -> list[DomainHit]:
+    """Parse common HMMER API JSON shapes into domain hits."""
+    hits = _collect_json_domain_hits(data)
+
+    if hits:
+        return hits
+
+    if _json_clearly_has_no_hits(data):
+        return []
+
+    keys = _json_top_level_keys(data)
+    raise ValueError(
+        "Pfam returned JSON, but no Pfam domain fields were recognized. "
+        f"Available top-level keys: {keys}."
+    )
+
+
+def _collect_json_domain_hits(
+    value: object,
+    parent: dict[str, object] | None = None,
+) -> list[DomainHit]:
+    """Recursively collect Pfam hits from common HMMER JSON containers."""
+    hits: list[DomainHit] = []
+
+    if isinstance(value, dict):
+        merged = _merge_hit_context(parent, value)
+        hit = _domain_hit_from_json_dict(merged)
+        child_hits = _collect_json_children(value, merged)
+
+        if child_hits:
+            hits.extend(child_hits)
+        elif hit is not None:
+            hits.append(hit)
+
+        return hits
+
+    if isinstance(value, list):
+        for item in value:
+            hits.extend(_collect_json_domain_hits(item, parent))
+
+    return hits
+
+
+def _collect_json_children(
+    data: dict[str, object],
+    parent: dict[str, object],
+) -> list[DomainHit]:
+    """Collect hits from nested result containers without assuming one schema."""
+    hits: list[DomainHit] = []
+
+    for key, value in data.items():
+        if key.lower() in {"results", "hits", "domains", "matches"}:
+            hits.extend(_collect_json_domain_hits(value, parent))
+
+    return hits
+
+
+def _merge_hit_context(
+    parent: dict[str, object] | None,
+    child: dict[str, object],
+) -> dict[str, object]:
+    """Merge parent hit metadata with child domain metadata."""
+    if parent is None:
+        return dict(child)
+
+    merged = dict(parent)
+    merged.update(child)
+    return merged
+
+
+def _domain_hit_from_json_dict(data: dict[str, object]) -> DomainHit | None:
+    """Build a DomainHit when a JSON object contains Pfam-like fields."""
+    accession = _find_json_accession(data)
+    if accession is None:
+        return None
+
+    return DomainHit(
+        source="Pfam",
+        accession=accession,
+        name=_find_json_string(
+            data,
+            ("name", "target_name", "hmm_name", "model_name", "id"),
+            accession,
+        ),
+        description=_find_json_string(data, ("description", "desc", "summary"), ""),
+        evalue=_find_json_float(
+            data,
+            (
+                "evalue",
+                "e_value",
+                "i_evalue",
+                "ievalue",
+                "independent_evalue",
+                "conditional_evalue",
+            ),
+        ),
+        bitscore=_find_json_float(data, ("bitscore", "bit_score", "score", "domain_score")),
+        start=_find_json_int(data, ("start", "from", "ali_from", "env_from", "hmm_from")),
+        end=_find_json_int(data, ("end", "to", "ali_to", "env_to", "hmm_to")),
+    )
+
+
+def _find_json_accession(data: dict[str, object]) -> str | None:
+    """Find a Pfam accession in common accession fields or string values."""
+    for key in ("accession", "acc", "target_accession", "hmm_acc", "model_acc"):
+        value = data.get(key)
+        if isinstance(value, str):
+            accession = _clean_accession(value)
+            if accession.upper().startswith("PF"):
+                return accession
+
+    for value in data.values():
+        if isinstance(value, str):
+            match = re.search(r"PF[0-9]{5}(?:[.][0-9]+)?", value, re.IGNORECASE)
+            if match:
+                return match.group(0)
+
+    return None
+
+
+def _find_json_string(
+    data: dict[str, object],
+    keys: Iterable[str],
+    default: str,
+) -> str:
+    """Return the first useful string from a JSON object."""
+    for key in keys:
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+
+    return default
+
+
+def _find_json_float(data: dict[str, object], keys: Iterable[str]) -> float | None:
+    """Return the first useful float from a JSON object."""
+    for key in keys:
+        value = _optional_float(data.get(key))
+        if value is not None:
+            return value
+
+    return None
+
+
+def _find_json_int(data: dict[str, object], keys: Iterable[str]) -> int | None:
+    """Return the first useful int from a JSON object."""
+    for key in keys:
+        value = _optional_int(data.get(key))
+        if value is not None:
+            return value
+
+    return None
+
+
+def _json_clearly_has_no_hits(data: object) -> bool:
+    """Return True only when a JSON response clearly reports empty results."""
+    if isinstance(data, list):
+        return len(data) == 0
+
+    if not isinstance(data, dict):
+        return False
+
+    for key in ("results", "hits", "domains", "matches"):
+        value = data.get(key)
+        if value == []:
+            return True
+        if isinstance(value, dict) and _json_clearly_has_no_hits(value):
+            return True
+
+    return False
+
+
+def _json_top_level_keys(data: object) -> str:
+    """Return readable top-level JSON keys for parse diagnostics."""
+    if isinstance(data, dict):
+        keys = sorted(str(key) for key in data.keys())
+        return ", ".join(keys) if keys else "(none)"
+
+    if isinstance(data, list):
+        return "(JSON list)"
+
+    return f"({type(data).__name__})"
 
 
 def _parse_pfam_line(line: str) -> DomainHit | None:

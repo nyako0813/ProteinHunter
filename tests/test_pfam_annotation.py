@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -127,7 +128,7 @@ def test_search_pfam_by_sequence_http_error_includes_status_and_preview(
 
     message = str(exc_info.value)
     assert "request phase" in message
-    assert "https://www.ebi.ac.uk/Tools/hmmer/search/hmmscan" in message
+    assert "https://www.ebi.ac.uk/Tools/hmmer/api/v1/search/hmmscan" in message
     assert "HTTP status: 405" in message
     assert "Method Not Allowed" in message
     assert "Timeout setting: 12 seconds" in message
@@ -149,7 +150,68 @@ def test_search_pfam_by_sequence_timeout_includes_timeout_information(
     assert "request phase" in message
     assert "timed out after 7 seconds" in message
     assert "Timeout setting: 7 seconds" in message
-    assert "https://www.ebi.ac.uk/Tools/hmmer/search/hmmscan" in message
+    assert "https://www.ebi.ac.uk/Tools/hmmer/api/v1/search/hmmscan" in message
+
+
+def test_search_pfam_by_sequence_uses_api_endpoint_and_form_data(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pfam searches should use the HMMER API endpoint and API form fields."""
+    response = Mock()
+    response.status_code = 200
+    response.text = "# no hits\n"
+    response.raise_for_status.return_value = None
+    post_mock = Mock(return_value=response)
+    monkeypatch.setattr("annotation.pfam.requests.post", post_mock)
+
+    search_pfam_by_sequence("protein_1", "MSTNPKPQR", timeout=9)
+
+    call = post_mock.call_args
+    assert call.args[0] == "https://www.ebi.ac.uk/Tools/hmmer/api/v1/search/hmmscan"
+    assert call.kwargs["data"] == {"input": "MSTNPKPQR", "database": "pfam"}
+    assert call.kwargs["headers"] == {"Accept": "application/json"}
+    assert call.kwargs["timeout"] == 9
+
+
+def test_search_pfam_by_sequence_parses_json_hit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A JSON HMMER API response with one Pfam hit should become a DomainHit."""
+    response = Mock()
+    response.status_code = 200
+    response.text = json.dumps(
+        dict(
+            results=[
+                dict(
+                    accession="PF00001",
+                    name="7tm_1",
+                    description="Seven transmembrane receptor",
+                    evalue="1e-20",
+                    score=55.5,
+                    start=10,
+                    end=80,
+                )
+            ]
+        )
+    )
+    response.raise_for_status.return_value = None
+    post_mock = Mock(return_value=response)
+    monkeypatch.setattr("annotation.pfam.requests.post", post_mock)
+
+    hits = search_pfam_by_sequence("protein_1", "MSTNPKPQR")
+
+    assert hits == [
+        DomainHit(
+            source="Pfam",
+            accession="PF00001",
+            name="7tm_1",
+            description="Seven transmembrane receptor",
+            evalue=1e-20,
+            bitscore=55.5,
+            start=10,
+            end=80,
+        )
+    ]
 
 
 def test_search_pfam_by_sequence_invalid_json_gives_parse_error(
@@ -175,10 +237,10 @@ def test_search_pfam_by_sequence_invalid_json_gives_parse_error(
 def test_search_pfam_by_sequence_unexpected_json_format_gives_parse_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Unexpected JSON responses should explain that text output was expected."""
+    """Unexpected JSON responses should include available top-level keys."""
     response = Mock()
     response.status_code = 200
-    response.text = '{"results": []}'
+    response.text = json.dumps(dict(job_id="abc123", status="DONE"))
     response.raise_for_status.return_value = None
     post_mock = Mock(return_value=response)
     monkeypatch.setattr("annotation.pfam.requests.post", post_mock)
@@ -188,7 +250,8 @@ def test_search_pfam_by_sequence_unexpected_json_format_gives_parse_error(
 
     message = str(exc_info.value)
     assert "parse phase" in message
-    assert "expects text or tabular output" in message
+    assert "no Pfam domain fields were recognized" in message
+    assert "Available top-level keys: job_id, status" in message
     assert "Response preview:" in message
 
 
