@@ -93,6 +93,9 @@ class ProteinRecord:
     alphafold_url: str | None = None
     uniprot_accession: str | None = None
     old_locus_tag: str | None = None
+    positive_source_count: int = 0
+    positive_sources_hit: list[str] = field(default_factory=list)
+    positive_sources_missing: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
 
     @property

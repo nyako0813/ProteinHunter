@@ -25,6 +25,19 @@ def make_hit(query_id: str, source: str) -> BlastHit:
     )
 
 
+def make_subject_hit(query_id: str, subject_id: str, source: str) -> BlastHit:
+    """Create a fake BLAST hit with an explicit subject ID."""
+    return BlastHit(
+        query_id=query_id,
+        subject_id=subject_id,
+        percent_identity=85.0,
+        alignment_length=100,
+        evalue=1e-20,
+        bitscore=50.0,
+        source=source,
+    )
+
+
 def test_blast_candidate_pipeline_calls_positive_and_negative_blast(
     tmp_path: Path,
 ) -> None:
@@ -194,3 +207,78 @@ def test_blast_classification_pipeline_returns_all_classification_groups(
     }
     assert set(result.no_hit_records) == {"B_no_hits"}
     assert set(result.negative_hit_records) == {"C_negative_only", "D_both"}
+
+
+def test_blast_classification_tracks_positive_all_sources(
+    tmp_path: Path,
+) -> None:
+    """Only negative-unmatched targets hitting every positive source should pass."""
+    positive_fasta = tmp_path / "positive.faa"
+    positive_fasta.write_text(
+        "\n".join(
+            [
+                ">subject_A [source=A]",
+                "MSTNPKPQR",
+                ">subject_B [source=B]",
+                "MSTNPKPQR",
+                ">subject_C [source=C]",
+                "MSTNPKPQR",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    positive_hits = [
+        make_subject_hit("T1_all", "subject_A", "positive"),
+        make_subject_hit("T1_all", "subject_B", "positive"),
+        make_subject_hit("T1_all", "subject_C", "positive"),
+        make_subject_hit("T2_one", "subject_A", "positive"),
+        make_subject_hit("T3_all_negative", "subject_A", "positive"),
+        make_subject_hit("T3_all_negative", "subject_B", "positive"),
+        make_subject_hit("T3_all_negative", "subject_C", "positive"),
+    ]
+    negative_hits = [
+        make_subject_hit("T3_all_negative", "negative_subject", "negative"),
+    ]
+
+    with (
+        patch(
+            "analysis.blast_pipeline.read_fasta_as_components",
+            return_value=(
+                ["T1_all", "T2_one", "T3_all_negative", "T4_no_hits"],
+                {
+                    "T1_all": "T1 desc",
+                    "T2_one": "T2 desc",
+                    "T3_all_negative": "T3 desc",
+                    "T4_no_hits": "T4 desc",
+                },
+                {
+                    "T1_all": "AAAA",
+                    "T2_one": "BBBB",
+                    "T3_all_negative": "CCCC",
+                    "T4_no_hits": "DDDD",
+                },
+            ),
+        ),
+        patch(
+            "analysis.blast_pipeline.run_blast_pipeline",
+            side_effect=[positive_hits, negative_hits],
+        ),
+    ):
+        result = run_blast_classification_pipeline(
+            target_fasta=tmp_path / "targets.faa",
+            positive_fasta=positive_fasta,
+            negative_fasta=tmp_path / "negative.faa",
+            work_dir=tmp_path / "work",
+            positive_source_labels=("A", "B", "C"),
+        )
+
+    assert set(result.positive_all_sources_records) == {"T1_all"}
+    assert set(result.positive_only_records) == {"T1_all", "T2_one"}
+    assert set(result.negative_hit_records) == {"T3_all_negative"}
+    assert set(result.no_hit_records) == {"T4_no_hits"}
+    assert result.all_records["T1_all"].positive_source_count == 3
+    assert result.all_records["T1_all"].positive_sources_hit == ["A", "B", "C"]
+    assert result.all_records["T2_one"].positive_source_count == 1
+    assert result.all_records["T2_one"].positive_sources_hit == ["A"]
+    assert result.all_records["T2_one"].positive_sources_missing == ["B", "C"]

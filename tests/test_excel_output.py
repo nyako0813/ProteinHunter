@@ -136,6 +136,28 @@ def test_records_to_dataframe_includes_old_locus_tag() -> None:
     assert list(dataframe.columns)[1:3] == ["description", "old_locus_tag"]
 
 
+def test_records_to_dataframe_appends_positive_source_fields() -> None:
+    """Positive source summary fields should be appended after existing columns."""
+    record = ProteinRecord(
+        protein_id="protein_1",
+        positive_source_count=2,
+        positive_sources_hit=["A", "B"],
+        positive_sources_missing=["C"],
+    )
+
+    dataframe = records_to_dataframe({"protein_1": record})
+    row = dataframe.iloc[0]
+
+    assert list(dataframe.columns)[-3:] == [
+        "positive_source_count",
+        "positive_sources_hit",
+        "positive_sources_missing",
+    ]
+    assert row["positive_source_count"] == 2
+    assert row["positive_sources_hit"] == "A; B"
+    assert row["positive_sources_missing"] == "C"
+
+
 def test_records_to_dataframe_includes_domain_fields() -> None:
     """Domain details should be joined into stable Excel columns."""
     dataframe = records_to_dataframe({"protein_1": make_record()})
@@ -244,6 +266,8 @@ def test_write_classification_workbook_creates_expected_sheets(
     candidate = ProteinRecord(
         protein_id="A_positive_only",
         positive_hits=[make_hit("positive", 50.0, 1e-20)],
+        positive_source_count=1,
+        positive_sources_hit=["A"],
     )
     no_hit = ProteinRecord(protein_id="B_no_hits")
     negative_only = ProteinRecord(
@@ -260,6 +284,13 @@ def test_write_classification_workbook_creates_expected_sheets(
     result = write_classification_workbook(
         candidates={"A_positive_only": candidate},
         output_path=output_path,
+        positive_all_sources={"A_positive_only": candidate},
+        positive_source_summary={
+            "A_positive_only": candidate,
+            "B_no_hits": no_hit,
+            "C_negative_only": negative_only,
+            "D_both": both,
+        },
         negative_unmatched={
             "A_positive_only": candidate,
             "B_no_hits": no_hit,
@@ -274,11 +305,15 @@ def test_write_classification_workbook_creates_expected_sheets(
     workbook = load_workbook(result)
     assert workbook.sheetnames == [
         "Candidates",
+        "Positive_all_sources",
+        "Positive_source_summary",
         "Negative_unmatched",
         "No_hit",
         "Negative_hit",
     ]
     assert workbook["Candidates"].max_row == 2
+    assert workbook["Positive_all_sources"].max_row == 2
+    assert workbook["Positive_source_summary"].max_row == 5
     assert workbook["Negative_unmatched"].max_row == 3
     assert workbook["No_hit"].max_row == 2
     assert workbook["Negative_hit"].max_row == 3

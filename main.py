@@ -109,6 +109,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 "positive_sources": len(directory_results["positive"].source_labels),
                 "negative_sources": len(directory_results["negative"].source_labels),
             }
+            positive_source_labels = directory_results["positive"].source_labels
         else:
             target_fasta = _require_path(config.paths.target_fasta, "paths.target_fasta")
             positive_fasta = _require_path(
@@ -119,6 +120,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 config.paths.negative_fasta,
                 "paths.negative_fasta",
             )
+            positive_source_labels = ("positive_fasta",)
 
         with logger.section("Configuration"):
             logger.info(f"Input mode: {config.input_mode}")
@@ -193,11 +195,16 @@ def main(argv: Sequence[str] | None = None) -> None:
                     evalue=config.blast.evalue,
                     max_target_seqs=config.blast.max_target_seqs,
                     threads=config.blast.threads,
+                    positive_source_labels=positive_source_labels,
                 )
                 records = blast_classification.positive_only_records
 
             logger.info(f"Total target proteins: {len(blast_classification.all_records)}")
             logger.info(f"BLAST positive-only candidates: {len(records)}")
+            logger.info(
+                "Positive all-source candidates: "
+                f"{len(blast_classification.positive_all_sources_records)}"
+            )
             logger.info(
                 "Negative-unmatched proteins: "
                 f"{len(blast_classification.negative_unmatched_records)}"
@@ -348,10 +355,17 @@ def main(argv: Sequence[str] | None = None) -> None:
                     ),
                     no_hit=blast_classification.no_hit_records,
                     negative_hit=blast_classification.negative_hit_records,
+                    positive_all_sources=(
+                        blast_classification.positive_all_sources_records
+                    ),
+                    positive_source_summary=blast_classification.all_records,
                 )
 
             logger.info(f"Final annotated candidate count: {len(records)}")
-            logger.info("Excel sheets written: Candidates, Negative_unmatched, No_hit, Negative_hit")
+            logger.info(
+                "Excel sheets written: Candidates, Positive_all_sources, "
+                "Positive_source_summary, Negative_unmatched, No_hit, Negative_hit"
+            )
             logger.info(f"Excel file written to: {excel_path}")
 
         logger.summary()

@@ -45,6 +45,29 @@ EXCEL_COLUMNS: tuple[str, ...] = (
     "uniprot_accession",
     "alphafold_url",
     "notes",
+    "positive_source_count",
+    "positive_sources_hit",
+    "positive_sources_missing",
+)
+
+
+POSITIVE_SOURCE_SUMMARY_COLUMNS: tuple[str, ...] = (
+    "protein_id",
+    "description",
+    "old_locus_tag",
+    "negative_hit",
+    "positive_source_count",
+    "positive_sources_hit",
+    "positive_sources_missing",
+    "positive_hit_count",
+    "negative_hit_count",
+    "blast_status",
+    "best_positive_hit",
+    "best_positive_bitscore",
+    "best_positive_evalue",
+    "best_negative_hit",
+    "best_negative_bitscore",
+    "best_negative_evalue",
 )
 
 
@@ -85,12 +108,18 @@ def write_classification_workbook(
     negative_unmatched: dict[str, ProteinRecord] | None = None,
     no_hit: dict[str, ProteinRecord] | None = None,
     negative_hit: dict[str, ProteinRecord] | None = None,
+    positive_all_sources: dict[str, ProteinRecord] | None = None,
+    positive_source_summary: dict[str, ProteinRecord] | None = None,
 ) -> Path:
     """Write candidate records and BLAST classification sheets to Excel."""
     resolved_output = Path(output_path).expanduser().resolve()
     resolved_output.parent.mkdir(parents=True, exist_ok=True)
     sheets = {
         "Candidates": records_to_dataframe(candidates),
+        "Positive_all_sources": records_to_dataframe(positive_all_sources or {}),
+        "Positive_source_summary": positive_source_summary_dataframe(
+            positive_source_summary or {}
+        ),
         "Negative_unmatched": records_to_dataframe(negative_unmatched or {}),
         "No_hit": records_to_dataframe(no_hit or {}),
         "Negative_hit": records_to_dataframe(negative_hit or {}),
@@ -112,6 +141,14 @@ def write_classification_workbook(
     return resolved_output
 
 
+def positive_source_summary_dataframe(
+    records: dict[str, ProteinRecord],
+) -> pd.DataFrame:
+    """Return the compact positive-source summary DataFrame."""
+    rows = [_positive_source_summary_row(record) for record in records.values()]
+    return pd.DataFrame(rows, columns=POSITIVE_SOURCE_SUMMARY_COLUMNS)
+
+
 def _format_worksheet(worksheet: Worksheet, dataframe: pd.DataFrame) -> None:
     """Apply simple readability formatting to an Excel worksheet."""
     worksheet.freeze_panes = "A2"
@@ -125,6 +162,8 @@ def _format_worksheet(worksheet: Worksheet, dataframe: pd.DataFrame) -> None:
         "domain_descriptions",
         "score_reasons",
         "notes",
+        "positive_sources_hit",
+        "positive_sources_missing",
     }
 
     for column_index, column_name in enumerate(dataframe.columns, start=1):
@@ -194,6 +233,32 @@ def _record_to_row(record: ProteinRecord) -> dict[str, Any]:
         "uniprot_accession": record.uniprot_accession,
         "alphafold_url": record.alphafold_url,
         "notes": "; ".join(record.notes),
+        "positive_source_count": record.positive_source_count,
+        "positive_sources_hit": "; ".join(record.positive_sources_hit),
+        "positive_sources_missing": "; ".join(record.positive_sources_missing),
+    }
+
+
+def _positive_source_summary_row(record: ProteinRecord) -> dict[str, Any]:
+    """Convert one ProteinRecord into a positive source summary row."""
+    row = _record_to_row(record)
+    return {
+        "protein_id": row["protein_id"],
+        "description": row["description"],
+        "old_locus_tag": row["old_locus_tag"],
+        "negative_hit": bool(record.negative_hits),
+        "positive_source_count": row["positive_source_count"],
+        "positive_sources_hit": row["positive_sources_hit"],
+        "positive_sources_missing": row["positive_sources_missing"],
+        "positive_hit_count": row["positive_hit_count"],
+        "negative_hit_count": row["negative_hit_count"],
+        "blast_status": row["blast_status"],
+        "best_positive_hit": row["best_positive_hit"],
+        "best_positive_bitscore": row["best_positive_bitscore"],
+        "best_positive_evalue": row["best_positive_evalue"],
+        "best_negative_hit": row["best_negative_hit"],
+        "best_negative_bitscore": row["best_negative_bitscore"],
+        "best_negative_evalue": row["best_negative_evalue"],
     }
 
 
@@ -280,6 +345,8 @@ def _blast_status(record: ProteinRecord) -> str:
 
 __all__: tuple[str, ...] = (
     "EXCEL_COLUMNS",
+    "POSITIVE_SOURCE_SUMMARY_COLUMNS",
+    "positive_source_summary_dataframe",
     "records_to_dataframe",
     "write_classification_workbook",
     "write_records_to_excel",
