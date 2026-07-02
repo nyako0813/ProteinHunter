@@ -21,9 +21,12 @@ from core.exceptions import ConfigError
 
 @dataclass
 class PathConfig:
-    target_fasta: Path
-    positive_fasta: Path
-    negative_fasta: Path
+    target_fasta: Path | None
+    positive_fasta: Path | None
+    negative_fasta: Path | None
+    target_dir: Path | None
+    positive_dir: Path | None
+    negative_dir: Path | None
     gff: Path | None
     gff_file: Path | None
     output_excel: Path
@@ -77,6 +80,7 @@ class Config:
 
     project_name: str
     version: str
+    input_mode: str
 
     paths: PathConfig
     blast: BlastConfig
@@ -118,9 +122,12 @@ def load_config(config_file: str | Path = CONFIG_FILE, initialize: bool = True) 
         optional_gff = _optional_path(raw["paths"].get("gff"))
 
     paths = PathConfig(
-        target_fasta=Path(raw["paths"]["target_fasta"]),
-        positive_fasta=Path(raw["paths"]["positive_fasta"]),
-        negative_fasta=Path(raw["paths"]["negative_fasta"]),
+        target_fasta=_optional_path(raw["paths"].get("target_fasta")),
+        positive_fasta=_optional_path(raw["paths"].get("positive_fasta")),
+        negative_fasta=_optional_path(raw["paths"].get("negative_fasta")),
+        target_dir=_optional_path(raw["paths"].get("target_dir")),
+        positive_dir=_optional_path(raw["paths"].get("positive_dir")),
+        negative_dir=_optional_path(raw["paths"].get("negative_dir")),
         gff=optional_gff,
         gff_file=optional_gff,
         output_excel=Path(raw["paths"]["output_excel"]),
@@ -154,6 +161,7 @@ def load_config(config_file: str | Path = CONFIG_FILE, initialize: bool = True) 
     cfg = Config(
         project_name=raw["project"]["name"],
         version=raw["project"]["version"],
+        input_mode=raw.get("input_mode", "file"),
         paths=paths,
         blast=blast,
         annotation=annotation,
@@ -173,6 +181,7 @@ def validate_config(raw: object) -> None:
     if not isinstance(raw, dict):
         raise ConfigError("config.yaml must contain a YAML mapping at the top level.")
 
+    _validate_input_mode(raw)
     _validate_paths_section(raw)
     _validate_blast_section(raw)
     _validate_annotation_section(raw)
@@ -200,14 +209,26 @@ def _require_key(section: dict[object, object], section_name: str, key: str) -> 
 def _validate_paths_section(raw: dict[object, object]) -> None:
     """Validate required path settings."""
     paths = _section(raw, "paths")
+    input_mode = raw.get("input_mode", "file")
     required_keys = (
-        "target_fasta",
-        "positive_fasta",
-        "negative_fasta",
         "output_excel",
         "cache_dir",
         "log_dir",
     )
+    if input_mode == "file":
+        required_keys = (
+            "target_fasta",
+            "positive_fasta",
+            "negative_fasta",
+            *required_keys,
+        )
+    else:
+        required_keys = (
+            "target_dir",
+            "positive_dir",
+            "negative_dir",
+            *required_keys,
+        )
 
     for key in required_keys:
         value = _require_key(paths, "paths", key)
@@ -216,12 +237,29 @@ def _validate_paths_section(raw: dict[object, object]) -> None:
                 f"config.yaml value 'paths.{key}' must be a non-empty string."
             )
 
-    for key in ("gff", "gff_file"):
+    optional_path_keys = (
+        "target_fasta",
+        "positive_fasta",
+        "negative_fasta",
+        "target_dir",
+        "positive_dir",
+        "negative_dir",
+        "gff",
+        "gff_file",
+    )
+    for key in optional_path_keys:
         value = paths.get(key)
         if value is not None and not isinstance(value, str):
             raise ConfigError(
                 f"config.yaml value 'paths.{key}' must be a string when provided."
             )
+
+
+def _validate_input_mode(raw: dict[object, object]) -> None:
+    """Validate optional input mode setting."""
+    input_mode = raw.get("input_mode", "file")
+    if input_mode not in {"file", "directory"}:
+        raise ConfigError("config.yaml value 'input_mode' must be 'file' or 'directory'.")
 
 
 def _validate_blast_section(raw: dict[object, object]) -> None:

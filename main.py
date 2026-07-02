@@ -12,6 +12,16 @@ from collections.abc import Sequence
 from core.startup import StartupChecker
 
 
+def _require_path(path: Path | None, config_key: str) -> Path:
+    """Return a configured path or raise a friendly config error."""
+    if path is None:
+        from core.exceptions import ConfigError
+
+        raise ConfigError(f"config.yaml is missing '{config_key}'.")
+
+    return path
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     """Build the command-line parser for Protein Hunter."""
     parser = argparse.ArgumentParser(
@@ -62,6 +72,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         from analysis.scoring import get_sorted_records, score_records
         from config import load_config
         from core.cache import JsonCache
+        from core.fasta_sources import DirectoryFastaResult, prepare_directory_fasta
         from output.excel import write_records_to_excel
 
         config_path = Path(args.config)
@@ -72,11 +83,80 @@ def main(argv: Sequence[str] | None = None) -> None:
         logger.info(f"Using config file: {config_path}")
 
         blast_work_dir = Path("data") / "temp" / "blast"
+        directory_results: dict[str, DirectoryFastaResult] = {}
+        source_counts: dict[str, int] = {}
+
+        if config.input_mode == "directory":
+            directory_results = {
+                "target": prepare_directory_fasta(
+                    _require_path(config.paths.target_dir, "paths.target_dir"),
+                    "target",
+                ),
+                "positive": prepare_directory_fasta(
+                    _require_path(config.paths.positive_dir, "paths.positive_dir"),
+                    "positive",
+                ),
+                "negative": prepare_directory_fasta(
+                    _require_path(config.paths.negative_dir, "paths.negative_dir"),
+                    "negative",
+                ),
+            }
+            target_fasta = directory_results["target"].combined_fasta
+            positive_fasta = directory_results["positive"].combined_fasta
+            negative_fasta = directory_results["negative"].combined_fasta
+            source_counts = {
+                "target_sources": len(directory_results["target"].source_labels),
+                "positive_sources": len(directory_results["positive"].source_labels),
+                "negative_sources": len(directory_results["negative"].source_labels),
+            }
+        else:
+            target_fasta = _require_path(config.paths.target_fasta, "paths.target_fasta")
+            positive_fasta = _require_path(
+                config.paths.positive_fasta,
+                "paths.positive_fasta",
+            )
+            negative_fasta = _require_path(
+                config.paths.negative_fasta,
+                "paths.negative_fasta",
+            )
 
         with logger.section("Configuration"):
-            logger.info(f"Target FASTA: {config.paths.target_fasta}")
-            logger.info(f"Positive FASTA: {config.paths.positive_fasta}")
-            logger.info(f"Negative FASTA: {config.paths.negative_fasta}")
+            logger.info(f"Input mode: {config.input_mode}")
+            if config.input_mode == "directory":
+                logger.info(f"Target directory: {config.paths.target_dir}")
+                logger.info(f"Positive directory: {config.paths.positive_dir}")
+                logger.info(f"Negative directory: {config.paths.negative_dir}")
+                for category, title in (
+                    ("target", "Target sources"),
+                    ("positive", "Positive sources"),
+                    ("negative", "Negative sources"),
+                ):
+                    result = directory_results[category]
+                    logger.info(f"{title}:")
+                    for source_label in result.source_labels:
+                        logger.info(f"- {source_label}")
+                    if result.skipped_folders:
+                        logger.warning(
+                            f"Skipped {category} folders without protein.faa: "
+                            f"{', '.join(result.skipped_folders)}"
+                        )
+                    if result.multiple_file_labels:
+                        logger.warning(
+                            f"Multiple protein.faa files found under {category} "
+                            f"source folders: {', '.join(result.multiple_file_labels)}"
+                        )
+                    if result.duplicate_ids:
+                        logger.warning(
+                            f"Duplicate FASTA IDs in {category} sources: "
+                            f"{', '.join(result.duplicate_ids)}"
+                        )
+                logger.info(f"Combined target FASTA: {target_fasta}")
+                logger.info(f"Combined positive FASTA: {positive_fasta}")
+                logger.info(f"Combined negative FASTA: {negative_fasta}")
+            else:
+                logger.info(f"Target FASTA: {target_fasta}")
+                logger.info(f"Positive FASTA: {positive_fasta}")
+                logger.info(f"Negative FASTA: {negative_fasta}")
             logger.info(f"Excel output: {config.paths.output_excel}")
             logger.info(f"BLAST work directory: {blast_work_dir}")
             logger.info(f"Cache directory: {config.paths.cache_dir}")
@@ -86,9 +166,10 @@ def main(argv: Sequence[str] | None = None) -> None:
                 logger.info("Optional GFF file: not configured")
 
             input_summary = summarize_input_fastas(
-                target_fasta=config.paths.target_fasta,
-                positive_fasta=config.paths.positive_fasta,
-                negative_fasta=config.paths.negative_fasta,
+                target_fasta=target_fasta,
+                positive_fasta=positive_fasta,
+                negative_fasta=negative_fasta,
+                source_counts=source_counts,
             )
             logger.info("Input FASTA summary:")
             for line in format_input_summary(input_summary):
@@ -105,9 +186,9 @@ def main(argv: Sequence[str] | None = None) -> None:
         with logger.section("BLAST candidate search"):
             with logger.timer("BLAST candidate pipeline"):
                 records = run_blast_candidate_pipeline(
-                    target_fasta=config.paths.target_fasta,
-                    positive_fasta=config.paths.positive_fasta,
-                    negative_fasta=config.paths.negative_fasta,
+                    target_fasta=target_fasta,
+                    positive_fasta=positive_fasta,
+                    negative_fasta=negative_fasta,
                     work_dir=blast_work_dir,
                     evalue=config.blast.evalue,
                     max_target_seqs=config.blast.max_target_seqs,

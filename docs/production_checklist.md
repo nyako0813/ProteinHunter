@@ -175,3 +175,44 @@ Excel で特に見る列:
 - [ ] `.cache/`
 
 特に `data/temp/` には BLAST の一時ファイルや BLAST データベースが入ります。これらは再生成できるため、GitHub で追跡しないようにしてください。
+
+## Directory-mode input checklist
+
+If you use NCBI folder input, set `input_mode: directory` in `config.yaml`.
+
+- [ ] `paths.target_dir` points to `data/databases/target`
+- [ ] `paths.positive_dir` points to `data/databases/positive`
+- [ ] `paths.negative_dir` points to `data/databases/negative`
+- [ ] Each source-label folder, such as an organism folder, is an immediate child of one of those directories
+- [ ] Each source-label folder contains at least one `protein.faa` somewhere under it
+- [ ] `--check-only` shows the expected source folder counts
+- [ ] Logs show source folder names, not just `protein.faa`
+
+Example:
+
+```text
+data/databases/
+  target/
+    Organism_A/
+      ncbi_dataset/
+        data/
+          GCF_000000001.1/
+            protein.faa
+  positive/
+    Organism_B/
+      protein.faa
+  negative/
+    Organism_C/
+      ncbi_dataset/
+        data/
+          GCF_000000003.1/
+            protein.faa
+```
+
+Run the same preflight check before production:
+
+```bash
+.venv/bin/python main.py --check-only
+```
+
+In directory mode, this creates combined FASTA files under `data/temp/combined/`, validates sequence counts, and stops before BLAST, annotation, scoring, and Excel output.

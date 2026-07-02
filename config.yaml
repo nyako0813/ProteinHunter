@@ -6,6 +6,8 @@ project:
   name: ProteinHunter
   version: "5.0"
 
+input_mode: file
+
 # ----------------------------------------------------------
 # Input / Output
 # ----------------------------------------------------------
@@ -18,6 +20,12 @@ paths:
   positive_fasta: "./data/databases/positive.faa"
 
   negative_fasta: "./data/databases/negative.faa"
+
+  # Directory mode can use NCBI folders placed directly under these directories.
+  # Set input_mode: directory to use these instead of the single FASTA files above.
+  target_dir: "./data/databases/target"
+  positive_dir: "./data/databases/positive"
+  negative_dir: "./data/databases/negative"
 
   # Optional genome annotation
   gff: "./data/input/genome.gff"

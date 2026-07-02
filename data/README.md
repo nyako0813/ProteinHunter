@@ -104,3 +104,41 @@ source .venv/bin/activate
 特に `target.faa`、`positive.faa`、`negative.faa` の内容が目的に合っているかを確認してから実行してください。
 
 `data/demo/` の FASTA を誤って本番解析に使わないように注意してください。
+
+## Directory-based production inputs
+
+For production runs, you may place NCBI-downloaded folders directly under the database directories instead of manually combining FASTA files.
+
+Expected structure:
+
+```text
+data/databases/
+  target/
+    Organism_A/
+      ncbi_dataset/
+        data/
+          GCF_000000001.1/
+            protein.faa
+  positive/
+    Organism_B/
+      ncbi_dataset/
+        data/
+          GCF_000000002.1/
+            protein.faa
+  negative/
+    Organism_C/
+      protein.faa
+```
+
+Set `input_mode: directory` and configure:
+
+```yaml
+paths:
+  target_dir: "./data/databases/target"
+  positive_dir: "./data/databases/positive"
+  negative_dir: "./data/databases/negative"
+```
+
+ProteinHunter uses only the immediate child folders as source labels, then searches recursively inside each one for `protein.faa`. Folder names such as `Organism_A` are used as source labels in logs. Missing `protein.faa` files are skipped with a warning when at least one valid source folder exists.
+
+Combined FASTA files are generated under `data/temp/combined/`; this directory is temporary and should not be committed.

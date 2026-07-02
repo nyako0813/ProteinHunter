@@ -151,3 +151,48 @@ source .venv/bin/activate
 これらは解析ごとに変わるため、通常は GitHub にコミットしません。
 
 特に `data/temp/` には BLAST の一時ファイルや作成済みデータベースが入ります。生成された BLAST temp ファイルは GitHub で追跡しないようにしてください。
+
+## Directory-based FASTA input
+
+Production input can also be organized as NCBI download folders. Set `input_mode: directory` in `config.yaml`, then place each source folder directly under these directories:
+
+```text
+data/databases/
+  target/
+    Organism_A/
+      ncbi_dataset/
+        data/
+          GCF_000000001.1/
+            protein.faa
+    Organism_B/
+      protein.faa
+  positive/
+    Organism_C/
+      ncbi_dataset/
+        data/
+          GCF_000000002.1/
+            protein.faa
+  negative/
+    Organism_D/
+      ncbi_dataset/
+        data/
+          GCF_000000003.1/
+            protein.faa
+```
+
+Use these config keys:
+
+```yaml
+input_mode: directory
+
+paths:
+  target_dir: "./data/databases/target"
+  positive_dir: "./data/databases/positive"
+  negative_dir: "./data/databases/negative"
+```
+
+Only immediate child folders are used as source labels. Inside each source-label folder, ProteinHunter searches recursively for `protein.faa`. The source-label folder name, such as `Organism_A`, is shown in logs.
+
+When directory mode runs, ProteinHunter creates combined FASTA files under `data/temp/combined/` and passes those files to the existing BLAST pipeline. `data/temp/` is ignored by Git.
+
+The old single-file input mode is still supported. If `input_mode` is missing, ProteinHunter uses `file` mode with `paths.target_fasta`, `paths.positive_fasta`, and `paths.negative_fasta`.

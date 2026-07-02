@@ -76,6 +76,7 @@ def test_valid_config_passes(tmp_path: Path) -> None:
     cfg = load_config(config_path, initialize=False)
 
     assert cfg.project_name == "ProteinHunter"
+    assert cfg.input_mode == "file"
     assert cfg.blast.evalue == 1e-5
     assert cfg.blast.threads >= 1
     assert cfg.paths.gff_file == Path("./data/input/genome.gff")
@@ -102,6 +103,49 @@ def test_optional_gff_file_key_is_supported(tmp_path: Path) -> None:
     cfg = load_config(config_path, initialize=False)
 
     assert cfg.paths.gff_file == Path("./data/input/custom.gff")
+
+
+def test_directory_input_mode_accepts_directory_paths(tmp_path: Path) -> None:
+    """Directory mode should require source directories instead of FASTA files."""
+    data = valid_config_data()
+    data["input_mode"] = "directory"
+    del data["paths"]["target_fasta"]
+    del data["paths"]["positive_fasta"]
+    del data["paths"]["negative_fasta"]
+    data["paths"]["target_dir"] = "./data/databases/target"
+    data["paths"]["positive_dir"] = "./data/databases/positive"
+    data["paths"]["negative_dir"] = "./data/databases/negative"
+    config_path = write_config(tmp_path, data)
+
+    cfg = load_config(config_path, initialize=False)
+
+    assert cfg.input_mode == "directory"
+    assert cfg.paths.target_fasta is None
+    assert cfg.paths.target_dir == Path("./data/databases/target")
+
+
+def test_invalid_input_mode_raises_config_error(tmp_path: Path) -> None:
+    """input_mode should be either file or directory."""
+    data = valid_config_data()
+    data["input_mode"] = "folders"
+    config_path = write_config(tmp_path, data)
+
+    with pytest.raises(ConfigError, match="input_mode"):
+        load_config(config_path, initialize=False)
+
+
+def test_directory_mode_missing_directory_key_raises_config_error(
+    tmp_path: Path,
+) -> None:
+    """Directory mode should clearly report missing directory paths."""
+    data = valid_config_data()
+    data["input_mode"] = "directory"
+    data["paths"]["target_dir"] = "./data/databases/target"
+    data["paths"]["positive_dir"] = "./data/databases/positive"
+    config_path = write_config(tmp_path, data)
+
+    with pytest.raises(ConfigError, match="paths.negative_dir"):
+        load_config(config_path, initialize=False)
 
 
 def test_missing_paths_key_raises_config_error(tmp_path: Path) -> None:

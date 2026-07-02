@@ -85,3 +85,26 @@ def test_format_input_summary_returns_readable_lines() -> None:
         "Positive references: 3",
         "Negative references: 120",
     ]
+
+
+def test_format_input_summary_includes_directory_source_counts() -> None:
+    """Directory mode summaries should include source folder counts."""
+    lines = format_input_summary(
+        {
+            "target": 1854,
+            "positive": 3,
+            "negative": 120,
+            "target_sources": 2,
+            "positive_sources": 4,
+            "negative_sources": 1,
+        }
+    )
+
+    assert lines == [
+        "Target proteins: 1854",
+        "Positive references: 3",
+        "Negative references: 120",
+        "Target source folders: 2",
+        "Positive source folders: 4",
+        "Negative source folders: 1",
+    ]

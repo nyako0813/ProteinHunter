@@ -6,6 +6,8 @@ project:
   name: ProteinHunter
   version: "5.0-demo"
 
+input_mode: file
+
 paths:
   target_fasta: "./data/demo/target_demo.faa"
   positive_fasta: "./data/demo/positive_demo.faa"
