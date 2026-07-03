@@ -196,3 +196,48 @@ Only immediate child folders are used as source labels. Inside each source-label
 When directory mode runs, ProteinHunter creates combined FASTA files under `data/temp/combined/` and passes those files to the existing BLAST pipeline. `data/temp/` is ignored by Git.
 
 The old single-file input mode is still supported. If `input_mode` is missing, ProteinHunter uses `file` mode with `paths.target_fasta`, `paths.positive_fasta`, and `paths.negative_fasta`.
+
+## Annotation targets per Excel sheet
+
+ProteinHunter can control which Excel classification groups receive heavier annotation.
+By default, `Candidates` and `Positive_all_sources` receive full annotation, while `No_hit`, `Negative_unmatched`, and `Negative_hit` receive GFF only.
+
+Fast default-style run:
+
+```yaml
+annotation_targets:
+  candidates:
+    gff: true
+    pfam: true
+    uniprot: true
+    alphafold: true
+  no_hit:
+    gff: true
+    pfam: false
+    uniprot: false
+    alphafold: false
+```
+
+No_hit exploration with Pfam:
+
+```yaml
+annotation_targets:
+  no_hit:
+    gff: true
+    pfam: true
+    uniprot: false
+    alphafold: false
+```
+
+Deep No_hit exploration:
+
+```yaml
+annotation_targets:
+  no_hit:
+    gff: true
+    pfam: true
+    uniprot: true
+    alphafold: true
+```
+
+Only selected groups are annotated for Pfam, UniProt, and AlphaFold. Records shared by multiple groups, such as `Candidates` and `Positive_all_sources`, are annotated once and reused in every sheet.

@@ -65,6 +65,35 @@ class AnnotationTargetConfig:
     alphafold: bool
 
 
+@dataclass(frozen=True)
+class AnnotationTargetsConfig:
+    """Annotation switches for all Excel classification sheets."""
+
+    candidates: AnnotationTargetConfig
+    positive_all_sources: AnnotationTargetConfig
+    no_hit: AnnotationTargetConfig
+    negative_unmatched: AnnotationTargetConfig
+    negative_hit: AnnotationTargetConfig
+
+    def items(self):
+        """Return sheet target names and settings in workbook order."""
+        return (
+            ("candidates", self.candidates),
+            ("positive_all_sources", self.positive_all_sources),
+            ("no_hit", self.no_hit),
+            ("negative_unmatched", self.negative_unmatched),
+            ("negative_hit", self.negative_hit),
+        )
+
+    def get(self, key: str, default: object = None) -> object:
+        """Dictionary-like access for existing call sites."""
+        return getattr(self, key, default)
+
+    def __getitem__(self, key: str) -> AnnotationTargetConfig:
+        """Dictionary-like access for tests and backward compatibility."""
+        return getattr(self, key)
+
+
 @dataclass
 class CacheConfig:
     enabled: bool
@@ -96,7 +125,7 @@ class Config:
     paths: PathConfig
     blast: BlastConfig
     annotation: AnnotationConfig
-    annotation_targets: dict[str, AnnotationTargetConfig]
+    annotation_targets: AnnotationTargetsConfig
     cache: CacheConfig
     score: ScoreConfig
     logging: LoggingConfig
@@ -371,11 +400,20 @@ def _validate_annotation_targets_section(raw: dict[object, object]) -> None:
     if not isinstance(targets, dict):
         raise ConfigError("config.yaml value 'annotation_targets' must be a mapping.")
 
+    valid_sheets = set(ANNOTATION_TARGET_DEFAULTS)
     valid_annotations = {"gff", "pfam", "uniprot", "alphafold"}
     for sheet_name, sheet_targets in targets.items():
         if not isinstance(sheet_name, str) or not sheet_name.strip():
             raise ConfigError(
                 "config.yaml annotation_targets sheet names must be non-empty strings."
+            )
+        sheet_key = sheet_name.strip().lower()
+        if sheet_key not in valid_sheets:
+            raise ConfigError(
+                "config.yaml value "
+                f"'annotation_targets.{sheet_name}' is not supported. "
+                "Use candidates, positive_all_sources, no_hit, "
+                "negative_unmatched, or negative_hit."
             )
         if not isinstance(sheet_targets, dict):
             raise ConfigError(
@@ -398,17 +436,19 @@ def _validate_annotation_targets_section(raw: dict[object, object]) -> None:
 
 def _load_annotation_targets(
     raw_targets: object,
-) -> dict[str, AnnotationTargetConfig]:
+) -> AnnotationTargetsConfig:
     """Load per-sheet annotation target settings with safe defaults."""
     targets = dict(ANNOTATION_TARGET_DEFAULTS)
     if not isinstance(raw_targets, dict):
-        return targets
+        return AnnotationTargetsConfig(**targets)
 
     for sheet_name, raw_sheet_targets in raw_targets.items():
         if not isinstance(sheet_name, str) or not isinstance(raw_sheet_targets, dict):
             continue
 
         key = sheet_name.strip().lower()
+        if key not in targets:
+            continue
         default = targets.get(
             key,
             AnnotationTargetConfig(
@@ -425,7 +465,7 @@ def _load_annotation_targets(
             alphafold=bool(raw_sheet_targets.get("alphafold", default.alphafold)),
         )
 
-    return targets
+    return AnnotationTargetsConfig(**targets)
 
 
 def _validate_cache_section(raw: dict[object, object]) -> None:

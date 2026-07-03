@@ -32,6 +32,33 @@ annotation:
   pfam_threads: 1
   alphafold_threads: 1
 
+annotation_targets:
+  candidates:
+    gff: true
+    pfam: true
+    uniprot: true
+    alphafold: true
+  positive_all_sources:
+    gff: true
+    pfam: true
+    uniprot: true
+    alphafold: true
+  no_hit:
+    gff: true
+    pfam: false
+    uniprot: false
+    alphafold: false
+  negative_unmatched:
+    gff: true
+    pfam: false
+    uniprot: false
+    alphafold: false
+  negative_hit:
+    gff: true
+    pfam: false
+    uniprot: false
+    alphafold: false
+
 cache:
   enabled: true
   overwrite: false

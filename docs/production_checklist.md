@@ -216,3 +216,26 @@ Run the same preflight check before production:
 ```
 
 In directory mode, this creates combined FASTA files under `data/temp/combined/`, validates sequence counts, and stops before BLAST, annotation, scoring, and Excel output.
+
+## Annotation target checklist
+
+Use `annotation_targets` in `config.yaml` to choose which Excel sheets receive heavier annotation.
+
+- [ ] Keep `candidates.pfam`, `candidates.uniprot`, and `candidates.alphafold` enabled for the main Candidates sheet
+- [ ] Enable `no_hit.pfam: true` when exploring Methanosarcina acetivorans-specific No_hit proteins
+- [ ] Enable `no_hit.uniprot: true` and `no_hit.alphafold: true` only for deeper No_hit exploration
+- [ ] Keep `negative_hit` heavy annotation disabled unless doing exclusion checks
+- [ ] Confirm the log section `Annotation targets` matches the intended run
+
+Example No_hit Pfam exploration:
+
+```yaml
+annotation_targets:
+  no_hit:
+    gff: true
+    pfam: true
+    uniprot: false
+    alphafold: false
+```
+
+This keeps the run faster than annotating every target with UniProt and AlphaFold.

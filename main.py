@@ -69,6 +69,19 @@ def _records_enabled_for_annotation(
     return selected
 
 
+def _records_for_annotation_step(
+    blast_classification: Any,
+    annotation_targets: Any,
+    annotation_name: str,
+) -> dict[str, ProteinRecord]:
+    """Return de-duplicated classification records enabled for one annotation step."""
+    return _records_enabled_for_annotation(
+        _classification_record_sheets(blast_classification),
+        annotation_targets,
+        annotation_name,
+    )
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     """Build the command-line parser for Protein Hunter."""
     parser = argparse.ArgumentParser(
@@ -245,7 +258,6 @@ def main(argv: Sequence[str] | None = None) -> None:
                     positive_source_labels=positive_source_labels,
                 )
                 records = blast_classification.positive_only_records
-                record_sheets = _classification_record_sheets(blast_classification)
 
             logger.info(f"Total target proteins: {len(blast_classification.all_records)}")
             logger.info(f"BLAST positive-only candidates: {len(records)}")
@@ -278,8 +290,8 @@ def main(argv: Sequence[str] | None = None) -> None:
 
         with logger.section("GFF old locus tag annotation"):
             gff_path = config.paths.gff_file
-            gff_records = _records_enabled_for_annotation(
-                record_sheets,
+            gff_records = _records_for_annotation_step(
+                blast_classification,
                 config.annotation_targets,
                 "gff",
             )
@@ -303,16 +315,16 @@ def main(argv: Sequence[str] | None = None) -> None:
                 logger.info(
                     f"GFF protein_id to locus tag mappings loaded: {len(gff_mapping)}"
                 )
-                logger.info(f"Candidate records updated from GFF: {updated_records}")
+                logger.info(f"Records updated from GFF: {updated_records}")
                 if gff_mapping and updated_records == 0:
-                    candidate_examples = list(records.keys())[:5]
+                    selected_examples = list(gff_records.keys())[:5]
                     gff_key_examples = list(gff_mapping.keys())[:5]
                     logger.warning(
-                        "GFF mappings were loaded but no candidate records matched."
+                        "GFF mappings were loaded but no selected records matched."
                     )
                     logger.warning(
-                        "Example candidate IDs: "
-                        f"{', '.join(candidate_examples) if candidate_examples else 'none'}"
+                        "Example selected protein IDs: "
+                        f"{', '.join(selected_examples) if selected_examples else 'none'}"
                     )
                     logger.warning(
                         "Example GFF protein ID keys: "
@@ -340,8 +352,8 @@ def main(argv: Sequence[str] | None = None) -> None:
                 logger.info("CDD annotation is disabled in config.yaml; skipping it.")
 
         with logger.section("Pfam domain annotation"):
-            pfam_records = _records_enabled_for_annotation(
-                record_sheets,
+            pfam_records = _records_for_annotation_step(
+                blast_classification,
                 config.annotation_targets,
                 "pfam",
             )
@@ -369,8 +381,8 @@ def main(argv: Sequence[str] | None = None) -> None:
                 logger.info("Pfam annotation is disabled in config.yaml; skipping it.")
 
         with logger.section("UniProt and AlphaFold annotation"):
-            uniprot_records = _records_enabled_for_annotation(
-                record_sheets,
+            uniprot_records = _records_for_annotation_step(
+                blast_classification,
                 config.annotation_targets,
                 "uniprot",
             )
@@ -398,8 +410,8 @@ def main(argv: Sequence[str] | None = None) -> None:
                     "UniProt annotation is disabled in config.yaml; skipping it."
                 )
 
-            alphafold_records = _records_enabled_for_annotation(
-                record_sheets,
+            alphafold_records = _records_for_annotation_step(
+                blast_classification,
                 config.annotation_targets,
                 "alphafold",
             )
