@@ -8,8 +8,10 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 from collections.abc import Sequence
+from typing import Any
 
 from core.startup import StartupChecker
+from core.models import ProteinRecord
 
 
 def _require_path(path: Path | None, config_key: str) -> Path:
@@ -20,6 +22,51 @@ def _require_path(path: Path | None, config_key: str) -> Path:
         raise ConfigError(f"config.yaml is missing '{config_key}'.")
 
     return path
+
+
+SHEET_TO_ANNOTATION_TARGET: dict[str, str] = {
+    "Candidates": "candidates",
+    "Positive_all_sources": "positive_all_sources",
+    "Negative_unmatched": "negative_unmatched",
+    "No_hit": "no_hit",
+    "Negative_hit": "negative_hit",
+}
+
+
+def _classification_record_sheets(
+    blast_classification: Any,
+) -> dict[str, dict[str, ProteinRecord]]:
+    """Return Excel classification sheets that can receive annotations."""
+    return {
+        "Candidates": blast_classification.positive_only_records,
+        "Positive_all_sources": blast_classification.positive_all_sources_records,
+        "Negative_unmatched": blast_classification.negative_unmatched_records,
+        "No_hit": blast_classification.no_hit_records,
+        "Negative_hit": blast_classification.negative_hit_records,
+    }
+
+
+def _records_enabled_for_annotation(
+    record_sheets: dict[str, dict[str, ProteinRecord]],
+    annotation_targets: dict[str, Any],
+    annotation_name: str,
+) -> dict[str, ProteinRecord]:
+    """Return de-duplicated records enabled for one annotation source."""
+    selected: dict[str, ProteinRecord] = {}
+
+    for sheet_name, records in record_sheets.items():
+        target_key = SHEET_TO_ANNOTATION_TARGET.get(sheet_name)
+        if target_key is None:
+            continue
+
+        target = annotation_targets.get(target_key)
+        if target is None or not bool(getattr(target, annotation_name, False)):
+            continue
+
+        for protein_id, record in records.items():
+            selected.setdefault(protein_id, record)
+
+    return selected
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -198,6 +245,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                     positive_source_labels=positive_source_labels,
                 )
                 records = blast_classification.positive_only_records
+                record_sheets = _classification_record_sheets(blast_classification)
 
             logger.info(f"Total target proteins: {len(blast_classification.all_records)}")
             logger.info(f"BLAST positive-only candidates: {len(records)}")
@@ -216,19 +264,39 @@ def main(argv: Sequence[str] | None = None) -> None:
 
         cache = JsonCache(config.paths.cache_dir)
 
+        with logger.section("Annotation target settings"):
+            for target_name, target in config.annotation_targets.items():
+                enabled_sources = [
+                    source
+                    for source in ("gff", "pfam", "uniprot", "alphafold")
+                    if bool(getattr(target, source, False))
+                ]
+                logger.info(
+                    f"{target_name}: "
+                    f"{', '.join(enabled_sources) if enabled_sources else 'none'}"
+                )
+
         with logger.section("GFF old locus tag annotation"):
             gff_path = config.paths.gff_file
+            gff_records = _records_enabled_for_annotation(
+                record_sheets,
+                config.annotation_targets,
+                "gff",
+            )
             if gff_path is None:
                 logger.info("No optional GFF file is configured; skipping GFF annotation.")
             elif not gff_path.exists():
                 logger.info(f"Optional GFF file was not found: {gff_path}")
                 logger.info("Skipping GFF annotation; the pipeline will continue.")
+            elif not gff_records:
+                logger.info("No Excel classification sheets are enabled for GFF annotation.")
             else:
                 logger.info(f"GFF annotation is enabled: {gff_path}")
+                logger.info(f"Records enabled for GFF annotation: {len(gff_records)}")
                 with logger.timer("GFF old locus tag annotation"):
                     gff_mapping = load_gff_locus_map(gff_path)
                     updated_records = annotate_records_with_gff_locus_tags(
-                        blast_classification.all_records,
+                        gff_records,
                         gff_mapping,
                     )
 
@@ -272,11 +340,17 @@ def main(argv: Sequence[str] | None = None) -> None:
                 logger.info("CDD annotation is disabled in config.yaml; skipping it.")
 
         with logger.section("Pfam domain annotation"):
-            if config.annotation.enable_pfam:
+            pfam_records = _records_enabled_for_annotation(
+                record_sheets,
+                config.annotation_targets,
+                "pfam",
+            )
+            if config.annotation.enable_pfam and pfam_records:
                 logger.info("Pfam annotation is enabled.")
+                logger.info(f"Records enabled for Pfam annotation: {len(pfam_records)}")
                 with logger.timer("Pfam domain annotation"):
-                    records = annotate_records_pfam(
-                        records,
+                    annotate_records_pfam(
+                        pfam_records,
                         cache=cache,
                         evalue_threshold=config.annotation.pfam_evalue_threshold,
                     )
@@ -289,15 +363,25 @@ def main(argv: Sequence[str] | None = None) -> None:
                 logger.info(
                     "Individual Pfam annotation failures are saved in each record's notes."
                 )
+            elif config.annotation.enable_pfam:
+                logger.info("No Excel classification sheets are enabled for Pfam annotation.")
             else:
                 logger.info("Pfam annotation is disabled in config.yaml; skipping it.")
 
         with logger.section("UniProt and AlphaFold annotation"):
-            if config.annotation.enable_uniprot:
+            uniprot_records = _records_enabled_for_annotation(
+                record_sheets,
+                config.annotation_targets,
+                "uniprot",
+            )
+            if config.annotation.enable_uniprot and uniprot_records:
                 logger.info("UniProt annotation is enabled.")
+                logger.info(
+                    f"Records enabled for UniProt annotation: {len(uniprot_records)}"
+                )
                 with logger.timer("UniProt annotation"):
-                    records = annotate_records_uniprot(
-                        records,
+                    annotate_records_uniprot(
+                        uniprot_records,
                         cache=cache,
                     )
 
@@ -305,16 +389,29 @@ def main(argv: Sequence[str] | None = None) -> None:
                 logger.info(
                     "Individual UniProt annotation failures are saved in each record's notes."
                 )
+            elif config.annotation.enable_uniprot:
+                logger.info(
+                    "No Excel classification sheets are enabled for UniProt annotation."
+                )
             else:
                 logger.info(
                     "UniProt annotation is disabled in config.yaml; skipping it."
                 )
 
-            if config.annotation.enable_alphafold:
+            alphafold_records = _records_enabled_for_annotation(
+                record_sheets,
+                config.annotation_targets,
+                "alphafold",
+            )
+            if config.annotation.enable_alphafold and alphafold_records:
                 logger.info("AlphaFold annotation is enabled.")
+                logger.info(
+                    "Records enabled for AlphaFold annotation: "
+                    f"{len(alphafold_records)}"
+                )
                 with logger.timer("AlphaFold annotation"):
-                    records = annotate_records_alphafold(
-                        records,
+                    annotate_records_alphafold(
+                        alphafold_records,
                         cache=cache,
                     )
 
@@ -322,6 +419,10 @@ def main(argv: Sequence[str] | None = None) -> None:
                 logger.info(
                     "If UniProt accessions are missing, AlphaFold skip notes are saved "
                     "in each record's notes."
+                )
+            elif config.annotation.enable_alphafold:
+                logger.info(
+                    "No Excel classification sheets are enabled for AlphaFold annotation."
                 )
             else:
                 logger.info(

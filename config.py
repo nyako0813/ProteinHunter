@@ -55,6 +55,16 @@ class AnnotationConfig:
     pfam_evalue_threshold: float = 1e-5
 
 
+@dataclass(frozen=True)
+class AnnotationTargetConfig:
+    """Annotation switches for one Excel classification sheet."""
+
+    gff: bool
+    pfam: bool
+    uniprot: bool
+    alphafold: bool
+
+
 @dataclass
 class CacheConfig:
     enabled: bool
@@ -86,6 +96,7 @@ class Config:
     paths: PathConfig
     blast: BlastConfig
     annotation: AnnotationConfig
+    annotation_targets: dict[str, AnnotationTargetConfig]
     cache: CacheConfig
     score: ScoreConfig
     logging: LoggingConfig
@@ -96,6 +107,39 @@ class Config:
 # ==========================================================
 
 CONFIG_FILE = Path(__file__).parent / "config.yaml"
+
+ANNOTATION_TARGET_DEFAULTS: dict[str, AnnotationTargetConfig] = {
+    "candidates": AnnotationTargetConfig(
+        gff=True,
+        pfam=True,
+        uniprot=True,
+        alphafold=True,
+    ),
+    "positive_all_sources": AnnotationTargetConfig(
+        gff=True,
+        pfam=True,
+        uniprot=True,
+        alphafold=True,
+    ),
+    "no_hit": AnnotationTargetConfig(
+        gff=True,
+        pfam=False,
+        uniprot=False,
+        alphafold=False,
+    ),
+    "negative_unmatched": AnnotationTargetConfig(
+        gff=True,
+        pfam=False,
+        uniprot=False,
+        alphafold=False,
+    ),
+    "negative_hit": AnnotationTargetConfig(
+        gff=True,
+        pfam=False,
+        uniprot=False,
+        alphafold=False,
+    ),
+}
 
 
 def _auto_threads(value: object) -> int:
@@ -155,6 +199,7 @@ def load_config(config_file: str | Path = CONFIG_FILE, initialize: bool = True) 
             raw["annotation"].get("pfam_evalue_threshold", 1e-5)
         ),
     )
+    annotation_targets = _load_annotation_targets(raw.get("annotation_targets"))
 
     cache = CacheConfig(**raw["cache"])
 
@@ -169,6 +214,7 @@ def load_config(config_file: str | Path = CONFIG_FILE, initialize: bool = True) 
         paths=paths,
         blast=blast,
         annotation=annotation,
+        annotation_targets=annotation_targets,
         cache=cache,
         score=score,
         logging=logging,
@@ -189,6 +235,7 @@ def validate_config(raw: object) -> None:
     _validate_paths_section(raw)
     _validate_blast_section(raw)
     _validate_annotation_section(raw)
+    _validate_annotation_targets_section(raw)
     _validate_cache_section(raw)
     _validate_logging_section(raw)
 
@@ -314,6 +361,71 @@ def _validate_annotation_section(raw: dict[object, object]) -> None:
         raise ConfigError(
             "config.yaml value 'annotation.pfam_evalue_threshold' must be greater than 0."
         )
+
+
+def _validate_annotation_targets_section(raw: dict[object, object]) -> None:
+    """Validate optional per-sheet annotation target switches."""
+    targets = raw.get("annotation_targets")
+    if targets is None:
+        return
+    if not isinstance(targets, dict):
+        raise ConfigError("config.yaml value 'annotation_targets' must be a mapping.")
+
+    valid_annotations = {"gff", "pfam", "uniprot", "alphafold"}
+    for sheet_name, sheet_targets in targets.items():
+        if not isinstance(sheet_name, str) or not sheet_name.strip():
+            raise ConfigError(
+                "config.yaml annotation_targets sheet names must be non-empty strings."
+            )
+        if not isinstance(sheet_targets, dict):
+            raise ConfigError(
+                f"config.yaml value 'annotation_targets.{sheet_name}' must be a mapping."
+            )
+        for annotation_name, enabled in sheet_targets.items():
+            if annotation_name not in valid_annotations:
+                raise ConfigError(
+                    "config.yaml value "
+                    f"'annotation_targets.{sheet_name}.{annotation_name}' is not supported. "
+                    "Use gff, pfam, uniprot, or alphafold."
+                )
+            if not isinstance(enabled, bool):
+                raise ConfigError(
+                    "config.yaml value "
+                    f"'annotation_targets.{sheet_name}.{annotation_name}' "
+                    "must be true or false."
+                )
+
+
+def _load_annotation_targets(
+    raw_targets: object,
+) -> dict[str, AnnotationTargetConfig]:
+    """Load per-sheet annotation target settings with safe defaults."""
+    targets = dict(ANNOTATION_TARGET_DEFAULTS)
+    if not isinstance(raw_targets, dict):
+        return targets
+
+    for sheet_name, raw_sheet_targets in raw_targets.items():
+        if not isinstance(sheet_name, str) or not isinstance(raw_sheet_targets, dict):
+            continue
+
+        key = sheet_name.strip().lower()
+        default = targets.get(
+            key,
+            AnnotationTargetConfig(
+                gff=False,
+                pfam=False,
+                uniprot=False,
+                alphafold=False,
+            ),
+        )
+        targets[key] = AnnotationTargetConfig(
+            gff=bool(raw_sheet_targets.get("gff", default.gff)),
+            pfam=bool(raw_sheet_targets.get("pfam", default.pfam)),
+            uniprot=bool(raw_sheet_targets.get("uniprot", default.uniprot)),
+            alphafold=bool(raw_sheet_targets.get("alphafold", default.alphafold)),
+        )
+
+    return targets
 
 
 def _validate_cache_section(raw: dict[object, object]) -> None:

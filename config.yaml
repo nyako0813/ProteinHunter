@@ -12,10 +12,6 @@ input_mode: directory
 # Input / Output
 # ----------------------------------------------------------
 paths:
-  target_dir: data/databases/target
-  positive_dir: data/databases/positive
-  negative_dir: data/databases/negative
-
   # Directory mode can use NCBI folders placed directly under these directories.
   # Set input_mode: directory to use these instead of the single FASTA files above.
   target_dir: "./data/databases/target"
@@ -71,6 +67,42 @@ annotation:
   pfam_evalue_threshold: 1e-5
 
   alphafold_threads: 4
+
+
+# ----------------------------------------------------------
+# Annotation Targets
+# ----------------------------------------------------------
+
+annotation_targets:
+  candidates:
+    gff: true
+    pfam: true
+    uniprot: true
+    alphafold: true
+
+  positive_all_sources:
+    gff: true
+    pfam: true
+    uniprot: true
+    alphafold: true
+
+  no_hit:
+    gff: true
+    pfam: false
+    uniprot: false
+    alphafold: false
+
+  negative_unmatched:
+    gff: true
+    pfam: false
+    uniprot: false
+    alphafold: false
+
+  negative_hit:
+    gff: true
+    pfam: false
+    uniprot: false
+    alphafold: false
 
 
 # ----------------------------------------------------------

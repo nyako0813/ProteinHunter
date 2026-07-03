@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import yaml
 
-from main import build_arg_parser
+from config import AnnotationTargetConfig
+from core.models import ProteinRecord
+from main import build_arg_parser, _records_enabled_for_annotation
 
 
 def test_main_config_arg_defaults_to_config_yaml() -> None:
@@ -108,3 +111,92 @@ def test_main_check_only_works_with_directory_mode(
     main(["--config", str(config_path), "--check-only"])
 
     assert (tmp_path / "data" / "temp" / "combined" / "target.combined.faa").exists()
+
+
+def test_annotation_targets_select_no_hit_pfam_when_enabled() -> None:
+    """No_hit records should be selected for Pfam only when enabled."""
+    no_hit_record = ProteinRecord(protein_id="no_hit_1")
+    record_sheets = {
+        "Candidates": {},
+        "Positive_all_sources": {},
+        "Negative_unmatched": {},
+        "No_hit": {"no_hit_1": no_hit_record},
+        "Negative_hit": {},
+    }
+    targets = {
+        "candidates": AnnotationTargetConfig(True, True, True, True),
+        "positive_all_sources": AnnotationTargetConfig(True, True, True, True),
+        "negative_unmatched": AnnotationTargetConfig(True, False, False, False),
+        "no_hit": AnnotationTargetConfig(True, True, False, False),
+        "negative_hit": AnnotationTargetConfig(True, False, False, False),
+    }
+
+    selected = _records_enabled_for_annotation(record_sheets, targets, "pfam")
+
+    assert selected == {"no_hit_1": no_hit_record}
+
+
+def test_annotation_targets_skip_no_hit_pfam_when_disabled() -> None:
+    """No_hit Pfam should remain off under the safe default behavior."""
+    no_hit_record = ProteinRecord(protein_id="no_hit_1")
+    record_sheets = {
+        "Candidates": {},
+        "Positive_all_sources": {},
+        "Negative_unmatched": {},
+        "No_hit": {"no_hit_1": no_hit_record},
+        "Negative_hit": {},
+    }
+    targets = {
+        "candidates": AnnotationTargetConfig(True, True, True, True),
+        "positive_all_sources": AnnotationTargetConfig(True, True, True, True),
+        "negative_unmatched": AnnotationTargetConfig(True, False, False, False),
+        "no_hit": AnnotationTargetConfig(True, False, False, False),
+        "negative_hit": AnnotationTargetConfig(True, False, False, False),
+    }
+
+    selected = _records_enabled_for_annotation(record_sheets, targets, "pfam")
+
+    assert selected == {}
+
+
+def test_annotation_targets_deduplicate_records_shared_by_sheets() -> None:
+    """A record in Candidates and Positive_all_sources should be annotated once."""
+    shared_record = ProteinRecord(protein_id="candidate_1")
+    record_sheets = {
+        "Candidates": {"candidate_1": shared_record},
+        "Positive_all_sources": {"candidate_1": shared_record},
+        "Negative_unmatched": {},
+        "No_hit": {},
+        "Negative_hit": {},
+    }
+    targets = {
+        "candidates": AnnotationTargetConfig(True, True, True, True),
+        "positive_all_sources": AnnotationTargetConfig(True, True, True, True),
+        "negative_unmatched": AnnotationTargetConfig(True, False, False, False),
+        "no_hit": AnnotationTargetConfig(True, False, False, False),
+        "negative_hit": AnnotationTargetConfig(True, False, False, False),
+    }
+
+    selected = _records_enabled_for_annotation(record_sheets, targets, "pfam")
+
+    assert list(selected) == ["candidate_1"]
+    assert selected["candidate_1"] is shared_record
+
+
+def test_annotation_targets_missing_subkey_is_safe_default_off() -> None:
+    """Missing target objects should not accidentally enable annotation."""
+    candidate_record = ProteinRecord(protein_id="candidate_1")
+    record_sheets = {
+        "Candidates": {"candidate_1": candidate_record},
+        "Positive_all_sources": {},
+        "Negative_unmatched": {},
+        "No_hit": {},
+        "Negative_hit": {},
+    }
+    targets = {
+        "candidates": SimpleNamespace(gff=True),
+    }
+
+    selected = _records_enabled_for_annotation(record_sheets, targets, "pfam")
+
+    assert selected == {}

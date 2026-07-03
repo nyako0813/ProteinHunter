@@ -105,6 +105,76 @@ def test_missing_pfam_evalue_threshold_uses_default(tmp_path: Path) -> None:
     assert cfg.annotation.pfam_evalue_threshold == 1e-5
 
 
+def test_missing_annotation_targets_uses_safe_defaults(tmp_path: Path) -> None:
+    """Missing annotation_targets should preserve the default annotation plan."""
+    data = valid_config_data()
+    config_path = write_config(tmp_path, data)
+
+    cfg = load_config(config_path, initialize=False)
+
+    assert cfg.annotation_targets["candidates"].pfam is True
+    assert cfg.annotation_targets["positive_all_sources"].pfam is True
+    assert cfg.annotation_targets["no_hit"].gff is True
+    assert cfg.annotation_targets["no_hit"].pfam is False
+    assert cfg.annotation_targets["negative_unmatched"].uniprot is False
+    assert cfg.annotation_targets["negative_hit"].alphafold is False
+
+
+def test_annotation_targets_can_enable_no_hit_pfam(tmp_path: Path) -> None:
+    """Per-sheet annotation targets should override safe defaults."""
+    data = valid_config_data()
+    data["annotation_targets"] = {
+        "no_hit": {
+            "pfam": True,
+        },
+    }
+    config_path = write_config(tmp_path, data)
+
+    cfg = load_config(config_path, initialize=False)
+
+    assert cfg.annotation_targets["no_hit"].gff is True
+    assert cfg.annotation_targets["no_hit"].pfam is True
+
+
+def test_annotation_targets_missing_subkeys_keep_defaults(tmp_path: Path) -> None:
+    """Partial per-sheet settings should keep unspecified default values."""
+    data = valid_config_data()
+    data["annotation_targets"] = {
+        "candidates": {
+            "pfam": False,
+        },
+        "negative_hit": {
+            "uniprot": True,
+        },
+    }
+    config_path = write_config(tmp_path, data)
+
+    cfg = load_config(config_path, initialize=False)
+
+    assert cfg.annotation_targets["candidates"].gff is True
+    assert cfg.annotation_targets["candidates"].pfam is False
+    assert cfg.annotation_targets["candidates"].uniprot is True
+    assert cfg.annotation_targets["negative_hit"].gff is True
+    assert cfg.annotation_targets["negative_hit"].pfam is False
+    assert cfg.annotation_targets["negative_hit"].uniprot is True
+
+
+def test_invalid_annotation_target_boolean_raises_config_error(
+    tmp_path: Path,
+) -> None:
+    """annotation_targets values should be true or false."""
+    data = valid_config_data()
+    data["annotation_targets"] = {
+        "no_hit": {
+            "pfam": "yes",
+        },
+    }
+    config_path = write_config(tmp_path, data)
+
+    with pytest.raises(ConfigError, match="annotation_targets.no_hit.pfam"):
+        load_config(config_path, initialize=False)
+
+
 def test_missing_optional_gff_does_not_fail_config_validation(tmp_path: Path) -> None:
     """Optional GFF path should not be required."""
     data = valid_config_data()
