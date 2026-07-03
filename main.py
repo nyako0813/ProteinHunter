@@ -137,6 +137,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         )
         from analysis.blast_pipeline import run_blast_classification_pipeline
         from analysis.input_summary import format_input_summary, summarize_input_fastas
+        from analysis.interaction_scoring import run_interaction_scoring
         from analysis.scoring import get_sorted_records, score_records
         from config import load_config
         from core.cache import JsonCache
@@ -246,6 +247,10 @@ def main(argv: Sequence[str] | None = None) -> None:
                     f"query coverage >= {threshold.min_query_coverage}, "
                     f"e-value <= {threshold.max_evalue}"
                 )
+            logger.info(
+                "Interaction scoring: "
+                f"{'enabled' if config.interaction_scoring.enabled else 'disabled'}"
+            )
 
             input_summary = summarize_input_fastas(
                 target_fasta=target_fasta,
@@ -495,6 +500,40 @@ def main(argv: Sequence[str] | None = None) -> None:
             else:
                 logger.info("No candidates were available for scoring.")
 
+        interaction_result = None
+        with logger.section("Interaction candidate ranking"):
+            if not config.interaction_scoring.enabled:
+                logger.info("Interaction scoring is disabled; skipping it.")
+            else:
+                logger.info("Interaction scoring is enabled.")
+                logger.info(
+                    "Interaction candidate sources: "
+                    + ", ".join(
+                        source_name
+                        for source_name, enabled in (
+                            config.interaction_scoring.candidate_sources.items()
+                        )
+                        if enabled
+                    )
+                )
+                interaction_result = run_interaction_scoring(
+                    config,
+                    blast_classification,
+                )
+                if interaction_result is None:
+                    logger.info("No interaction scoring output was created.")
+                else:
+                    for warning in interaction_result.warnings:
+                        logger.warning(warning)
+                    logger.info(
+                        "Interaction queries: "
+                        f"{len(interaction_result.query_rows)}"
+                    )
+                    logger.info(
+                        "Interaction sheets: "
+                        f"{len(interaction_result.source_rows)}"
+                    )
+
         with logger.section("Excel output"):
             with logger.timer("Write Excel output"):
                 excel_path = write_classification_workbook(
@@ -520,6 +559,10 @@ def main(argv: Sequence[str] | None = None) -> None:
                     ),
                     negative_weak_hit=(
                         blast_classification.negative_weak_hit_records
+                    ),
+                    interaction_result=interaction_result,
+                    include_interaction_sequences=(
+                        config.interaction_scoring.include_sequences_in_excel
                     ),
                 )
 

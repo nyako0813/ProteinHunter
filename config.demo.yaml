@@ -79,6 +79,35 @@ ortholog_filter:
     min_query_coverage: 50.0
     max_evalue: 1e-3
 
+interaction_scoring:
+  enabled: false
+  query_proteins:
+    - protein_id: ""
+      old_locus_tag: ""
+      sequence: ""
+  query_fasta: ""
+  candidate_sources:
+    candidates: true
+    candidates_relaxed: true
+    positive_all_sources: false
+    negative_unmatched: false
+    no_hit: true
+    negative_hit: false
+    negative_strong_hit: false
+    negative_medium_hit: false
+    negative_weak_hit: false
+  max_candidates_per_query: 200
+  include_sequences_in_excel: false
+  scoring_weights:
+    candidate_priority: 30
+    gene_neighborhood: 25
+    co_occurrence: 20
+    domain_complementarity: 15
+    alphafold_readiness: 10
+  alphafold:
+    enabled: false
+    max_pair_total_length: 2500
+
 cache:
   enabled: true
   overwrite: false

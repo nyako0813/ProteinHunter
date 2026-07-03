@@ -14,6 +14,11 @@ from openpyxl.worksheet.worksheet import Worksheet
 
 from core.exceptions import ExcelOutputError
 from core.models import BlastHit, ProteinRecord
+from analysis.interaction_scoring import (
+    INTERACTION_QUERY_COLUMNS,
+    interaction_index_rows,
+    interaction_pair_columns,
+)
 
 
 EXCEL_COLUMNS: tuple[str, ...] = (
@@ -215,6 +220,8 @@ def write_classification_workbook(
     negative_strong_hit: dict[str, ProteinRecord] | None = None,
     negative_medium_hit: dict[str, ProteinRecord] | None = None,
     negative_weak_hit: dict[str, ProteinRecord] | None = None,
+    interaction_result: Any | None = None,
+    include_interaction_sequences: bool = False,
 ) -> Path:
     """Write candidate records and BLAST classification sheets to Excel."""
     resolved_output = Path(output_path).expanduser().resolve()
@@ -233,14 +240,26 @@ def write_classification_workbook(
         "Negative_medium_hit": records_to_dataframe(negative_medium_hit or {}),
         "Negative_weak_hit": records_to_dataframe(negative_weak_hit or {}),
     }
+    interaction_sheets = _interaction_dataframes(
+        interaction_result,
+        include_sequences=include_interaction_sequences,
+    )
+    all_index_rows = (
+        *INDEX_ROWS,
+        *interaction_index_rows(list(interaction_sheets)),
+    )
 
     try:
         with pd.ExcelWriter(resolved_output, engine="openpyxl") as writer:
-            index_dataframe = _index_dataframe()
+            index_dataframe = _index_dataframe(all_index_rows)
             index_dataframe.to_excel(writer, sheet_name="Index", index=False)
-            _format_index_worksheet(writer.sheets["Index"], index_dataframe)
+            _format_index_worksheet(
+                writer.sheets["Index"],
+                index_dataframe,
+                all_index_rows,
+            )
 
-            for sheet_name, dataframe in sheets.items():
+            for sheet_name, dataframe in {**sheets, **interaction_sheets}.items():
                 dataframe.to_excel(
                     writer,
                     sheet_name=sheet_name,
@@ -266,6 +285,26 @@ def positive_source_summary_dataframe(
     """Return the compact positive-source summary DataFrame."""
     rows = [_positive_source_summary_row(record) for record in records.values()]
     return pd.DataFrame(rows, columns=POSITIVE_SOURCE_SUMMARY_COLUMNS)
+
+
+def _interaction_dataframes(
+    interaction_result: Any | None,
+    include_sequences: bool,
+) -> dict[str, pd.DataFrame]:
+    """Return Interaction_* DataFrames only when interaction scoring ran."""
+    if interaction_result is None:
+        return {}
+
+    sheets: dict[str, pd.DataFrame] = {}
+    sheets["Interaction_query"] = pd.DataFrame(
+        interaction_result.query_rows,
+        columns=INTERACTION_QUERY_COLUMNS,
+    )
+    pair_columns = interaction_pair_columns(include_sequences)
+    for sheet_name, rows in interaction_result.source_rows.items():
+        sheets[sheet_name] = pd.DataFrame(rows, columns=pair_columns)
+
+    return sheets
 
 
 def _format_worksheet(
@@ -309,7 +348,9 @@ def _format_worksheet(
                 cell.alignment = Alignment(wrap_text=True, vertical="top")
 
 
-def _index_dataframe() -> pd.DataFrame:
+def _index_dataframe(
+    index_rows: tuple[tuple[str, str, str, str], ...],
+) -> pd.DataFrame:
     """Return the workbook navigation index DataFrame."""
     rows: list[dict[str, str]] = [
         {
@@ -318,7 +359,7 @@ def _index_dataframe() -> pd.DataFrame:
             "Biological interpretation": interpretation,
             "Recommended use": recommended_use,
         }
-        for sheet, selection_rule, interpretation, recommended_use in INDEX_ROWS
+        for sheet, selection_rule, interpretation, recommended_use in index_rows
     ]
     rows.append(
         {
@@ -360,11 +401,12 @@ def _index_dataframe() -> pd.DataFrame:
 def _format_index_worksheet(
     worksheet: Worksheet,
     dataframe: pd.DataFrame,
+    index_rows: tuple[tuple[str, str, str, str], ...],
 ) -> None:
     """Apply navigation links and readable formatting to the Index sheet."""
     _format_worksheet(worksheet, dataframe)
     for row_index, sheet_name in enumerate(
-        (row[0] for row in INDEX_ROWS),
+        (row[0] for row in index_rows),
         start=2,
     ):
         cell = worksheet.cell(row=row_index, column=1)

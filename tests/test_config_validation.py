@@ -123,6 +123,11 @@ def test_missing_annotation_targets_uses_safe_defaults(tmp_path: Path) -> None:
     assert cfg.annotation_targets["negative_hit"].alphafold is False
     assert cfg.ortholog_filter.negative_exclusion_mode == "any_hit"
     assert cfg.ortholog_filter.strong.min_identity == 40.0
+    assert cfg.interaction_scoring.enabled is False
+    assert cfg.interaction_scoring.candidate_sources["candidates"] is True
+    assert cfg.interaction_scoring.candidate_sources["candidates_relaxed"] is True
+    assert cfg.interaction_scoring.candidate_sources["no_hit"] is True
+    assert cfg.interaction_scoring.candidate_sources["negative_hit"] is False
 
 
 def test_annotation_targets_can_enable_no_hit_pfam(tmp_path: Path) -> None:
@@ -227,6 +232,68 @@ def test_invalid_ortholog_filter_mode_raises_config_error(tmp_path: Path) -> Non
     config_path = write_config(tmp_path, data)
 
     with pytest.raises(ConfigError, match="negative_exclusion_mode"):
+        load_config(config_path, initialize=False)
+
+
+def test_interaction_scoring_can_be_configured(tmp_path: Path) -> None:
+    """interaction_scoring should load query proteins and source switches."""
+    data = valid_config_data()
+    data["interaction_scoring"] = {
+        "enabled": True,
+        "query_proteins": [
+            {
+                "protein_id": "query_1",
+                "old_locus_tag": "MA_0001",
+                "sequence": "MSTN",
+            }
+        ],
+        "query_fasta": "./queries.faa",
+        "candidate_sources": {
+            "candidates": False,
+            "negative_weak_hit": True,
+        },
+        "max_candidates_per_query": 7,
+        "include_sequences_in_excel": True,
+        "scoring_weights": {
+            "candidate_priority": 11,
+            "alphafold_readiness": 3,
+        },
+        "alphafold": {
+            "enabled": False,
+            "max_pair_total_length": 1200,
+        },
+    }
+    config_path = write_config(tmp_path, data)
+
+    cfg = load_config(config_path, initialize=False)
+
+    assert cfg.interaction_scoring.enabled is True
+    assert cfg.interaction_scoring.query_proteins[0].protein_id == "query_1"
+    assert cfg.interaction_scoring.query_fasta == Path("./queries.faa")
+    assert cfg.interaction_scoring.candidate_sources["candidates"] is False
+    assert cfg.interaction_scoring.candidate_sources["candidates_relaxed"] is True
+    assert cfg.interaction_scoring.candidate_sources["negative_weak_hit"] is True
+    assert cfg.interaction_scoring.max_candidates_per_query == 7
+    assert cfg.interaction_scoring.include_sequences_in_excel is True
+    assert cfg.interaction_scoring.scoring_weights.candidate_priority == 11
+    assert cfg.interaction_scoring.scoring_weights.alphafold_readiness == 3
+    assert cfg.interaction_scoring.alphafold.enabled is False
+    assert cfg.interaction_scoring.alphafold.max_pair_total_length == 1200
+
+
+def test_invalid_interaction_candidate_source_raises_config_error(
+    tmp_path: Path,
+) -> None:
+    """Unknown interaction candidate source keys should be reported."""
+    data = valid_config_data()
+    data["interaction_scoring"] = {
+        "candidate_sources": {
+            "strict_candidates": True,
+        },
+    }
+    config_path = write_config(tmp_path, data)
+
+    with pytest.raises(ConfigError, match="strict_candidates"):
         load_config(config_path, initialize=False)
 
 

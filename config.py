@@ -132,6 +132,40 @@ class OrthologFilterConfig:
     weak: OrthologThresholdConfig
 
 
+@dataclass(frozen=True)
+class InteractionQueryConfig:
+    protein_id: str
+    old_locus_tag: str
+    sequence: str
+
+
+@dataclass(frozen=True)
+class InteractionScoringWeightsConfig:
+    candidate_priority: float
+    gene_neighborhood: float
+    co_occurrence: float
+    domain_complementarity: float
+    alphafold_readiness: float
+
+
+@dataclass(frozen=True)
+class InteractionAlphaFoldConfig:
+    enabled: bool
+    max_pair_total_length: int
+
+
+@dataclass(frozen=True)
+class InteractionScoringConfig:
+    enabled: bool
+    query_proteins: tuple[InteractionQueryConfig, ...]
+    query_fasta: Path | None
+    candidate_sources: dict[str, bool]
+    max_candidates_per_query: int
+    include_sequences_in_excel: bool
+    scoring_weights: InteractionScoringWeightsConfig
+    alphafold: InteractionAlphaFoldConfig
+
+
 @dataclass
 class Config:
 
@@ -144,6 +178,7 @@ class Config:
     annotation: AnnotationConfig
     annotation_targets: AnnotationTargetsConfig
     ortholog_filter: OrthologFilterConfig
+    interaction_scoring: InteractionScoringConfig
     cache: CacheConfig
     score: ScoreConfig
     logging: LoggingConfig
@@ -213,6 +248,56 @@ ORTHOLOG_FILTER_DEFAULT = OrthologFilterConfig(
     ),
 )
 
+INTERACTION_CANDIDATE_SOURCE_DEFAULTS: dict[str, bool] = {
+    "candidates": True,
+    "candidates_relaxed": True,
+    "positive_all_sources": False,
+    "negative_unmatched": False,
+    "no_hit": True,
+    "negative_hit": False,
+    "negative_strong_hit": False,
+    "negative_medium_hit": False,
+    "negative_weak_hit": False,
+}
+
+INTERACTION_SCORING_WEIGHTS_DEFAULT = InteractionScoringWeightsConfig(
+    candidate_priority=30.0,
+    gene_neighborhood=25.0,
+    co_occurrence=20.0,
+    domain_complementarity=15.0,
+    alphafold_readiness=10.0,
+)
+
+INTERACTION_ALPHAFOLD_DEFAULT = InteractionAlphaFoldConfig(
+    enabled=False,
+    max_pair_total_length=2500,
+)
+
+INTERACTION_SCORING_DEFAULT = InteractionScoringConfig(
+    enabled=False,
+    query_proteins=(),
+    query_fasta=None,
+    candidate_sources=dict(INTERACTION_CANDIDATE_SOURCE_DEFAULTS),
+    max_candidates_per_query=200,
+    include_sequences_in_excel=False,
+    scoring_weights=INTERACTION_SCORING_WEIGHTS_DEFAULT,
+    alphafold=INTERACTION_ALPHAFOLD_DEFAULT,
+)
+
+
+def _default_interaction_scoring() -> InteractionScoringConfig:
+    """Return a fresh disabled interaction scoring config."""
+    return InteractionScoringConfig(
+        enabled=False,
+        query_proteins=(),
+        query_fasta=None,
+        candidate_sources=dict(INTERACTION_CANDIDATE_SOURCE_DEFAULTS),
+        max_candidates_per_query=200,
+        include_sequences_in_excel=False,
+        scoring_weights=INTERACTION_SCORING_WEIGHTS_DEFAULT,
+        alphafold=INTERACTION_ALPHAFOLD_DEFAULT,
+    )
+
 
 def _auto_threads(value: object) -> int:
 
@@ -273,6 +358,7 @@ def load_config(config_file: str | Path = CONFIG_FILE, initialize: bool = True) 
     )
     annotation_targets = _load_annotation_targets(raw.get("annotation_targets"))
     ortholog_filter = _load_ortholog_filter(raw.get("ortholog_filter"))
+    interaction_scoring = _load_interaction_scoring(raw.get("interaction_scoring"))
 
     cache = CacheConfig(**raw["cache"])
 
@@ -289,6 +375,7 @@ def load_config(config_file: str | Path = CONFIG_FILE, initialize: bool = True) 
         annotation=annotation,
         annotation_targets=annotation_targets,
         ortholog_filter=ortholog_filter,
+        interaction_scoring=interaction_scoring,
         cache=cache,
         score=score,
         logging=logging,
@@ -311,6 +398,7 @@ def validate_config(raw: object) -> None:
     _validate_annotation_section(raw)
     _validate_annotation_targets_section(raw)
     _validate_ortholog_filter_section(raw)
+    _validate_interaction_scoring_section(raw)
     _validate_cache_section(raw)
     _validate_logging_section(raw)
 
@@ -590,6 +678,222 @@ def _load_ortholog_filter(raw_filter: object) -> OrthologFilterConfig:
         strong=threshold("strong", ORTHOLOG_FILTER_DEFAULT.strong),
         medium=threshold("medium", ORTHOLOG_FILTER_DEFAULT.medium),
         weak=threshold("weak", ORTHOLOG_FILTER_DEFAULT.weak),
+    )
+
+
+def _validate_interaction_scoring_section(raw: dict[object, object]) -> None:
+    """Validate optional lightweight interaction scoring settings."""
+    section = raw.get("interaction_scoring")
+    if section is None:
+        return
+    if not isinstance(section, dict):
+        raise ConfigError("config.yaml value 'interaction_scoring' must be a mapping.")
+
+    enabled = section.get("enabled", False)
+    if not isinstance(enabled, bool):
+        raise ConfigError(
+            "config.yaml value 'interaction_scoring.enabled' must be true or false."
+        )
+
+    query_proteins = section.get("query_proteins", [])
+    if query_proteins is None:
+        query_proteins = []
+    if not isinstance(query_proteins, list):
+        raise ConfigError(
+            "config.yaml value 'interaction_scoring.query_proteins' must be a list."
+        )
+    for index, query in enumerate(query_proteins):
+        if not isinstance(query, dict):
+            raise ConfigError(
+                "config.yaml value "
+                f"'interaction_scoring.query_proteins[{index}]' must be a mapping."
+            )
+        for key in ("protein_id", "old_locus_tag", "sequence"):
+            value = query.get(key, "")
+            if value is not None and not isinstance(value, str):
+                raise ConfigError(
+                    "config.yaml value "
+                    f"'interaction_scoring.query_proteins[{index}].{key}' "
+                    "must be a string."
+                )
+
+    query_fasta = section.get("query_fasta", "")
+    if query_fasta is not None and not isinstance(query_fasta, str):
+        raise ConfigError(
+            "config.yaml value 'interaction_scoring.query_fasta' must be a string."
+        )
+
+    candidate_sources = section.get("candidate_sources", {})
+    if candidate_sources is None:
+        candidate_sources = {}
+    if not isinstance(candidate_sources, dict):
+        raise ConfigError(
+            "config.yaml value 'interaction_scoring.candidate_sources' "
+            "must be a mapping."
+        )
+    valid_sources = set(INTERACTION_CANDIDATE_SOURCE_DEFAULTS)
+    for source_name, enabled_source in candidate_sources.items():
+        if source_name not in valid_sources:
+            raise ConfigError(
+                "config.yaml value "
+                f"'interaction_scoring.candidate_sources.{source_name}' "
+                "is not supported."
+            )
+        if not isinstance(enabled_source, bool):
+            raise ConfigError(
+                "config.yaml value "
+                f"'interaction_scoring.candidate_sources.{source_name}' "
+                "must be true or false."
+            )
+
+    max_candidates = section.get("max_candidates_per_query", 200)
+    if not _is_positive_int(max_candidates):
+        raise ConfigError(
+            "config.yaml value 'interaction_scoring.max_candidates_per_query' "
+            "must be a positive integer."
+        )
+
+    include_sequences = section.get("include_sequences_in_excel", False)
+    if not isinstance(include_sequences, bool):
+        raise ConfigError(
+            "config.yaml value 'interaction_scoring.include_sequences_in_excel' "
+            "must be true or false."
+        )
+
+    scoring_weights = section.get("scoring_weights", {})
+    if scoring_weights is None:
+        scoring_weights = {}
+    if not isinstance(scoring_weights, dict):
+        raise ConfigError(
+            "config.yaml value 'interaction_scoring.scoring_weights' "
+            "must be a mapping."
+        )
+    for key in (
+        "candidate_priority",
+        "gene_neighborhood",
+        "co_occurrence",
+        "domain_complementarity",
+        "alphafold_readiness",
+    ):
+        if key not in scoring_weights:
+            continue
+        try:
+            float(scoring_weights[key])
+        except (TypeError, ValueError) as exc:
+            raise ConfigError(
+                "config.yaml value "
+                f"'interaction_scoring.scoring_weights.{key}' must be a number."
+            ) from exc
+
+    alphafold = section.get("alphafold", {})
+    if alphafold is None:
+        alphafold = {}
+    if not isinstance(alphafold, dict):
+        raise ConfigError(
+            "config.yaml value 'interaction_scoring.alphafold' must be a mapping."
+        )
+    alphafold_enabled = alphafold.get("enabled", False)
+    if not isinstance(alphafold_enabled, bool):
+        raise ConfigError(
+            "config.yaml value 'interaction_scoring.alphafold.enabled' "
+            "must be true or false."
+        )
+    max_pair_total_length = alphafold.get("max_pair_total_length", 2500)
+    if not _is_positive_int(max_pair_total_length):
+        raise ConfigError(
+            "config.yaml value "
+            "'interaction_scoring.alphafold.max_pair_total_length' "
+            "must be a positive integer."
+        )
+
+
+def _load_interaction_scoring(raw_scoring: object) -> InteractionScoringConfig:
+    """Load optional lightweight interaction scoring settings."""
+    if not isinstance(raw_scoring, dict):
+        return _default_interaction_scoring()
+
+    raw_queries = raw_scoring.get("query_proteins", [])
+    if not isinstance(raw_queries, list):
+        raw_queries = []
+    query_proteins: list[InteractionQueryConfig] = []
+    for raw_query in raw_queries:
+        if not isinstance(raw_query, dict):
+            continue
+        query_proteins.append(
+            InteractionQueryConfig(
+                protein_id=str(raw_query.get("protein_id") or ""),
+                old_locus_tag=str(raw_query.get("old_locus_tag") or ""),
+                sequence=str(raw_query.get("sequence") or ""),
+            )
+        )
+
+    raw_candidate_sources = raw_scoring.get("candidate_sources", {})
+    candidate_sources = dict(INTERACTION_CANDIDATE_SOURCE_DEFAULTS)
+    if isinstance(raw_candidate_sources, dict):
+        for source_name, enabled in raw_candidate_sources.items():
+            if source_name in candidate_sources:
+                candidate_sources[source_name] = bool(enabled)
+
+    raw_weights = raw_scoring.get("scoring_weights", {})
+    if not isinstance(raw_weights, dict):
+        raw_weights = {}
+    scoring_weights = InteractionScoringWeightsConfig(
+        candidate_priority=float(
+            raw_weights.get(
+                "candidate_priority",
+                INTERACTION_SCORING_WEIGHTS_DEFAULT.candidate_priority,
+            )
+        ),
+        gene_neighborhood=float(
+            raw_weights.get(
+                "gene_neighborhood",
+                INTERACTION_SCORING_WEIGHTS_DEFAULT.gene_neighborhood,
+            )
+        ),
+        co_occurrence=float(
+            raw_weights.get(
+                "co_occurrence",
+                INTERACTION_SCORING_WEIGHTS_DEFAULT.co_occurrence,
+            )
+        ),
+        domain_complementarity=float(
+            raw_weights.get(
+                "domain_complementarity",
+                INTERACTION_SCORING_WEIGHTS_DEFAULT.domain_complementarity,
+            )
+        ),
+        alphafold_readiness=float(
+            raw_weights.get(
+                "alphafold_readiness",
+                INTERACTION_SCORING_WEIGHTS_DEFAULT.alphafold_readiness,
+            )
+        ),
+    )
+
+    raw_alphafold = raw_scoring.get("alphafold", {})
+    if not isinstance(raw_alphafold, dict):
+        raw_alphafold = {}
+    alphafold = InteractionAlphaFoldConfig(
+        enabled=bool(raw_alphafold.get("enabled", INTERACTION_ALPHAFOLD_DEFAULT.enabled)),
+        max_pair_total_length=int(
+            raw_alphafold.get(
+                "max_pair_total_length",
+                INTERACTION_ALPHAFOLD_DEFAULT.max_pair_total_length,
+            )
+        ),
+    )
+
+    return InteractionScoringConfig(
+        enabled=bool(raw_scoring.get("enabled", False)),
+        query_proteins=tuple(query_proteins),
+        query_fasta=_optional_path(raw_scoring.get("query_fasta")),
+        candidate_sources=candidate_sources,
+        max_candidates_per_query=int(raw_scoring.get("max_candidates_per_query", 200)),
+        include_sequences_in_excel=bool(
+            raw_scoring.get("include_sequences_in_excel", False)
+        ),
+        scoring_weights=scoring_weights,
+        alphafold=alphafold,
     )
 
 
