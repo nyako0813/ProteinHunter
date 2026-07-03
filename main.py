@@ -26,10 +26,14 @@ def _require_path(path: Path | None, config_key: str) -> Path:
 
 SHEET_TO_ANNOTATION_TARGET: dict[str, str] = {
     "Candidates": "candidates",
+    "Candidates_relaxed": "candidates_relaxed",
     "Positive_all_sources": "positive_all_sources",
     "Negative_unmatched": "negative_unmatched",
     "No_hit": "no_hit",
     "Negative_hit": "negative_hit",
+    "Negative_strong_hit": "negative_hit",
+    "Negative_medium_hit": "negative_hit",
+    "Negative_weak_hit": "negative_hit",
 }
 
 
@@ -39,10 +43,14 @@ def _classification_record_sheets(
     """Return Excel classification sheets that can receive annotations."""
     return {
         "Candidates": blast_classification.positive_only_records,
+        "Candidates_relaxed": blast_classification.candidates_relaxed_records,
         "Positive_all_sources": blast_classification.positive_all_sources_records,
         "Negative_unmatched": blast_classification.negative_unmatched_records,
         "No_hit": blast_classification.no_hit_records,
         "Negative_hit": blast_classification.negative_hit_records,
+        "Negative_strong_hit": blast_classification.negative_strong_hit_records,
+        "Negative_medium_hit": blast_classification.negative_medium_hit_records,
+        "Negative_weak_hit": blast_classification.negative_weak_hit_records,
     }
 
 
@@ -226,6 +234,18 @@ def main(argv: Sequence[str] | None = None) -> None:
                 logger.info(f"Optional GFF file: {config.paths.gff_file}")
             else:
                 logger.info("Optional GFF file: not configured")
+            logger.info(
+                "Negative exclusion mode: "
+                f"{config.ortholog_filter.negative_exclusion_mode}"
+            )
+            for level in ("strong", "medium", "weak"):
+                threshold = getattr(config.ortholog_filter, level)
+                logger.info(
+                    f"{level} negative threshold: "
+                    f"identity >= {threshold.min_identity}, "
+                    f"query coverage >= {threshold.min_query_coverage}, "
+                    f"e-value <= {threshold.max_evalue}"
+                )
 
             input_summary = summarize_input_fastas(
                 target_fasta=target_fasta,
@@ -256,11 +276,16 @@ def main(argv: Sequence[str] | None = None) -> None:
                     max_target_seqs=config.blast.max_target_seqs,
                     threads=config.blast.threads,
                     positive_source_labels=positive_source_labels,
+                    ortholog_filter=config.ortholog_filter,
                 )
                 records = blast_classification.positive_only_records
 
             logger.info(f"Total target proteins: {len(blast_classification.all_records)}")
             logger.info(f"BLAST positive-only candidates: {len(records)}")
+            logger.info(
+                "Relaxed candidates: "
+                f"{len(blast_classification.candidates_relaxed_records)}"
+            )
             logger.info(
                 "Positive all-source candidates: "
                 f"{len(blast_classification.positive_all_sources_records)}"
@@ -272,6 +297,18 @@ def main(argv: Sequence[str] | None = None) -> None:
             logger.info(f"No-hit proteins: {len(blast_classification.no_hit_records)}")
             logger.info(
                 f"Negative-hit proteins: {len(blast_classification.negative_hit_records)}"
+            )
+            logger.info(
+                "Strong negative-hit proteins: "
+                f"{len(blast_classification.negative_strong_hit_records)}"
+            )
+            logger.info(
+                "Medium negative-hit proteins: "
+                f"{len(blast_classification.negative_medium_hit_records)}"
+            )
+            logger.info(
+                "Weak negative-hit proteins: "
+                f"{len(blast_classification.negative_weak_hit_records)}"
             )
 
         cache = JsonCache(config.paths.cache_dir)
@@ -472,12 +509,26 @@ def main(argv: Sequence[str] | None = None) -> None:
                         blast_classification.positive_all_sources_records
                     ),
                     positive_source_summary=blast_classification.all_records,
+                    candidates_relaxed=(
+                        blast_classification.candidates_relaxed_records
+                    ),
+                    negative_strong_hit=(
+                        blast_classification.negative_strong_hit_records
+                    ),
+                    negative_medium_hit=(
+                        blast_classification.negative_medium_hit_records
+                    ),
+                    negative_weak_hit=(
+                        blast_classification.negative_weak_hit_records
+                    ),
                 )
 
             logger.info(f"Final annotated candidate count: {len(records)}")
             logger.info(
-                "Excel sheets written: Candidates, Positive_all_sources, "
-                "Positive_source_summary, Negative_unmatched, No_hit, Negative_hit"
+                "Excel sheets written: Index, Candidates, Candidates_relaxed, "
+                "Positive_all_sources, Positive_source_summary, Negative_unmatched, "
+                "No_hit, Negative_hit, Negative_strong_hit, Negative_medium_hit, "
+                "Negative_weak_hit"
             )
             logger.info(f"Excel file written to: {excel_path}")
 

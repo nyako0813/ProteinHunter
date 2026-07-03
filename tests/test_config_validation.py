@@ -113,11 +113,16 @@ def test_missing_annotation_targets_uses_safe_defaults(tmp_path: Path) -> None:
     cfg = load_config(config_path, initialize=False)
 
     assert cfg.annotation_targets["candidates"].pfam is True
+    assert cfg.annotation_targets["candidates_relaxed"].gff is True
+    assert cfg.annotation_targets["candidates_relaxed"].pfam is True
+    assert cfg.annotation_targets["candidates_relaxed"].uniprot is False
     assert cfg.annotation_targets["positive_all_sources"].pfam is True
     assert cfg.annotation_targets["no_hit"].gff is True
     assert cfg.annotation_targets["no_hit"].pfam is False
     assert cfg.annotation_targets["negative_unmatched"].uniprot is False
     assert cfg.annotation_targets["negative_hit"].alphafold is False
+    assert cfg.ortholog_filter.negative_exclusion_mode == "any_hit"
+    assert cfg.ortholog_filter.strong.min_identity == 40.0
 
 
 def test_annotation_targets_can_enable_no_hit_pfam(tmp_path: Path) -> None:
@@ -159,6 +164,24 @@ def test_annotation_targets_missing_subkeys_keep_defaults(tmp_path: Path) -> Non
     assert cfg.annotation_targets["negative_hit"].uniprot is True
 
 
+def test_annotation_targets_can_configure_candidates_relaxed(tmp_path: Path) -> None:
+    """Candidates_relaxed should have its own per-sheet annotation switches."""
+    data = valid_config_data()
+    data["annotation_targets"] = {
+        "candidates_relaxed": {
+            "uniprot": True,
+        },
+    }
+    config_path = write_config(tmp_path, data)
+
+    cfg = load_config(config_path, initialize=False)
+
+    assert cfg.annotation_targets["candidates_relaxed"].gff is True
+    assert cfg.annotation_targets["candidates_relaxed"].pfam is True
+    assert cfg.annotation_targets["candidates_relaxed"].uniprot is True
+    assert cfg.annotation_targets["candidates_relaxed"].alphafold is False
+
+
 def test_invalid_annotation_target_boolean_raises_config_error(
     tmp_path: Path,
 ) -> None:
@@ -172,6 +195,38 @@ def test_invalid_annotation_target_boolean_raises_config_error(
     config_path = write_config(tmp_path, data)
 
     with pytest.raises(ConfigError, match="annotation_targets.no_hit.pfam"):
+        load_config(config_path, initialize=False)
+
+
+def test_ortholog_filter_can_be_configured(tmp_path: Path) -> None:
+    """ortholog_filter should load the negative exclusion mode and thresholds."""
+    data = valid_config_data()
+    data["ortholog_filter"] = {
+        "negative_exclusion_mode": "strong_only",
+        "strong": {
+            "min_identity": 45.0,
+            "min_query_coverage": 75.0,
+            "max_evalue": 1e-10,
+        },
+    }
+    config_path = write_config(tmp_path, data)
+
+    cfg = load_config(config_path, initialize=False)
+
+    assert cfg.ortholog_filter.negative_exclusion_mode == "strong_only"
+    assert cfg.ortholog_filter.strong.min_identity == 45.0
+    assert cfg.ortholog_filter.strong.min_query_coverage == 75.0
+    assert cfg.ortholog_filter.strong.max_evalue == 1e-10
+    assert cfg.ortholog_filter.medium.min_identity == 30.0
+
+
+def test_invalid_ortholog_filter_mode_raises_config_error(tmp_path: Path) -> None:
+    """negative_exclusion_mode should be one of the supported modes."""
+    data = valid_config_data()
+    data["ortholog_filter"] = {"negative_exclusion_mode": "strict-ish"}
+    config_path = write_config(tmp_path, data)
+
+    with pytest.raises(ConfigError, match="negative_exclusion_mode"):
         load_config(config_path, initialize=False)
 
 

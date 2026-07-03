@@ -12,6 +12,7 @@ from core.exceptions import ExcelOutputError
 from core.models import BlastHit, CandidateScore, DomainHit, ProteinRecord
 from output.excel import (
     EXCEL_COLUMNS,
+    INDEX_ROWS,
     records_to_dataframe,
     write_classification_workbook,
     write_records_to_excel,
@@ -156,6 +157,29 @@ def test_records_to_dataframe_appends_positive_source_fields() -> None:
     assert row["positive_source_count"] == 2
     assert row["positive_sources_hit"] == "A; B"
     assert row["positive_sources_missing"] == "C"
+
+
+def test_records_to_dataframe_includes_negative_evidence_fields() -> None:
+    """Negative hit evidence fields should be exported for classification sheets."""
+    record = make_record()
+    record.negative_best_identity = 45.0
+    record.negative_best_query_coverage = 80.0
+    record.negative_best_evalue = 1e-20
+    record.negative_best_source = "Negative_source"
+    record.negative_hit_strength = "strong"
+    record.negative_strong_hit_count = 1
+    record.negative_exclusion_reason = "excluded: strong negative hit"
+
+    dataframe = records_to_dataframe({"protein_1": record})
+    row = dataframe.iloc[0]
+
+    assert row["negative_best_identity"] == 45.0
+    assert row["negative_best_query_coverage"] == 80.0
+    assert row["negative_best_evalue"] == 1e-20
+    assert row["negative_best_source"] == "Negative_source"
+    assert row["negative_hit_strength"] == "strong"
+    assert row["negative_strong_hit_count"] == 1
+    assert row["negative_exclusion_reason"] == "excluded: strong negative hit"
 
 
 def test_records_to_dataframe_includes_domain_fields() -> None:
@@ -304,22 +328,53 @@ def test_write_classification_workbook_creates_expected_sheets(
 
     workbook = load_workbook(result)
     assert workbook.sheetnames == [
+        "Index",
         "Candidates",
+        "Candidates_relaxed",
         "Positive_all_sources",
         "Positive_source_summary",
         "Negative_unmatched",
         "No_hit",
         "Negative_hit",
+        "Negative_strong_hit",
+        "Negative_medium_hit",
+        "Negative_weak_hit",
     ]
-    assert workbook["Candidates"].max_row == 2
-    assert workbook["Positive_all_sources"].max_row == 2
-    assert workbook["Positive_source_summary"].max_row == 5
-    assert workbook["Negative_unmatched"].max_row == 3
-    assert workbook["No_hit"].max_row == 2
-    assert workbook["Negative_hit"].max_row == 3
+    assert workbook["Candidates"].max_row == 3
+    assert workbook["Positive_all_sources"].max_row == 3
+    assert workbook["Positive_source_summary"].max_row == 6
+    assert workbook["Negative_unmatched"].max_row == 4
+    assert workbook["No_hit"].max_row == 3
+    assert workbook["Negative_hit"].max_row == 4
 
-    negative_hit = pd.read_excel(result, sheet_name="Negative_hit")
+    negative_hit = pd.read_excel(result, sheet_name="Negative_hit", header=1)
     assert set(negative_hit["protein_id"]) == {"C_negative_only", "D_both"}
+
+
+def test_classification_workbook_index_links_all_sheets(tmp_path: Path) -> None:
+    """Index should be first and link to every classification sheet."""
+    output_path = tmp_path / "reports" / "classification_links.xlsx"
+
+    result = write_classification_workbook(
+        candidates={},
+        output_path=output_path,
+    )
+
+    workbook = load_workbook(result)
+    assert workbook.sheetnames[0] == "Index"
+    index = workbook["Index"]
+    expected_sheets = [row[0] for row in INDEX_ROWS]
+    linked_sheets = [index.cell(row=row_index, column=1).value for row_index in range(2, 12)]
+    assert linked_sheets == expected_sheets
+    for row_index, sheet_name in enumerate(expected_sheets, start=2):
+        assert index.cell(row=row_index, column=1).hyperlink.target == (
+            f"#'{sheet_name}'!A1"
+        )
+
+    for sheet_name in expected_sheets:
+        worksheet = workbook[sheet_name]
+        assert worksheet["A1"].value == "Back to Index"
+        assert worksheet["A1"].hyperlink.target == "#'Index'!A1"
 
 
 def test_write_records_to_excel_applies_simple_formatting(tmp_path: Path) -> None:

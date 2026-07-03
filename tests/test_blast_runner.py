@@ -64,6 +64,31 @@ def test_parse_blast_tabular_valid_output(tmp_path: Path) -> None:
     ]
 
 
+def test_parse_blast_tabular_reads_query_length(tmp_path: Path) -> None:
+    """BLAST output with qlen should populate query coverage support fields."""
+    output = tmp_path / "blast.tsv"
+    output.write_text(
+        "query_1\tsubject_1\t45.0\t80\t100\t1e-20\t88.0\n",
+        encoding="utf-8",
+    )
+
+    hits = parse_blast_tabular(output, source="negative")
+
+    assert hits == [
+        BlastHit(
+            "query_1",
+            "subject_1",
+            45.0,
+            80,
+            1e-20,
+            88.0,
+            "negative",
+            100,
+        )
+    ]
+    assert hits[0].query_coverage == 80.0
+
+
 def test_parse_blast_tabular_empty_output(tmp_path: Path) -> None:
     """Empty BLAST output should parse as no hits."""
     output = tmp_path / "empty.tsv"
@@ -137,7 +162,7 @@ def test_run_blastp_runs_blastp(tmp_path: Path) -> None:
     command = run_mock.call_args.args[0]
     assert command[0] == "blastp"
     assert "-outfmt" in command
-    assert "6 qseqid sseqid pident length evalue bitscore" in command
+    assert "6 qseqid sseqid pident length qlen evalue bitscore" in command
     assert output.parent.exists()
 
 

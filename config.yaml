@@ -77,24 +77,30 @@ annotation_targets:
   candidates:
     gff: true
     pfam: true
-    uniprot: true
-    alphafold: true
+    uniprot: false
+    alphafold: false
+
+  candidates_relaxed:
+    gff: true
+    pfam: true
+    uniprot: false
+    alphafold: false
 
   positive_all_sources:
     gff: true
     pfam: true
-    uniprot: true
-    alphafold: true
+    uniprot: false
+    alphafold: false
 
   no_hit:
     gff: true
-    pfam: false
+    pfam: true
     uniprot: false
     alphafold: false
 
   negative_unmatched:
     gff: true
-    pfam: false
+    pfam: true
     uniprot: false
     alphafold: false
 
@@ -103,6 +109,29 @@ annotation_targets:
     pfam: false
     uniprot: false
     alphafold: false
+
+
+# ----------------------------------------------------------
+# Ortholog-aware Negative Hit Filter
+# ----------------------------------------------------------
+
+ortholog_filter:
+  negative_exclusion_mode: strong_only
+
+  strong:
+    min_identity: 40.0
+    min_query_coverage: 70.0
+    max_evalue: 1e-5
+
+  medium:
+    min_identity: 30.0
+    min_query_coverage: 70.0
+    max_evalue: 1e-5
+
+  weak:
+    min_identity: 25.0
+    min_query_coverage: 50.0
+    max_evalue: 1e-3
 
 
 # ----------------------------------------------------------

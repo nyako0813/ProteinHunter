@@ -70,6 +70,7 @@ class AnnotationTargetsConfig:
     """Annotation switches for all Excel classification sheets."""
 
     candidates: AnnotationTargetConfig
+    candidates_relaxed: AnnotationTargetConfig
     positive_all_sources: AnnotationTargetConfig
     no_hit: AnnotationTargetConfig
     negative_unmatched: AnnotationTargetConfig
@@ -79,6 +80,7 @@ class AnnotationTargetsConfig:
         """Return sheet target names and settings in workbook order."""
         return (
             ("candidates", self.candidates),
+            ("candidates_relaxed", self.candidates_relaxed),
             ("positive_all_sources", self.positive_all_sources),
             ("no_hit", self.no_hit),
             ("negative_unmatched", self.negative_unmatched),
@@ -115,6 +117,21 @@ class LoggingConfig:
     save_log: bool
 
 
+@dataclass(frozen=True)
+class OrthologThresholdConfig:
+    min_identity: float
+    min_query_coverage: float
+    max_evalue: float
+
+
+@dataclass(frozen=True)
+class OrthologFilterConfig:
+    negative_exclusion_mode: str
+    strong: OrthologThresholdConfig
+    medium: OrthologThresholdConfig
+    weak: OrthologThresholdConfig
+
+
 @dataclass
 class Config:
 
@@ -126,6 +143,7 @@ class Config:
     blast: BlastConfig
     annotation: AnnotationConfig
     annotation_targets: AnnotationTargetsConfig
+    ortholog_filter: OrthologFilterConfig
     cache: CacheConfig
     score: ScoreConfig
     logging: LoggingConfig
@@ -143,6 +161,12 @@ ANNOTATION_TARGET_DEFAULTS: dict[str, AnnotationTargetConfig] = {
         pfam=True,
         uniprot=True,
         alphafold=True,
+    ),
+    "candidates_relaxed": AnnotationTargetConfig(
+        gff=True,
+        pfam=True,
+        uniprot=False,
+        alphafold=False,
     ),
     "positive_all_sources": AnnotationTargetConfig(
         gff=True,
@@ -169,6 +193,25 @@ ANNOTATION_TARGET_DEFAULTS: dict[str, AnnotationTargetConfig] = {
         alphafold=False,
     ),
 }
+
+ORTHOLOG_FILTER_DEFAULT = OrthologFilterConfig(
+    negative_exclusion_mode="any_hit",
+    strong=OrthologThresholdConfig(
+        min_identity=40.0,
+        min_query_coverage=70.0,
+        max_evalue=1e-5,
+    ),
+    medium=OrthologThresholdConfig(
+        min_identity=30.0,
+        min_query_coverage=70.0,
+        max_evalue=1e-5,
+    ),
+    weak=OrthologThresholdConfig(
+        min_identity=25.0,
+        min_query_coverage=50.0,
+        max_evalue=1e-3,
+    ),
+)
 
 
 def _auto_threads(value: object) -> int:
@@ -229,6 +272,7 @@ def load_config(config_file: str | Path = CONFIG_FILE, initialize: bool = True) 
         ),
     )
     annotation_targets = _load_annotation_targets(raw.get("annotation_targets"))
+    ortholog_filter = _load_ortholog_filter(raw.get("ortholog_filter"))
 
     cache = CacheConfig(**raw["cache"])
 
@@ -244,6 +288,7 @@ def load_config(config_file: str | Path = CONFIG_FILE, initialize: bool = True) 
         blast=blast,
         annotation=annotation,
         annotation_targets=annotation_targets,
+        ortholog_filter=ortholog_filter,
         cache=cache,
         score=score,
         logging=logging,
@@ -265,6 +310,7 @@ def validate_config(raw: object) -> None:
     _validate_blast_section(raw)
     _validate_annotation_section(raw)
     _validate_annotation_targets_section(raw)
+    _validate_ortholog_filter_section(raw)
     _validate_cache_section(raw)
     _validate_logging_section(raw)
 
@@ -412,7 +458,7 @@ def _validate_annotation_targets_section(raw: dict[object, object]) -> None:
             raise ConfigError(
                 "config.yaml value "
                 f"'annotation_targets.{sheet_name}' is not supported. "
-                "Use candidates, positive_all_sources, no_hit, "
+                "Use candidates, candidates_relaxed, positive_all_sources, no_hit, "
                 "negative_unmatched, or negative_hit."
             )
         if not isinstance(sheet_targets, dict):
@@ -466,6 +512,85 @@ def _load_annotation_targets(
         )
 
     return AnnotationTargetsConfig(**targets)
+
+
+def _validate_ortholog_filter_section(raw: dict[object, object]) -> None:
+    """Validate optional ortholog-aware negative-hit settings."""
+    section = raw.get("ortholog_filter")
+    if section is None:
+        return
+    if not isinstance(section, dict):
+        raise ConfigError("config.yaml value 'ortholog_filter' must be a mapping.")
+
+    mode = section.get("negative_exclusion_mode", "any_hit")
+    if mode not in {"any_hit", "strong_only", "strong_or_medium", "none"}:
+        raise ConfigError(
+            "config.yaml value 'ortholog_filter.negative_exclusion_mode' must be "
+            "any_hit, strong_only, strong_or_medium, or none."
+        )
+
+    for level in ("strong", "medium", "weak"):
+        raw_threshold = section.get(level, {})
+        if raw_threshold is None:
+            raw_threshold = {}
+        if not isinstance(raw_threshold, dict):
+            raise ConfigError(
+                f"config.yaml value 'ortholog_filter.{level}' must be a mapping."
+            )
+        for key in ("min_identity", "min_query_coverage", "max_evalue"):
+            if key not in raw_threshold:
+                continue
+            try:
+                value = float(raw_threshold[key])
+            except (TypeError, ValueError) as exc:
+                raise ConfigError(
+                    f"config.yaml value 'ortholog_filter.{level}.{key}' "
+                    "must be a number."
+                ) from exc
+            if value < 0:
+                raise ConfigError(
+                    f"config.yaml value 'ortholog_filter.{level}.{key}' "
+                    "must be greater than or equal to 0."
+                )
+
+
+def _load_ortholog_filter(raw_filter: object) -> OrthologFilterConfig:
+    """Load ortholog-aware negative-hit settings with backward-compatible defaults."""
+    if not isinstance(raw_filter, dict):
+        return ORTHOLOG_FILTER_DEFAULT
+
+    def threshold(
+        name: str,
+        default: OrthologThresholdConfig,
+    ) -> OrthologThresholdConfig:
+        raw_threshold = raw_filter.get(name, {})
+        if not isinstance(raw_threshold, dict):
+            raw_threshold = {}
+
+        return OrthologThresholdConfig(
+            min_identity=float(
+                raw_threshold.get("min_identity", default.min_identity)
+            ),
+            min_query_coverage=float(
+                raw_threshold.get(
+                    "min_query_coverage",
+                    default.min_query_coverage,
+                )
+            ),
+            max_evalue=float(raw_threshold.get("max_evalue", default.max_evalue)),
+        )
+
+    return OrthologFilterConfig(
+        negative_exclusion_mode=str(
+            raw_filter.get(
+                "negative_exclusion_mode",
+                ORTHOLOG_FILTER_DEFAULT.negative_exclusion_mode,
+            )
+        ),
+        strong=threshold("strong", ORTHOLOG_FILTER_DEFAULT.strong),
+        medium=threshold("medium", ORTHOLOG_FILTER_DEFAULT.medium),
+        weak=threshold("weak", ORTHOLOG_FILTER_DEFAULT.weak),
+    )
 
 
 def _validate_cache_section(raw: dict[object, object]) -> None:

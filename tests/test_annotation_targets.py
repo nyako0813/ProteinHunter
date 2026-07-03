@@ -11,6 +11,7 @@ from main import _records_for_annotation_step
 
 def targets(
     candidates: AnnotationTargetConfig,
+    candidates_relaxed: AnnotationTargetConfig,
     positive_all_sources: AnnotationTargetConfig,
     no_hit: AnnotationTargetConfig,
     negative_unmatched: AnnotationTargetConfig,
@@ -19,6 +20,7 @@ def targets(
     """Build annotation target settings for tests."""
     return AnnotationTargetsConfig(
         candidates=candidates,
+        candidates_relaxed=candidates_relaxed,
         positive_all_sources=positive_all_sources,
         no_hit=no_hit,
         negative_unmatched=negative_unmatched,
@@ -47,13 +49,18 @@ def test_records_for_annotation_step_selects_no_hit_when_enabled() -> None:
     no_hit = ProteinRecord(protein_id="no_hit")
     classification = SimpleNamespace(
         positive_only_records={"candidate": candidate},
+        candidates_relaxed_records={"candidate": candidate, "no_hit": no_hit},
         positive_all_sources_records={},
         no_hit_records={"no_hit": no_hit},
         negative_unmatched_records={"candidate": candidate, "no_hit": no_hit},
         negative_hit_records={},
+        negative_strong_hit_records={},
+        negative_medium_hit_records={},
+        negative_weak_hit_records={},
     )
     annotation_targets = targets(
         candidates=target(pfam=True),
+        candidates_relaxed=target(),
         positive_all_sources=target(pfam=True),
         no_hit=target(pfam=True),
         negative_unmatched=target(),
@@ -77,13 +84,18 @@ def test_records_for_annotation_step_avoids_duplicate_shared_records() -> None:
     shared = ProteinRecord(protein_id="shared")
     classification = SimpleNamespace(
         positive_only_records={"shared": shared},
+        candidates_relaxed_records={"shared": shared},
         positive_all_sources_records={"shared": shared},
         no_hit_records={},
         negative_unmatched_records={"shared": shared},
         negative_hit_records={},
+        negative_strong_hit_records={},
+        negative_medium_hit_records={},
+        negative_weak_hit_records={},
     )
     annotation_targets = targets(
         candidates=target(pfam=True),
+        candidates_relaxed=target(pfam=True),
         positive_all_sources=target(pfam=True),
         no_hit=target(),
         negative_unmatched=target(),
@@ -98,3 +110,35 @@ def test_records_for_annotation_step_avoids_duplicate_shared_records() -> None:
 
     assert list(selected) == ["shared"]
     assert selected["shared"] is shared
+
+
+def test_records_for_annotation_step_includes_candidates_relaxed() -> None:
+    """Candidates_relaxed should have independent annotation target switches."""
+    relaxed = ProteinRecord(protein_id="relaxed")
+    classification = SimpleNamespace(
+        positive_only_records={},
+        candidates_relaxed_records={"relaxed": relaxed},
+        positive_all_sources_records={},
+        no_hit_records={},
+        negative_unmatched_records={},
+        negative_hit_records={},
+        negative_strong_hit_records={},
+        negative_medium_hit_records={},
+        negative_weak_hit_records={},
+    )
+    annotation_targets = targets(
+        candidates=target(),
+        candidates_relaxed=target(pfam=True),
+        positive_all_sources=target(),
+        no_hit=target(),
+        negative_unmatched=target(),
+        negative_hit=target(),
+    )
+
+    selected = _records_for_annotation_step(
+        classification,
+        annotation_targets,
+        "pfam",
+    )
+
+    assert selected == {"relaxed": relaxed}

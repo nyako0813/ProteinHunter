@@ -38,6 +38,11 @@ annotation_targets:
     pfam: true
     uniprot: true
     alphafold: true
+  candidates_relaxed:
+    gff: true
+    pfam: true
+    uniprot: false
+    alphafold: false
   positive_all_sources:
     gff: true
     pfam: true
@@ -58,6 +63,21 @@ annotation_targets:
     pfam: false
     uniprot: false
     alphafold: false
+
+ortholog_filter:
+  negative_exclusion_mode: strong_only
+  strong:
+    min_identity: 40.0
+    min_query_coverage: 70.0
+    max_evalue: 1e-5
+  medium:
+    min_identity: 30.0
+    min_query_coverage: 70.0
+    max_evalue: 1e-5
+  weak:
+    min_identity: 25.0
+    min_query_coverage: 50.0
+    max_evalue: 1e-3
 
 cache:
   enabled: true

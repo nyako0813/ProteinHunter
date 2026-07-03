@@ -24,6 +24,15 @@ class BlastHit:
     evalue: float
     bitscore: float
     source: str = "blast"
+    query_length: int | None = None
+
+    @property
+    def query_coverage(self) -> float | None:
+        """Return query coverage percentage when query length is available."""
+        if self.query_length is None or self.query_length <= 0:
+            return None
+
+        return self.alignment_length / self.query_length * 100
 
 
 @dataclass(slots=True)
@@ -96,6 +105,15 @@ class ProteinRecord:
     positive_source_count: int = 0
     positive_sources_hit: list[str] = field(default_factory=list)
     positive_sources_missing: list[str] = field(default_factory=list)
+    negative_best_identity: float | None = None
+    negative_best_query_coverage: float | None = None
+    negative_best_evalue: float | None = None
+    negative_best_source: str | None = None
+    negative_hit_strength: str = "none"
+    negative_strong_hit_count: int = 0
+    negative_medium_hit_count: int = 0
+    negative_weak_hit_count: int = 0
+    negative_exclusion_reason: str = ""
     notes: list[str] = field(default_factory=list)
 
     @property

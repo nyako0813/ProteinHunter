@@ -41,6 +41,15 @@ EXCEL_COLUMNS: tuple[str, ...] = (
     "best_negative_hit",
     "best_negative_bitscore",
     "best_negative_evalue",
+    "negative_best_identity",
+    "negative_best_query_coverage",
+    "negative_best_evalue",
+    "negative_best_source",
+    "negative_hit_strength",
+    "negative_strong_hit_count",
+    "negative_medium_hit_count",
+    "negative_weak_hit_count",
+    "negative_exclusion_reason",
     "motifs",
     "uniprot_accession",
     "alphafold_url",
@@ -68,6 +77,98 @@ POSITIVE_SOURCE_SUMMARY_COLUMNS: tuple[str, ...] = (
     "best_negative_hit",
     "best_negative_bitscore",
     "best_negative_evalue",
+)
+
+
+INDEX_ROWS: tuple[tuple[str, str, str, str], ...] = (
+    (
+        "Candidates",
+        "positive hit present and no negative hit",
+        "strict candidate set; negative-free positive-associated targets",
+        "first-pass high-confidence candidate review",
+    ),
+    (
+        "Candidates_relaxed",
+        "positive hit present and no strong negative hit",
+        "retains targets with only medium/weak negative hits",
+        "avoid over-filtering by weak homolog/domain-level matches",
+    ),
+    (
+        "Positive_all_sources",
+        "hits all positive sources and no negative hit",
+        "broadly conserved among cnm5U-positive organisms",
+        "search for shared cnm5U-related factors",
+    ),
+    (
+        "Positive_source_summary",
+        "summarizes positive source hit distribution for each target",
+        "shows how widely each target is conserved in positive sources",
+        "compare positive source breadth",
+    ),
+    (
+        "Negative_unmatched",
+        "no negative hit",
+        "targets not found in cnm5U-negative organisms",
+        "review all negative-unmatched targets",
+    ),
+    (
+        "No_hit",
+        "no positive hit and no negative hit",
+        "Methanosarcina acetivorans-specific or poorly conserved candidates",
+        "search for novel thioamidation-related factors",
+    ),
+    (
+        "Negative_hit",
+        "any negative hit",
+        "targets with at least one hit in cnm5U-negative organisms",
+        "inspect what would be excluded by strict filtering",
+    ),
+    (
+        "Negative_strong_hit",
+        "at least one strong negative hit",
+        "likely common/ortholog-like factor present in negative organisms",
+        "generally lower priority or exclusion-oriented candidates",
+    ),
+    (
+        "Negative_medium_hit",
+        "medium negative hit but no strong negative hit",
+        "ambiguous homolog candidates",
+        "check conserved motifs, domains, and structure before excluding",
+    ),
+    (
+        "Negative_weak_hit",
+        "weak negative hit only",
+        "possible distant homolog or shared domain",
+        "do not exclude automatically; use as caution flag",
+    ),
+)
+
+
+NEGATIVE_EVIDENCE_EXPLANATIONS: tuple[tuple[str, str], ...] = (
+    ("negative_best_identity", "best identity among negative hits"),
+    (
+        "negative_best_query_coverage",
+        "query coverage of the representative/best negative hit",
+    ),
+    ("negative_best_evalue", "E-value of the representative/best negative hit"),
+    (
+        "negative_best_source",
+        "negative source where the representative/best negative hit was found",
+    ),
+    ("negative_hit_strength", "strong / medium / weak / none"),
+    (
+        "negative_strong_hit_count",
+        "number of negative hits classified as strong",
+    ),
+    (
+        "negative_medium_hit_count",
+        "number of negative hits classified as medium",
+    ),
+    ("negative_weak_hit_count", "number of negative hits classified as weak"),
+    (
+        "negative_exclusion_reason",
+        "reason why the record was retained or excluded under the current ortholog_filter mode",
+    ),
 )
 
 
@@ -110,12 +211,17 @@ def write_classification_workbook(
     negative_hit: dict[str, ProteinRecord] | None = None,
     positive_all_sources: dict[str, ProteinRecord] | None = None,
     positive_source_summary: dict[str, ProteinRecord] | None = None,
+    candidates_relaxed: dict[str, ProteinRecord] | None = None,
+    negative_strong_hit: dict[str, ProteinRecord] | None = None,
+    negative_medium_hit: dict[str, ProteinRecord] | None = None,
+    negative_weak_hit: dict[str, ProteinRecord] | None = None,
 ) -> Path:
     """Write candidate records and BLAST classification sheets to Excel."""
     resolved_output = Path(output_path).expanduser().resolve()
     resolved_output.parent.mkdir(parents=True, exist_ok=True)
     sheets = {
         "Candidates": records_to_dataframe(candidates),
+        "Candidates_relaxed": records_to_dataframe(candidates_relaxed or {}),
         "Positive_all_sources": records_to_dataframe(positive_all_sources or {}),
         "Positive_source_summary": positive_source_summary_dataframe(
             positive_source_summary or {}
@@ -123,14 +229,27 @@ def write_classification_workbook(
         "Negative_unmatched": records_to_dataframe(negative_unmatched or {}),
         "No_hit": records_to_dataframe(no_hit or {}),
         "Negative_hit": records_to_dataframe(negative_hit or {}),
+        "Negative_strong_hit": records_to_dataframe(negative_strong_hit or {}),
+        "Negative_medium_hit": records_to_dataframe(negative_medium_hit or {}),
+        "Negative_weak_hit": records_to_dataframe(negative_weak_hit or {}),
     }
 
     try:
         with pd.ExcelWriter(resolved_output, engine="openpyxl") as writer:
+            index_dataframe = _index_dataframe()
+            index_dataframe.to_excel(writer, sheet_name="Index", index=False)
+            _format_index_worksheet(writer.sheets["Index"], index_dataframe)
+
             for sheet_name, dataframe in sheets.items():
-                dataframe.to_excel(writer, sheet_name=sheet_name, index=False)
+                dataframe.to_excel(
+                    writer,
+                    sheet_name=sheet_name,
+                    index=False,
+                    startrow=1,
+                )
                 worksheet = writer.sheets[sheet_name]
-                _format_worksheet(worksheet, dataframe)
+                _add_back_to_index_link(worksheet)
+                _format_worksheet(worksheet, dataframe, header_row=2)
     except Exception as exc:
         message = (
             f"ProteinHunter could not write the Excel file: {resolved_output}. "
@@ -149,12 +268,19 @@ def positive_source_summary_dataframe(
     return pd.DataFrame(rows, columns=POSITIVE_SOURCE_SUMMARY_COLUMNS)
 
 
-def _format_worksheet(worksheet: Worksheet, dataframe: pd.DataFrame) -> None:
+def _format_worksheet(
+    worksheet: Worksheet,
+    dataframe: pd.DataFrame,
+    header_row: int = 1,
+) -> None:
     """Apply simple readability formatting to an Excel worksheet."""
-    worksheet.freeze_panes = "A2"
-    worksheet.auto_filter.ref = worksheet.dimensions
+    worksheet.freeze_panes = f"A{header_row + 1}"
+    if len(dataframe.columns) > 0:
+        last_column = get_column_letter(len(dataframe.columns))
+        last_row = max(header_row, header_row + len(dataframe.index))
+        worksheet.auto_filter.ref = f"A{header_row}:{last_column}{last_row}"
 
-    for header_cell in worksheet[1]:
+    for header_cell in worksheet[header_row]:
         header_cell.font = Font(bold=True)
 
     wrap_columns = {
@@ -164,6 +290,7 @@ def _format_worksheet(worksheet: Worksheet, dataframe: pd.DataFrame) -> None:
         "notes",
         "positive_sources_hit",
         "positive_sources_missing",
+        "negative_exclusion_reason",
     }
 
     for column_index, column_name in enumerate(dataframe.columns, start=1):
@@ -180,6 +307,76 @@ def _format_worksheet(worksheet: Worksheet, dataframe: pd.DataFrame) -> None:
         if column_name in wrap_columns:
             for cell in worksheet[column_letter]:
                 cell.alignment = Alignment(wrap_text=True, vertical="top")
+
+
+def _index_dataframe() -> pd.DataFrame:
+    """Return the workbook navigation index DataFrame."""
+    rows: list[dict[str, str]] = [
+        {
+            "Sheet": sheet,
+            "Selection rule": selection_rule,
+            "Biological interpretation": interpretation,
+            "Recommended use": recommended_use,
+        }
+        for sheet, selection_rule, interpretation, recommended_use in INDEX_ROWS
+    ]
+    rows.append(
+        {
+            "Sheet": "",
+            "Selection rule": "",
+            "Biological interpretation": "",
+            "Recommended use": "",
+        }
+    )
+    rows.append(
+        {
+            "Sheet": "Negative evidence columns",
+            "Selection rule": "",
+            "Biological interpretation": "",
+            "Recommended use": "",
+        }
+    )
+    for column_name, explanation in NEGATIVE_EVIDENCE_EXPLANATIONS:
+        rows.append(
+            {
+                "Sheet": column_name,
+                "Selection rule": explanation,
+                "Biological interpretation": "",
+                "Recommended use": "",
+            }
+        )
+
+    return pd.DataFrame(
+        rows,
+        columns=(
+            "Sheet",
+            "Selection rule",
+            "Biological interpretation",
+            "Recommended use",
+        ),
+    )
+
+
+def _format_index_worksheet(
+    worksheet: Worksheet,
+    dataframe: pd.DataFrame,
+) -> None:
+    """Apply navigation links and readable formatting to the Index sheet."""
+    _format_worksheet(worksheet, dataframe)
+    for row_index, sheet_name in enumerate(
+        (row[0] for row in INDEX_ROWS),
+        start=2,
+    ):
+        cell = worksheet.cell(row=row_index, column=1)
+        cell.hyperlink = f"#'{sheet_name}'!A1"
+        cell.style = "Hyperlink"
+
+
+def _add_back_to_index_link(worksheet: Worksheet) -> None:
+    """Add a consistent internal link back to the Index sheet."""
+    worksheet["A1"] = "Back to Index"
+    worksheet["A1"].hyperlink = "#'Index'!A1"
+    worksheet["A1"].style = "Hyperlink"
 
 
 def _column_width(column_name: str, values: pd.Series) -> int:
@@ -229,6 +426,15 @@ def _record_to_row(record: ProteinRecord) -> dict[str, Any]:
         "best_negative_hit": best_negative.subject_id if best_negative else None,
         "best_negative_bitscore": best_negative.bitscore if best_negative else None,
         "best_negative_evalue": best_negative.evalue if best_negative else None,
+        "negative_best_identity": record.negative_best_identity,
+        "negative_best_query_coverage": record.negative_best_query_coverage,
+        "negative_best_evalue": record.negative_best_evalue,
+        "negative_best_source": record.negative_best_source,
+        "negative_hit_strength": record.negative_hit_strength or "",
+        "negative_strong_hit_count": record.negative_strong_hit_count,
+        "negative_medium_hit_count": record.negative_medium_hit_count,
+        "negative_weak_hit_count": record.negative_weak_hit_count,
+        "negative_exclusion_reason": record.negative_exclusion_reason,
         "motifs": "; ".join(record.motifs),
         "uniprot_accession": record.uniprot_accession,
         "alphafold_url": record.alphafold_url,
@@ -345,6 +551,7 @@ def _blast_status(record: ProteinRecord) -> str:
 
 __all__: tuple[str, ...] = (
     "EXCEL_COLUMNS",
+    "INDEX_ROWS",
     "POSITIVE_SOURCE_SUMMARY_COLUMNS",
     "positive_source_summary_dataframe",
     "records_to_dataframe",

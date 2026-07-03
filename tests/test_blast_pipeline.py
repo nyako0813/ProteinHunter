@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -9,6 +10,7 @@ from analysis.blast_pipeline import (
     run_blast_candidate_pipeline,
     run_blast_classification_pipeline,
 )
+from config import ORTHOLOG_FILTER_DEFAULT
 from core.models import BlastHit
 
 
@@ -35,6 +37,25 @@ def make_subject_hit(query_id: str, subject_id: str, source: str) -> BlastHit:
         evalue=1e-20,
         bitscore=50.0,
         source=source,
+    )
+
+
+def make_negative_hit(
+    query_id: str,
+    identity: float,
+    coverage: float,
+    evalue: float,
+) -> BlastHit:
+    """Create a negative hit with a chosen strength profile."""
+    return BlastHit(
+        query_id=query_id,
+        subject_id="negative_subject",
+        percent_identity=identity,
+        alignment_length=int(coverage),
+        evalue=evalue,
+        bitscore=50.0,
+        source="negative",
+        query_length=100,
     )
 
 
@@ -282,3 +303,61 @@ def test_blast_classification_tracks_positive_all_sources(
     assert result.all_records["T2_one"].positive_source_count == 1
     assert result.all_records["T2_one"].positive_sources_hit == ["A"]
     assert result.all_records["T2_one"].positive_sources_missing == ["B", "C"]
+
+
+def test_blast_classification_tracks_relaxed_and_negative_strength_groups(
+    tmp_path: Path,
+) -> None:
+    """Strong-only mode should retain medium/weak negative hits as relaxed candidates."""
+    positive_hits = [
+        make_hit("T_strong", "positive"),
+        make_hit("T_medium", "positive"),
+        make_hit("T_weak", "positive"),
+        make_hit("T_none", "positive"),
+    ]
+    negative_hits = [
+        make_negative_hit("T_strong", 45.0, 80.0, 1e-20),
+        make_negative_hit("T_medium", 35.0, 80.0, 1e-20),
+        make_negative_hit("T_weak", 27.0, 60.0, 1e-4),
+    ]
+
+    with (
+        patch(
+            "analysis.blast_pipeline.read_fasta_as_components",
+            return_value=(
+                ["T_strong", "T_medium", "T_weak", "T_none"],
+                {
+                    "T_strong": "strong desc",
+                    "T_medium": "medium desc",
+                    "T_weak": "weak desc",
+                    "T_none": "none desc",
+                },
+                {
+                    "T_strong": "M" * 100,
+                    "T_medium": "M" * 100,
+                    "T_weak": "M" * 100,
+                    "T_none": "M" * 100,
+                },
+            ),
+        ),
+        patch(
+            "analysis.blast_pipeline.run_blast_pipeline",
+            side_effect=[positive_hits, negative_hits],
+        ),
+    ):
+        result = run_blast_classification_pipeline(
+            target_fasta=tmp_path / "targets.faa",
+            positive_fasta=tmp_path / "positive.faa",
+            negative_fasta=tmp_path / "negative.faa",
+            work_dir=tmp_path / "work",
+            ortholog_filter=replace(
+                ORTHOLOG_FILTER_DEFAULT,
+                negative_exclusion_mode="strong_only",
+            ),
+        )
+
+    assert set(result.positive_only_records) == {"T_none"}
+    assert set(result.candidates_relaxed_records) == {"T_medium", "T_weak", "T_none"}
+    assert set(result.negative_strong_hit_records) == {"T_strong"}
+    assert set(result.negative_medium_hit_records) == {"T_medium"}
+    assert set(result.negative_weak_hit_records) == {"T_weak"}

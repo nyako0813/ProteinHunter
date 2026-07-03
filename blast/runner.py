@@ -23,6 +23,7 @@ BLAST_OUTFMT_COLUMNS: tuple[str, ...] = (
     "sseqid",
     "pident",
     "length",
+    "qlen",
     "evalue",
     "bitscore",
 )
@@ -147,21 +148,26 @@ def parse_blast_tabular(path: str | Path, source: str = "blast") -> list[BlastHi
                 continue
 
             columns = line.split("\t")
-            if len(columns) != len(BLAST_OUTFMT_COLUMNS):
+            if len(columns) not in {6, len(BLAST_OUTFMT_COLUMNS)}:
                 raise BlastParseError(
                     f"Malformed BLAST output on line {line_number}: "
-                    f"expected {len(BLAST_OUTFMT_COLUMNS)} columns, got {len(columns)}."
+                    f"expected 6 or {len(BLAST_OUTFMT_COLUMNS)} columns, "
+                    f"got {len(columns)}."
                 )
 
             try:
+                query_length = int(columns[4]) if len(columns) == 7 else None
+                evalue_index = 5 if len(columns) == 7 else 4
+                bitscore_index = 6 if len(columns) == 7 else 5
                 hit = BlastHit(
                     query_id=columns[0],
                     subject_id=columns[1],
                     percent_identity=float(columns[2]),
                     alignment_length=int(columns[3]),
-                    evalue=float(columns[4]),
-                    bitscore=float(columns[5]),
+                    evalue=float(columns[evalue_index]),
+                    bitscore=float(columns[bitscore_index]),
                     source=source,
+                    query_length=query_length,
                 )
             except ValueError as exc:
                 raise BlastParseError(

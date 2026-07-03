@@ -10,6 +10,10 @@ from analysis.candidates import (
     build_candidate_records,
     filter_positive_without_negative,
 )
+from analysis.ortholog_filter import (
+    is_excluded_by_negative_mode,
+    populate_negative_hit_evidence,
+)
 from blast.runner import run_blast_pipeline
 from Bio import SeqIO
 from core.fasta import read_fasta_as_components
@@ -28,6 +32,10 @@ class BlastClassificationResult:
     negative_unmatched_records: dict[str, ProteinRecord]
     no_hit_records: dict[str, ProteinRecord]
     negative_hit_records: dict[str, ProteinRecord]
+    candidates_relaxed_records: dict[str, ProteinRecord]
+    negative_strong_hit_records: dict[str, ProteinRecord]
+    negative_medium_hit_records: dict[str, ProteinRecord]
+    negative_weak_hit_records: dict[str, ProteinRecord]
     positive_all_sources_records: dict[str, ProteinRecord]
     positive_source_labels: tuple[str, ...]
 
@@ -64,6 +72,7 @@ def run_blast_classification_pipeline(
     max_target_seqs: int = 10,
     threads: int = 1,
     positive_source_labels: tuple[str, ...] | None = None,
+    ortholog_filter: object | None = None,
 ) -> BlastClassificationResult:
     """Build BLAST classification groups for all target proteins."""
     protein_ids, descriptions, sequences = read_fasta_as_components(target_fasta)
@@ -89,6 +98,8 @@ def run_blast_classification_pipeline(
         max_target_seqs=max_target_seqs,
         threads=threads,
     )
+    _populate_hit_query_lengths(positive_hits, sequences)
+    _populate_hit_query_lengths(negative_hits, sequences)
 
     records = build_candidate_records(
         protein_ids=protein_ids,
@@ -105,11 +116,18 @@ def run_blast_classification_pipeline(
         positive_fasta=positive_fasta,
         fallback_source=source_labels[0] if len(source_labels) == 1 else None,
     )
+    negative_subject_sources = _subject_sources(
+        fasta_path=negative_fasta,
+        fallback_source="negative_fasta",
+    )
+    _populate_hit_sources(negative_hits, negative_subject_sources)
     _populate_positive_source_summary(
         records=records,
         positive_source_labels=source_labels,
         subject_sources=subject_sources,
     )
+    if ortholog_filter is not None:
+        populate_negative_hit_evidence(records, ortholog_filter)
 
     positive_only_records = filter_positive_without_negative(records)
     negative_unmatched_records = {
@@ -127,6 +145,36 @@ def run_blast_classification_pipeline(
         for protein_id, record in records.items()
         if record.negative_hits
     }
+    if ortholog_filter is None:
+        candidates_relaxed_records = dict(positive_only_records)
+    else:
+        candidates_relaxed_records = {
+            protein_id: record
+            for protein_id, record in records.items()
+            if record.positive_hits
+            and not is_excluded_by_negative_mode(
+                record,
+                ortholog_filter.negative_exclusion_mode,
+            )
+        }
+    negative_strong_hit_records = {
+        protein_id: record
+        for protein_id, record in records.items()
+        if record.negative_strong_hit_count > 0
+    }
+    negative_medium_hit_records = {
+        protein_id: record
+        for protein_id, record in records.items()
+        if record.negative_medium_hit_count > 0
+        and record.negative_strong_hit_count == 0
+    }
+    negative_weak_hit_records = {
+        protein_id: record
+        for protein_id, record in records.items()
+        if record.negative_weak_hit_count > 0
+        and record.negative_strong_hit_count == 0
+        and record.negative_medium_hit_count == 0
+    }
     positive_all_sources_records = {
         protein_id: record
         for protein_id, record in records.items()
@@ -140,6 +188,10 @@ def run_blast_classification_pipeline(
         negative_unmatched_records=negative_unmatched_records,
         no_hit_records=no_hit_records,
         negative_hit_records=negative_hit_records,
+        candidates_relaxed_records=candidates_relaxed_records,
+        negative_strong_hit_records=negative_strong_hit_records,
+        negative_medium_hit_records=negative_medium_hit_records,
+        negative_weak_hit_records=negative_weak_hit_records,
         positive_all_sources_records=positive_all_sources_records,
         positive_source_labels=source_labels,
     )
@@ -184,12 +236,20 @@ def _positive_subject_sources(
     fallback_source: str | None,
 ) -> dict[str, set[str]]:
     """Map positive FASTA subject IDs to source labels."""
-    fasta_path = Path(positive_fasta)
-    if not fasta_path.exists():
+    return _subject_sources(positive_fasta, fallback_source)
+
+
+def _subject_sources(
+    fasta_path: str | Path,
+    fallback_source: str | None,
+) -> dict[str, set[str]]:
+    """Map FASTA subject IDs to source labels."""
+    fasta = Path(fasta_path)
+    if not fasta.exists():
         return {}
 
     mapping: dict[str, set[str]] = {}
-    for record in SeqIO.parse(fasta_path, "fasta"):
+    for record in SeqIO.parse(fasta, "fasta"):
         source_label = _source_label_from_description(record.description)
         if source_label is None:
             source_label = fallback_source
@@ -200,6 +260,29 @@ def _positive_subject_sources(
             mapping.setdefault(key, set()).add(source_label)
 
     return mapping
+
+
+def _populate_hit_sources(
+    hits: list,
+    subject_sources: dict[str, set[str]],
+) -> None:
+    """Replace generic hit source with source labels when they are known."""
+    for hit in hits:
+        sources = subject_sources.get(hit.subject_id)
+        if sources is None:
+            sources = subject_sources.get(_without_version(hit.subject_id))
+        if sources:
+            hit.source = sorted(sources)[0]
+
+
+def _populate_hit_query_lengths(
+    hits: list,
+    sequences: dict[str, str],
+) -> None:
+    """Fill missing query lengths from target FASTA sequences."""
+    for hit in hits:
+        if hit.query_length is None:
+            hit.query_length = len(sequences.get(hit.query_id, ""))
 
 
 def _populate_positive_source_summary(
