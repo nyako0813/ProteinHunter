@@ -23,3 +23,4 @@ __pycache__/
 *.pyo
 .pytest_cache/
 data/local_backup/
+*:Zone.Identifier
