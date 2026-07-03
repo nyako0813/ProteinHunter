@@ -75,10 +75,10 @@ annotation:
 
 annotation_targets:
   candidates:
-    gff: true
-    pfam: true
-    uniprot: true
-    alphafold: true
+    gff: false
+    pfam: false
+    uniprot: false
+    alphafold: false
 
   positive_all_sources:
     gff: true
@@ -88,18 +88,18 @@ annotation_targets:
 
   no_hit:
     gff: true
-    pfam: false
-    uniprot: false
-    alphafold: false
+    pfam: true
+    uniprot: true
+    alphafold: true
 
   negative_unmatched:
     gff: true
-    pfam: false
-    uniprot: false
-    alphafold: false
+    pfam: true
+    uniprot: true
+    alphafold: true
 
   negative_hit:
-    gff: true
+    gff: false
     pfam: false
     uniprot: false
     alphafold: false
