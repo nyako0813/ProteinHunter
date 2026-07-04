@@ -148,6 +148,9 @@ INTERACTION_PAIR_COLUMNS: tuple[str, ...] = (
     "strand_relation",
     "same_gene_neighborhood_score",
     "interaction_priority_score",
+    "distance_independent_score",
+    "distance_independent_rank",
+    "priority_group",
     "interaction_score_reasons",
     "candidate_priority_score",
     "co_occurrence_score",
@@ -430,6 +433,7 @@ def _rank_source_candidates(resolved_queries: list[dict[str, Any]], candidate_re
             if _is_self_pair(query, candidate):
                 continue
             query_rows.append(_score_pair(query, candidate, candidate_source, scoring_config, feature_map))
+        _assign_distance_independent_ranks(query_rows)
         query_rows.sort(key=lambda row: (-float(row["interaction_priority_score"]), not bool(row["alphafold_recommended"]), str(row["candidate_protein_id"])))
         for rank, row in enumerate(query_rows[: scoring_config.max_candidates_per_query], start=1):
             row["candidate_rank"] = rank
@@ -452,6 +456,20 @@ def _score_pair(query: dict[str, Any], candidate: ProteinRecord, candidate_sourc
     alphafold_readiness_score, pair_total_length, alphafold_recommended = _alphafold_readiness(query, candidate, scoring_config)
     reasons.append("compatible for manual AlphaFold" if alphafold_recommended else "missing sequence or length too large for manual AlphaFold")
 
+    distance_independent_score = (
+        candidate_priority_score
+        + co_occurrence_score
+        + domain_complementarity_score
+    )
+    priority_group = _priority_group(
+        candidate_source=candidate_source,
+        same_gene_neighborhood_score=neighborhood["same_gene_neighborhood_score"],
+        co_occurrence_score=co_occurrence_score,
+        domain_complementarity_score=domain_complementarity_score,
+    )
+    if priority_group in {"distant_cooccurrence_candidate", "distant_domain_candidate"}:
+        reasons.append("distant candidate retained by co-occurrence/domain evidence")
+
     total_score = candidate_priority_score + neighborhood["same_gene_neighborhood_score"] + co_occurrence_score + domain_complementarity_score + alphafold_readiness_score
     row = {
         "query_id": query["query_id"],
@@ -464,6 +482,9 @@ def _score_pair(query: dict[str, Any], candidate: ProteinRecord, candidate_sourc
         "candidate_description": candidate.description,
         **{key: value for key, value in neighborhood.items() if key != "reason"},
         "interaction_priority_score": round(total_score, 3),
+        "distance_independent_score": round(distance_independent_score, 3),
+        "distance_independent_rank": 0,
+        "priority_group": priority_group,
         "interaction_score_reasons": "; ".join(reasons),
         "candidate_priority_score": round(candidate_priority_score, 3),
         "co_occurrence_score": round(co_occurrence_score, 3),
@@ -476,6 +497,38 @@ def _score_pair(query: dict[str, Any], candidate: ProteinRecord, candidate_sourc
         row["query_sequence"] = query["sequence"]
         row["candidate_sequence"] = candidate.sequence
     return row
+
+
+def _assign_distance_independent_ranks(rows: list[dict[str, Any]]) -> None:
+    """Assign distance-independent ranks within one query/source sheet."""
+    ranked_rows = sorted(
+        rows,
+        key=lambda row: (
+            -float(row["distance_independent_score"]),
+            -float(row["domain_complementarity_score"]),
+            -float(row["co_occurrence_score"]),
+            str(row["candidate_protein_id"]),
+        ),
+    )
+    for rank, row in enumerate(ranked_rows, start=1):
+        row["distance_independent_rank"] = rank
+
+
+def _priority_group(
+    candidate_source: str,
+    same_gene_neighborhood_score: float,
+    co_occurrence_score: float,
+    domain_complementarity_score: float,
+) -> str:
+    if same_gene_neighborhood_score > 0:
+        return "nearby_candidate"
+    if co_occurrence_score > 0:
+        return "distant_cooccurrence_candidate"
+    if domain_complementarity_score > 0:
+        return "distant_domain_candidate"
+    if candidate_source == "No_hit":
+        return "no_hit_candidate"
+    return "general_candidate"
 
 
 def _gene_neighborhood(query: dict[str, Any], candidate: ProteinRecord, feature_map: dict[str, GffFeatureLocation], max_score: float) -> dict[str, Any]:

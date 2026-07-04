@@ -10,7 +10,7 @@ from openpyxl import load_workbook
 
 from core.exceptions import ExcelOutputError
 from core.models import BlastHit, CandidateScore, DomainHit, ProteinRecord
-from analysis.interaction_scoring import InteractionScoringResult
+from analysis.interaction_scoring import InteractionScoringResult, interaction_pair_columns
 from output.excel import (
     EXCEL_COLUMNS,
     INDEX_ROWS,
@@ -269,6 +269,16 @@ def test_records_to_dataframe_joins_motifs_and_notes() -> None:
     assert row["motifs"] == "CXXC; HXXH"
     assert row["notes"] == "reviewed; export ready"
 
+
+
+
+def test_interaction_pair_columns_include_distance_independent_ranking() -> None:
+    """Interaction sheets should expose distance-independent ranking fields."""
+    columns = interaction_pair_columns(False)
+
+    assert "distance_independent_score" in columns
+    assert "distance_independent_rank" in columns
+    assert "priority_group" in columns
 
 def test_write_records_to_excel_creates_xlsx_file(tmp_path: Path) -> None:
     """Excel writer should create a readable xlsx file."""

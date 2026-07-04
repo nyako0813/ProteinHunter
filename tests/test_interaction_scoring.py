@@ -485,3 +485,114 @@ def test_domain_complementarity_uses_pfam_cdd_terms_and_caps_score() -> None:
     assert row["domain_complementarity_score"] == 15.0
     assert "Pfam/CDD functional terms used" in row["interaction_score_reasons"]
     assert "complementary terms" in row["interaction_score_reasons"]
+
+
+
+def test_distance_independent_score_excludes_gene_neighborhood(tmp_path: Path) -> None:
+    """Distance-independent score should not include genomic neighborhood evidence."""
+    gff = tmp_path / "coords.gff"
+    gff.write_text(
+        "contig1\tRefSeq\tCDS\t100\t200\t.\t+\t0\tID=cds-query;protein_id=query\n"
+        "contig1\tRefSeq\tCDS\t500\t600\t.\t+\t0\tID=cds-candidate;protein_id=candidate\n",
+        encoding="utf-8",
+    )
+    records = {
+        "query": record("query", positive_sources_hit=["A"]),
+        "candidate": record("candidate", positive_sources_hit=["A"]),
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+        gff_file=gff,
+    )
+
+    result = run_interaction_scoring(cfg, classification(records))
+
+    assert result is not None
+    row = result.source_rows["Interaction_Candidates"][0]
+    expected = (
+        row["candidate_priority_score"]
+        + row["co_occurrence_score"]
+        + row["domain_complementarity_score"]
+    )
+    assert row["same_gene_neighborhood_score"] > 0
+    assert row["distance_independent_score"] == expected
+    assert row["interaction_priority_score"] > row["distance_independent_score"]
+
+
+def test_priority_groups_distinguish_nearby_distant_and_no_hit(tmp_path: Path) -> None:
+    """Nearby and distant retained candidates should receive distinct groups."""
+    gff = tmp_path / "coords.gff"
+    gff.write_text(
+        "contig1\tRefSeq\tCDS\t100\t200\t.\t+\t0\tID=cds-query;protein_id=query\n"
+        "contig1\tRefSeq\tCDS\t500\t600\t.\t+\t0\tID=cds-near;protein_id=near\n"
+        "contig1\tRefSeq\tCDS\t200000\t200100\t.\t+\t0\tID=cds-distant-co;protein_id=distant_co\n"
+        "contig1\tRefSeq\tCDS\t210000\t210100\t.\t+\t0\tID=cds-distant-domain;protein_id=distant_domain\n",
+        encoding="utf-8",
+    )
+    query = record("query", description="radical SAM protein", positive_sources_hit=["A"])
+    near = record("near", positive_sources_hit=[])
+    distant_co = record("distant_co", positive_sources_hit=["A"])
+    distant_domain = record("distant_domain", description="iron-sulfur protein")
+    records = {
+        "query": query,
+        "candidate": near,
+        "relaxed": distant_co,
+        "novel": distant_domain,
+    }
+    cls = classification(records)
+    cls.positive_only_records = {
+        "near": near,
+        "distant_co": distant_co,
+        "distant_domain": distant_domain,
+    }
+    cls.no_hit_records = {"novel": distant_domain}
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True, "no_hit": True},
+        gff_file=gff,
+    )
+
+    result = run_interaction_scoring(cfg, cls)
+
+    assert result is not None
+    by_id = {
+        row["candidate_protein_id"]: row
+        for row in result.source_rows["Interaction_Candidates"]
+    }
+    assert set(by_id) == {"near", "distant_co", "distant_domain"}
+    assert by_id["near"]["priority_group"] == "nearby_candidate"
+    assert by_id["distant_co"]["priority_group"] == "distant_cooccurrence_candidate"
+    assert by_id["distant_domain"]["priority_group"] == "distant_domain_candidate"
+    assert "distant candidate retained" in by_id["distant_co"]["interaction_score_reasons"]
+    no_hit_row = result.source_rows["Interaction_No_hit"][0]
+    assert no_hit_row["priority_group"] == "distant_domain_candidate"
+
+
+def test_distance_independent_rank_is_assigned_within_interaction_sheet() -> None:
+    """Distance-independent ranks should be present without changing candidate rows."""
+    records = {
+        "query": record("query", description="radical SAM protein", positive_sources_hit=["A"]),
+        "candidate": record("candidate", description="iron-sulfur protein"),
+        "relaxed": record("relaxed", positive_sources_hit=["A"]),
+        "novel": record("novel"),
+    }
+    cls = classification(records)
+    cls.positive_only_records = {
+        "candidate": records["candidate"],
+        "relaxed": records["relaxed"],
+    }
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+    )
+
+    result = run_interaction_scoring(cfg, cls)
+
+    assert result is not None
+    rows = result.source_rows["Interaction_Candidates"]
+    assert len(rows) == 2
+    assert {row["distance_independent_rank"] for row in rows} == {1, 2}
+    assert all("distance_independent_score" in row for row in rows)
