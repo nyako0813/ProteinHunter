@@ -362,6 +362,32 @@ def test_write_classification_workbook_creates_expected_sheets(
     assert set(negative_hit["protein_id"]) == {"C_negative_only", "D_both"}
 
 
+
+
+def test_index_sheet_explains_interaction_scoring_columns(tmp_path: Path) -> None:
+    """Index should include short explanations for key interaction scoring columns."""
+    output_path = tmp_path / "reports" / "index_scoring_explanations.xlsx"
+
+    result = write_classification_workbook(
+        candidates={},
+        output_path=output_path,
+    )
+
+    workbook = load_workbook(result)
+    index_values = [
+        str(cell.value)
+        for row in workbook["Index"].iter_rows()
+        for cell in row
+        if cell.value is not None
+    ]
+    index_text = "\n".join(index_values)
+
+    assert "interaction_priority_score" in index_text
+    assert "distance_independent_score" in index_text
+    assert "priority_group" in index_text
+    assert "alphafold_readiness_score" in index_text
+    assert "not a direct protein-protein interaction probability" in index_text
+
 def test_classification_workbook_index_links_all_sheets(tmp_path: Path) -> None:
     """Index should be first and link to every classification sheet."""
     output_path = tmp_path / "reports" / "classification_links.xlsx"

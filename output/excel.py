@@ -179,6 +179,61 @@ NEGATIVE_EVIDENCE_EXPLANATIONS: tuple[tuple[str, str], ...] = (
 )
 
 
+INTERACTION_SCORE_EXPLANATIONS: tuple[tuple[str, str], ...] = (
+    (
+        "interaction_priority_score",
+        "Overall interaction/functional priority score including candidate source, gene neighborhood, co-occurrence, domain complementarity, and modeling readiness.",
+    ),
+    (
+        "candidate_priority_score",
+        "Score based on which candidate source sheet the protein came from, such as Candidates, Candidates_relaxed, No_hit, etc.",
+    ),
+    (
+        "same_gene_neighborhood_score",
+        "Score based on genomic distance from the query protein using GFF coordinates. Close genes get positive score, but distant genes are not excluded.",
+    ),
+    (
+        "distance_bp",
+        "Genomic distance in base pairs between query and candidate genes when both coordinates are available.",
+    ),
+    (
+        "co_occurrence_score",
+        "Score based on similarity of positive/negative source hit patterns between query and candidate.",
+    ),
+    (
+        "domain_complementarity_score",
+        "Score based on meaningful functional terms from description/Pfam/CDD/domain annotations. Generic words alone are ignored.",
+    ),
+    (
+        "alphafold_readiness_score",
+        "Score indicating whether the pair is practical to model structurally based on sequence availability and length. This is not evidence of interaction.",
+    ),
+    (
+        "distance_independent_score",
+        "Score excluding gene neighborhood and AlphaFold readiness. Formula: candidate_priority_score + co_occurrence_score + domain_complementarity_score.",
+    ),
+    (
+        "distance_independent_rank",
+        "Rank based on distance_independent_score within each Interaction_* sheet.",
+    ),
+    (
+        "priority_group",
+        "Category such as nearby_candidate, distant_cooccurrence_candidate, distant_domain_candidate, no_hit_candidate, or general_candidate.",
+    ),
+    (
+        "interaction_score_reasons",
+        "Human-readable reasons explaining why the candidate received its score.",
+    ),
+)
+
+INTERACTION_SCORE_NOTES: tuple[str, ...] = (
+    "interaction_priority_score is not a direct protein-protein interaction probability.",
+    "Gene neighborhood is used as positive evidence only.",
+    "Distant archaeal candidates should not be excluded solely because they are far from the query gene.",
+    "AlphaFold readiness does not mean AlphaFold predicts interaction.",
+)
+
+
 def records_to_dataframe(records: dict[str, ProteinRecord]) -> pd.DataFrame:
     """Convert ProteinRecord objects into a tabular pandas DataFrame."""
     rows = [_record_to_row(record) for record in records.values()]
@@ -339,6 +394,9 @@ def _format_worksheet(
         "positive_sources_hit",
         "positive_sources_missing",
         "negative_exclusion_reason",
+        "Selection rule",
+        "Biological interpretation",
+        "Recommended use",
     }
 
     for column_index, column_name in enumerate(dataframe.columns, start=1):
@@ -349,6 +407,12 @@ def _format_worksheet(
             width = max(width, 35)
         elif column_name == "notes":
             width = max(width, 45)
+        elif column_name in {
+            "Selection rule",
+            "Biological interpretation",
+            "Recommended use",
+        }:
+            width = min(max(width, 28), 70)
 
         worksheet.column_dimensions[column_letter].width = width
 
@@ -370,6 +434,39 @@ def _index_dataframe(
         }
         for sheet, selection_rule, interpretation, recommended_use in index_rows
     ]
+    rows.append(
+        {
+            "Sheet": "",
+            "Selection rule": "",
+            "Biological interpretation": "",
+            "Recommended use": "",
+        }
+    )
+    rows.append(
+        {
+            "Sheet": "Interaction scoring columns",
+            "Selection rule": "",
+            "Biological interpretation": "",
+            "Recommended use": "",
+        }
+    )
+    for column_name, explanation in INTERACTION_SCORE_EXPLANATIONS:
+        rows.append(
+            {
+                "Sheet": column_name,
+                "Selection rule": explanation,
+                "Biological interpretation": "",
+                "Recommended use": "",
+            }
+        )
+    rows.append(
+        {
+            "Sheet": "Interaction scoring notes",
+            "Selection rule": "; ".join(INTERACTION_SCORE_NOTES),
+            "Biological interpretation": "",
+            "Recommended use": "",
+        }
+    )
     rows.append(
         {
             "Sheet": "",
@@ -421,6 +518,15 @@ def _format_index_worksheet(
         cell = worksheet.cell(row=row_index, column=1)
         cell.hyperlink = f"#'{sheet_name}'!A1"
         cell.style = "Hyperlink"
+
+    for row in worksheet.iter_rows(min_row=2):
+        first_cell = row[0]
+        if first_cell.value in {
+            "Interaction scoring columns",
+            "Interaction scoring notes",
+            "Negative evidence columns",
+        }:
+            first_cell.font = Font(bold=True)
 
 
 def _add_back_to_index_link(worksheet: Worksheet) -> None:
@@ -603,6 +709,8 @@ def _blast_status(record: ProteinRecord) -> str:
 __all__: tuple[str, ...] = (
     "EXCEL_COLUMNS",
     "INDEX_ROWS",
+    "INTERACTION_SCORE_EXPLANATIONS",
+    "INTERACTION_SCORE_NOTES",
     "POSITIVE_SOURCE_SUMMARY_COLUMNS",
     "positive_source_summary_dataframe",
     "records_to_dataframe",
