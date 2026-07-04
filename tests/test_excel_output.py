@@ -421,6 +421,7 @@ def test_classification_workbook_adds_only_created_interaction_sheets(
                 }
             ]
         },
+        neighborhood_rows=[],
         warnings=[],
     )
 
@@ -535,6 +536,37 @@ def test_index_hyperlinks_point_to_existing_sheets(tmp_path: Path) -> None:
                 }
             ]
         },
+        neighborhood_rows=[
+            {
+                "query_id": "query_1",
+                "query_protein_id": "query_1",
+                "query_old_locus_tag": "",
+                "query_description": "query",
+                "query_contig": "contig1",
+                "query_start": 1,
+                "query_end": 100,
+                "query_strand": "+",
+                "candidate_rank_by_distance": 1,
+                "candidate_protein_id": "candidate_1",
+                "candidate_old_locus_tag": "",
+                "candidate_description": "candidate",
+                "candidate_source": "Positive_all_sources",
+                "candidate_contig": "contig1",
+                "candidate_start": 200,
+                "candidate_end": 300,
+                "candidate_strand": "+",
+                "distance_bp": 100,
+                "strand_relation": "same_strand",
+                "neighborhood_band": "<=5kb",
+                "same_gene_neighborhood_score": 25.0,
+                "interaction_priority_score": 42.0,
+                "domain_complementarity_score": 0.0,
+                "candidate_priority_score": 30.0,
+                "co_occurrence_score": 0.0,
+                "alphafold_recommended": True,
+                "interaction_score_reasons": "candidate source: Positive_all_sources",
+            }
+        ],
         warnings=[],
     )
 
@@ -553,4 +585,6 @@ def test_index_hyperlinks_point_to_existing_sheets(tmp_path: Path) -> None:
         linked_sheet = target.split("'")[1]
         assert linked_sheet in sheet_names
     assert "Interaction_Positive_all" in sheet_names
+    assert "Interaction_Neighborhood" in sheet_names
+    assert workbook["Interaction_Neighborhood"]["A1"].hyperlink.target == "#'Index'!A1"
     assert "Interaction_Positive_all_sources" not in sheet_names

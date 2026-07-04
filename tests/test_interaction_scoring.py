@@ -8,7 +8,9 @@ from types import SimpleNamespace
 from config import (
     INTERACTION_ALPHAFOLD_DEFAULT,
     INTERACTION_CANDIDATE_SOURCE_DEFAULTS,
+    INTERACTION_NEIGHBORHOOD_DEFAULT,
     INTERACTION_SCORING_WEIGHTS_DEFAULT,
+    InteractionNeighborhoodConfig,
     InteractionQueryConfig,
     InteractionScoringConfig,
 )
@@ -28,6 +30,7 @@ def interaction_config(
     max_candidates_per_query: int = 200,
     include_sequences_in_excel: bool = False,
     gff_file: Path | None = None,
+    neighborhood: InteractionNeighborhoodConfig = INTERACTION_NEIGHBORHOOD_DEFAULT,
 ) -> SimpleNamespace:
     """Build a minimal app config for interaction scoring tests."""
     return SimpleNamespace(
@@ -45,6 +48,7 @@ def interaction_config(
             include_sequences_in_excel=include_sequences_in_excel,
             scoring_weights=INTERACTION_SCORING_WEIGHTS_DEFAULT,
             alphafold=INTERACTION_ALPHAFOLD_DEFAULT,
+            neighborhood=neighborhood,
         )
     )
 
@@ -359,3 +363,125 @@ def test_meaningful_and_complementary_terms_score() -> None:
         "meaningful shared terms" in row["interaction_score_reasons"]
         or "complementary terms" in row["interaction_score_reasons"]
     )
+
+
+
+def test_neighborhood_rows_use_gff_distance_and_limits(tmp_path: Path) -> None:
+    """Interaction_Neighborhood rows should summarize nearby same-contig pairs."""
+    gff = tmp_path / "coords.gff"
+    gff.write_text(
+        "contig1\tRefSeq\tCDS\t100\t200\t.\t+\t0\tID=cds-query;protein_id=query;old_locus_tag=MA_0001\n"
+        "contig1\tRefSeq\tCDS\t500\t600\t.\t+\t0\tID=cds-close;protein_id=close;old_locus_tag=MA_0002\n"
+        "contig1\tRefSeq\tCDS\t1500\t1600\t.\t-\t0\tID=cds-near;protein_id=near;old_locus_tag=MA_0003\n"
+        "contig1\tRefSeq\tCDS\t9000\t9100\t.\t+\t0\tID=cds-far;protein_id=far;old_locus_tag=MA_0004\n"
+        "contig2\tRefSeq\tCDS\t500\t600\t.\t+\t0\tID=cds-other;protein_id=other;old_locus_tag=MA_0005\n",
+        encoding="utf-8",
+    )
+    records = {
+        "query": record("query", old_locus_tag="MA_0001", description="radical SAM protein"),
+        "candidate": record("close", old_locus_tag="MA_0002", description="iron-sulfur protein"),
+        "relaxed": record("near", old_locus_tag="MA_0003"),
+        "novel": record("far", old_locus_tag="MA_0004"),
+        "other": record("other", old_locus_tag="MA_0005"),
+    }
+    cls = classification(records)
+    cls.positive_only_records = {
+        key: records[key]
+        for key in ("candidate", "relaxed", "novel", "other")
+    }
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+        gff_file=gff,
+        neighborhood=InteractionNeighborhoodConfig(
+            enabled=True,
+            max_distance_bp=2000,
+            max_rows_per_query=2,
+        ),
+    )
+
+    result = run_interaction_scoring(cfg, cls)
+
+    assert result is not None
+    assert [row["candidate_protein_id"] for row in result.neighborhood_rows] == [
+        "close",
+        "near",
+    ]
+    assert [row["candidate_rank_by_distance"] for row in result.neighborhood_rows] == [1, 2]
+    assert result.neighborhood_rows[0]["query_description"] == "radical SAM protein"
+    assert result.neighborhood_rows[0]["query_contig"] == "contig1"
+    assert result.neighborhood_rows[0]["candidate_contig"] == "contig1"
+    assert result.neighborhood_rows[0]["neighborhood_band"] == "<=5kb"
+    assert all(row["candidate_protein_id"] != "query" for row in result.neighborhood_rows)
+
+
+def test_neighborhood_rows_can_be_disabled(tmp_path: Path) -> None:
+    """Neighborhood summary should be optional even when pair scoring runs."""
+    gff = tmp_path / "coords.gff"
+    gff.write_text(
+        "contig1\tRefSeq\tCDS\t100\t200\t.\t+\t0\tID=cds-query;protein_id=query\n"
+        "contig1\tRefSeq\tCDS\t500\t600\t.\t+\t0\tID=cds-candidate;protein_id=candidate\n",
+        encoding="utf-8",
+    )
+    records = {
+        "query": record("query"),
+        "candidate": record("candidate"),
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+        gff_file=gff,
+        neighborhood=InteractionNeighborhoodConfig(
+            enabled=False,
+            max_distance_bp=100000,
+            max_rows_per_query=200,
+        ),
+    )
+
+    result = run_interaction_scoring(cfg, classification(records))
+
+    assert result is not None
+    assert result.source_rows["Interaction_Candidates"]
+    assert result.neighborhood_rows == []
+
+
+def test_domain_complementarity_uses_pfam_cdd_terms_and_caps_score() -> None:
+    """Domain annotations should contribute concise functional evidence only."""
+    query = record("query", description="hypothetical protein")
+    query.domains.append(
+        DomainHit(
+            source="Pfam",
+            accession="PF04055",
+            name="Radical_SAM",
+            description="radical SAM enzyme",
+        )
+    )
+    candidate = record("candidate", description="conserved protein")
+    candidate.domains.append(
+        DomainHit(
+            source="CDD",
+            accession="cd12345",
+            name="Ferredoxin_like",
+            description="iron-sulfur ferredoxin domain",
+        )
+    )
+    records = {
+        "query": query,
+        "candidate": candidate,
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+    )
+
+    result = run_interaction_scoring(cfg, classification(records))
+
+    assert result is not None
+    row = result.source_rows["Interaction_Candidates"][0]
+    assert row["domain_complementarity_score"] == 15.0
+    assert "Pfam/CDD functional terms used" in row["interaction_score_reasons"]
+    assert "complementary terms" in row["interaction_score_reasons"]

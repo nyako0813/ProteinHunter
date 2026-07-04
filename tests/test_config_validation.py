@@ -128,6 +128,9 @@ def test_missing_annotation_targets_uses_safe_defaults(tmp_path: Path) -> None:
     assert cfg.interaction_scoring.candidate_sources["candidates_relaxed"] is True
     assert cfg.interaction_scoring.candidate_sources["no_hit"] is True
     assert cfg.interaction_scoring.candidate_sources["negative_hit"] is False
+    assert cfg.interaction_scoring.neighborhood.enabled is True
+    assert cfg.interaction_scoring.neighborhood.max_distance_bp == 100000
+    assert cfg.interaction_scoring.neighborhood.max_rows_per_query == 200
 
 
 def test_annotation_targets_can_enable_no_hit_pfam(tmp_path: Path) -> None:
@@ -262,6 +265,11 @@ def test_interaction_scoring_can_be_configured(tmp_path: Path) -> None:
             "enabled": False,
             "max_pair_total_length": 1200,
         },
+        "neighborhood": {
+            "enabled": False,
+            "max_distance_bp": 50000,
+            "max_rows_per_query": 25,
+        },
     }
     config_path = write_config(tmp_path, data)
 
@@ -279,6 +287,9 @@ def test_interaction_scoring_can_be_configured(tmp_path: Path) -> None:
     assert cfg.interaction_scoring.scoring_weights.alphafold_readiness == 3
     assert cfg.interaction_scoring.alphafold.enabled is False
     assert cfg.interaction_scoring.alphafold.max_pair_total_length == 1200
+    assert cfg.interaction_scoring.neighborhood.enabled is False
+    assert cfg.interaction_scoring.neighborhood.max_distance_bp == 50000
+    assert cfg.interaction_scoring.neighborhood.max_rows_per_query == 25
 
 
 def test_invalid_interaction_candidate_source_raises_config_error(
@@ -296,6 +307,32 @@ def test_invalid_interaction_candidate_source_raises_config_error(
     with pytest.raises(ConfigError, match="strict_candidates"):
         load_config(config_path, initialize=False)
 
+
+
+
+def test_invalid_interaction_neighborhood_values_raise_config_error(tmp_path: Path) -> None:
+    """interaction_scoring.neighborhood values should be typed and positive."""
+    data = valid_config_data()
+    data["interaction_scoring"] = {
+        "neighborhood": {
+            "enabled": "yes",
+        },
+    }
+    config_path = write_config(tmp_path, data)
+
+    with pytest.raises(ConfigError, match="interaction_scoring.neighborhood.enabled"):
+        load_config(config_path, initialize=False)
+
+    data = valid_config_data()
+    data["interaction_scoring"] = {
+        "neighborhood": {
+            "max_distance_bp": 0,
+        },
+    }
+    config_path = write_config(tmp_path, data)
+
+    with pytest.raises(ConfigError, match="interaction_scoring.neighborhood.max_distance_bp"):
+        load_config(config_path, initialize=False)
 
 def test_missing_optional_gff_does_not_fail_config_validation(tmp_path: Path) -> None:
     """Optional GFF path should not be required."""

@@ -155,6 +155,13 @@ class InteractionAlphaFoldConfig:
 
 
 @dataclass(frozen=True)
+class InteractionNeighborhoodConfig:
+    enabled: bool
+    max_distance_bp: int
+    max_rows_per_query: int
+
+
+@dataclass(frozen=True)
 class InteractionScoringConfig:
     enabled: bool
     query_proteins: tuple[InteractionQueryConfig, ...]
@@ -164,6 +171,7 @@ class InteractionScoringConfig:
     include_sequences_in_excel: bool
     scoring_weights: InteractionScoringWeightsConfig
     alphafold: InteractionAlphaFoldConfig
+    neighborhood: InteractionNeighborhoodConfig
 
 
 @dataclass
@@ -273,6 +281,12 @@ INTERACTION_ALPHAFOLD_DEFAULT = InteractionAlphaFoldConfig(
     max_pair_total_length=2500,
 )
 
+INTERACTION_NEIGHBORHOOD_DEFAULT = InteractionNeighborhoodConfig(
+    enabled=True,
+    max_distance_bp=100000,
+    max_rows_per_query=200,
+)
+
 INTERACTION_SCORING_DEFAULT = InteractionScoringConfig(
     enabled=False,
     query_proteins=(),
@@ -282,6 +296,7 @@ INTERACTION_SCORING_DEFAULT = InteractionScoringConfig(
     include_sequences_in_excel=False,
     scoring_weights=INTERACTION_SCORING_WEIGHTS_DEFAULT,
     alphafold=INTERACTION_ALPHAFOLD_DEFAULT,
+    neighborhood=INTERACTION_NEIGHBORHOOD_DEFAULT,
 )
 
 
@@ -296,6 +311,7 @@ def _default_interaction_scoring() -> InteractionScoringConfig:
         include_sequences_in_excel=False,
         scoring_weights=INTERACTION_SCORING_WEIGHTS_DEFAULT,
         alphafold=INTERACTION_ALPHAFOLD_DEFAULT,
+        neighborhood=INTERACTION_NEIGHBORHOOD_DEFAULT,
     )
 
 
@@ -806,6 +822,32 @@ def _validate_interaction_scoring_section(raw: dict[object, object]) -> None:
             "must be a positive integer."
         )
 
+    neighborhood = section.get("neighborhood", {})
+    if neighborhood is None:
+        neighborhood = {}
+    if not isinstance(neighborhood, dict):
+        raise ConfigError(
+            "config.yaml value 'interaction_scoring.neighborhood' must be a mapping."
+        )
+    neighborhood_enabled = neighborhood.get("enabled", True)
+    if not isinstance(neighborhood_enabled, bool):
+        raise ConfigError(
+            "config.yaml value 'interaction_scoring.neighborhood.enabled' "
+            "must be true or false."
+        )
+    max_distance_bp = neighborhood.get("max_distance_bp", 100000)
+    if not _is_positive_int(max_distance_bp):
+        raise ConfigError(
+            "config.yaml value 'interaction_scoring.neighborhood.max_distance_bp' "
+            "must be a positive integer."
+        )
+    max_rows_per_query = neighborhood.get("max_rows_per_query", 200)
+    if not _is_positive_int(max_rows_per_query):
+        raise ConfigError(
+            "config.yaml value 'interaction_scoring.neighborhood.max_rows_per_query' "
+            "must be a positive integer."
+        )
+
 
 def _load_interaction_scoring(raw_scoring: object) -> InteractionScoringConfig:
     """Load optional lightweight interaction scoring settings."""
@@ -883,6 +925,30 @@ def _load_interaction_scoring(raw_scoring: object) -> InteractionScoringConfig:
         ),
     )
 
+    raw_neighborhood = raw_scoring.get("neighborhood", {})
+    if not isinstance(raw_neighborhood, dict):
+        raw_neighborhood = {}
+    neighborhood = InteractionNeighborhoodConfig(
+        enabled=bool(
+            raw_neighborhood.get(
+                "enabled",
+                INTERACTION_NEIGHBORHOOD_DEFAULT.enabled,
+            )
+        ),
+        max_distance_bp=int(
+            raw_neighborhood.get(
+                "max_distance_bp",
+                INTERACTION_NEIGHBORHOOD_DEFAULT.max_distance_bp,
+            )
+        ),
+        max_rows_per_query=int(
+            raw_neighborhood.get(
+                "max_rows_per_query",
+                INTERACTION_NEIGHBORHOOD_DEFAULT.max_rows_per_query,
+            )
+        ),
+    )
+
     return InteractionScoringConfig(
         enabled=bool(raw_scoring.get("enabled", False)),
         query_proteins=tuple(query_proteins),
@@ -894,6 +960,7 @@ def _load_interaction_scoring(raw_scoring: object) -> InteractionScoringConfig:
         ),
         scoring_weights=scoring_weights,
         alphafold=alphafold,
+        neighborhood=neighborhood,
     )
 
 

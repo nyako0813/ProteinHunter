@@ -18,6 +18,7 @@ class InteractionScoringResult:
 
     query_rows: list[dict[str, Any]]
     source_rows: dict[str, list[dict[str, Any]]]
+    neighborhood_rows: list[dict[str, Any]]
     warnings: list[str]
 
 
@@ -108,6 +109,11 @@ INTERACTION_SHEET_DESCRIPTIONS: dict[str, tuple[str, str, str]] = {
         "ranks possible partners among weak negative-hit candidates",
         "review as cautionary candidates that may represent distant homologs or shared domains",
     ),
+    "Interaction_Neighborhood": (
+        "nearby interaction candidates around each query protein",
+        "summarizes same-contig candidate neighborhoods using GFF coordinates",
+        "review local genomic context around interaction queries",
+    ),
 }
 
 INTERACTION_QUERY_COLUMNS: tuple[str, ...] = (
@@ -153,6 +159,38 @@ INTERACTION_PAIR_COLUMNS: tuple[str, ...] = (
 
 SEQUENCE_COLUMNS: tuple[str, ...] = ("query_sequence", "candidate_sequence")
 
+INTERACTION_NEIGHBORHOOD_SHEET = "Interaction_Neighborhood"
+
+INTERACTION_NEIGHBORHOOD_COLUMNS: tuple[str, ...] = (
+    "query_id",
+    "query_protein_id",
+    "query_old_locus_tag",
+    "query_description",
+    "query_contig",
+    "query_start",
+    "query_end",
+    "query_strand",
+    "candidate_rank_by_distance",
+    "candidate_protein_id",
+    "candidate_old_locus_tag",
+    "candidate_description",
+    "candidate_source",
+    "candidate_contig",
+    "candidate_start",
+    "candidate_end",
+    "candidate_strand",
+    "distance_bp",
+    "strand_relation",
+    "neighborhood_band",
+    "same_gene_neighborhood_score",
+    "interaction_priority_score",
+    "domain_complementarity_score",
+    "candidate_priority_score",
+    "co_occurrence_score",
+    "alphafold_recommended",
+    "interaction_score_reasons",
+)
+
 CANDIDATE_PRIORITY_BASE: dict[str, float] = {
     "Candidates": 30.0,
     "Candidates_relaxed": 25.0,
@@ -180,22 +218,35 @@ MEANINGFUL_KEYWORDS: set[str] = {
     "oxidoreductase", "dehydrogenase", "reductase", "radical", "sam",
     "radical sam", "sulfur", "sulphur", "thiol", "thioredoxin",
     "ferredoxin", "fe-s", "iron-sulfur", "molybdopterin", "moad",
-    "this", "carrier", "kinase", "synthetase", "synthase", "deaminase",
-    "amidase", "peptidase", "helicase", "nuclease", "rna", "trna", "rrna",
-    "dna", "cofactor", "flavin", "fad", "nad", "plp", "biotin",
+    "this", "tusa", "dsre", "carrier", "kinase", "synthetase", "synthase",
+    "deaminase", "amidase", "peptidase", "helicase", "nuclease", "rna",
+    "trna", "rrna", "dna", "cofactor", "flavin", "fad", "nad", "plp",
+    "biotin",
 }
 
 COMPLEMENTARY_TERM_PAIRS: tuple[tuple[str, str], ...] = (
-    ("atpase", "ligase"),
-    ("atpase", "transferase"),
     ("radical sam", "iron-sulfur"),
+    ("radical sam", "ferredoxin"),
     ("radical", "iron-sulfur"),
-    ("radical", "sulfur"),
-    ("kinase", "transferase"),
-    ("ligase", "carrier"),
-    ("synthetase", "carrier"),
-    ("thioredoxin", "reductase"),
-    ("ferredoxin", "oxidoreductase"),
+    ("sulfur", "carrier"),
+    ("sulphur", "carrier"),
+    ("thiol", "carrier"),
+    ("moad", "this"),
+    ("moad", "sulfur"),
+    ("this", "sulfur"),
+    ("tusa", "sulfur"),
+    ("dsre", "sulfur"),
+    ("atpase", "ligase"),
+    ("atp-binding", "ligase"),
+    ("nucleotidyltransferase", "rna"),
+    ("methyltransferase", "rna"),
+    ("aminotransferase", "plp"),
+    ("oxidoreductase", "ferredoxin"),
+    ("dehydrogenase", "nad"),
+    ("hydrolase", "amidase"),
+    ("nuclease", "dna"),
+    ("helicase", "dna"),
+    ("transferase", "cofactor"),
 )
 
 
@@ -219,7 +270,7 @@ def run_interaction_scoring(config: Any, blast_classification: Any) -> Interacti
     queries = _load_query_specs(scoring_config, warnings)
     if not queries:
         warnings.append("interaction_scoring enabled but no query protein was provided")
-        return InteractionScoringResult(query_rows=[], source_rows={}, warnings=warnings)
+        return InteractionScoringResult(query_rows=[], source_rows={}, neighborhood_rows=[], warnings=warnings)
 
     feature_map = _load_feature_map(config, warnings)
     resolved_queries = [
@@ -255,7 +306,23 @@ def run_interaction_scoring(config: Any, blast_classification: Any) -> Interacti
         else:
             warnings.append(f"interaction candidate source produced no pairs: {source_key}")
 
-    return InteractionScoringResult(query_rows=query_rows, source_rows=source_rows, warnings=warnings)
+    neighborhood_rows = _build_neighborhood_rows(
+        resolved_queries=resolved_queries,
+        source_rows=source_rows,
+        scoring_config=scoring_config,
+    )
+
+    return InteractionScoringResult(
+        query_rows=query_rows,
+        source_rows=source_rows,
+        neighborhood_rows=neighborhood_rows,
+        warnings=warnings,
+    )
+
+
+def interaction_neighborhood_columns() -> tuple[str, ...]:
+    """Return columns for the optional neighborhood summary sheet."""
+    return INTERACTION_NEIGHBORHOOD_COLUMNS
 
 
 def interaction_pair_columns(include_sequences: bool) -> tuple[str, ...]:
@@ -414,11 +481,11 @@ def _score_pair(query: dict[str, Any], candidate: ProteinRecord, candidate_sourc
 def _gene_neighborhood(query: dict[str, Any], candidate: ProteinRecord, feature_map: dict[str, GffFeatureLocation], max_score: float) -> dict[str, Any]:
     query_location = _record_location(query["resolved_protein_id"], query["resolved_old_locus_tag"], feature_map)
     candidate_location = _record_location(candidate.protein_id, candidate.old_locus_tag or "", feature_map)
-    base = {"same_contig": None, "query_start": None, "query_end": None, "query_strand": None, "candidate_start": None, "candidate_end": None, "candidate_strand": None, "distance_bp": None, "strand_relation": "unknown", "same_gene_neighborhood_score": 0.0}
+    base = {"same_contig": None, "query_contig": None, "query_start": None, "query_end": None, "query_strand": None, "candidate_contig": None, "candidate_start": None, "candidate_end": None, "candidate_strand": None, "distance_bp": None, "strand_relation": "unknown", "same_gene_neighborhood_score": 0.0}
     if query_location is None or candidate_location is None:
         return {**base, "reason": "genomic distance unavailable"}
 
-    base.update({"query_start": query_location.start, "query_end": query_location.end, "query_strand": query_location.strand, "candidate_start": candidate_location.start, "candidate_end": candidate_location.end, "candidate_strand": candidate_location.strand})
+    base.update({"query_contig": query_location.contig, "query_start": query_location.start, "query_end": query_location.end, "query_strand": query_location.strand, "candidate_contig": candidate_location.contig, "candidate_start": candidate_location.start, "candidate_end": candidate_location.end, "candidate_strand": candidate_location.strand})
     base["strand_relation"] = _strand_relation(query_location.strand, candidate_location.strand)
     if query_location.contig != candidate_location.contig:
         return {**base, "same_contig": False, "reason": "different contig"}
@@ -437,6 +504,108 @@ def _gene_neighborhood(query: dict[str, Any], candidate: ProteinRecord, feature_
         score = 0.0
         reason = "distant genomic neighborhood"
     return {**base, "same_contig": True, "distance_bp": distance, "same_gene_neighborhood_score": round(score, 3), "reason": reason}
+
+
+def _build_neighborhood_rows(
+    resolved_queries: list[dict[str, Any]],
+    source_rows: dict[str, list[dict[str, Any]]],
+    scoring_config: Any,
+) -> list[dict[str, Any]]:
+    neighborhood_config = getattr(scoring_config, "neighborhood", None)
+    if neighborhood_config is None or not getattr(neighborhood_config, "enabled", True):
+        return []
+    if not any(query["resolution_status"] == "resolved" for query in resolved_queries):
+        return []
+
+    max_distance = getattr(neighborhood_config, "max_distance_bp", 100000)
+    max_rows_per_query = getattr(neighborhood_config, "max_rows_per_query", 200)
+    query_by_id = {query["query_id"]: query for query in resolved_queries}
+    seen: set[tuple[str, str, str]] = set()
+    rows: list[dict[str, Any]] = []
+
+    for interaction_rows in source_rows.values():
+        for row in interaction_rows:
+            distance = row.get("distance_bp")
+            if distance is None or row.get("same_contig") is not True:
+                continue
+            if int(distance) > int(max_distance):
+                continue
+            key = (
+                str(row.get("query_id", "")),
+                str(row.get("candidate_protein_id", "")),
+                str(row.get("candidate_source", "")),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            query = query_by_id.get(str(row.get("query_id", "")), {})
+            rows.append({
+                "query_id": row.get("query_id", ""),
+                "query_protein_id": row.get("query_protein_id", ""),
+                "query_old_locus_tag": row.get("query_old_locus_tag", ""),
+                "query_description": query.get("description", ""),
+                "query_contig": row.get("query_contig"),
+                "query_start": row.get("query_start"),
+                "query_end": row.get("query_end"),
+                "query_strand": row.get("query_strand"),
+                "candidate_rank_by_distance": 0,
+                "candidate_protein_id": row.get("candidate_protein_id", ""),
+                "candidate_old_locus_tag": row.get("candidate_old_locus_tag", ""),
+                "candidate_description": row.get("candidate_description", ""),
+                "candidate_source": row.get("candidate_source", ""),
+                "candidate_contig": row.get("candidate_contig"),
+                "candidate_start": row.get("candidate_start"),
+                "candidate_end": row.get("candidate_end"),
+                "candidate_strand": row.get("candidate_strand"),
+                "distance_bp": distance,
+                "strand_relation": row.get("strand_relation", "unknown"),
+                "neighborhood_band": _neighborhood_band(distance, row.get("same_contig")),
+                "same_gene_neighborhood_score": row.get("same_gene_neighborhood_score", 0.0),
+                "interaction_priority_score": row.get("interaction_priority_score", 0.0),
+                "domain_complementarity_score": row.get("domain_complementarity_score", 0.0),
+                "candidate_priority_score": row.get("candidate_priority_score", 0.0),
+                "co_occurrence_score": row.get("co_occurrence_score", 0.0),
+                "alphafold_recommended": row.get("alphafold_recommended", False),
+                "interaction_score_reasons": row.get("interaction_score_reasons", ""),
+            })
+
+    rows.sort(
+        key=lambda row: (
+            str(row["query_id"]),
+            int(row["distance_bp"]),
+            -float(row["interaction_priority_score"]),
+            str(row["candidate_protein_id"]),
+            str(row["candidate_source"]),
+        )
+    )
+
+    limited_rows: list[dict[str, Any]] = []
+    counts_by_query: dict[str, int] = {}
+    for row in rows:
+        query_id = str(row["query_id"])
+        count = counts_by_query.get(query_id, 0)
+        if count >= int(max_rows_per_query):
+            continue
+        row["candidate_rank_by_distance"] = count + 1
+        counts_by_query[query_id] = count + 1
+        limited_rows.append(row)
+    return limited_rows
+
+
+def _neighborhood_band(distance_bp: int | None, same_contig: bool | None) -> str:
+    if same_contig is False:
+        return "different_contig"
+    if distance_bp is None:
+        return "unknown"
+    if distance_bp == 0:
+        return "overlap"
+    if distance_bp <= 5000:
+        return "<=5kb"
+    if distance_bp <= 20000:
+        return "<=20kb"
+    if distance_bp <= 100000:
+        return "<=100kb"
+    return ">100kb"
 
 
 def _record_location(protein_id: str, old_locus_tag: str, feature_map: dict[str, GffFeatureLocation]) -> GffFeatureLocation | None:
@@ -487,6 +656,8 @@ def _domain_complementarity_score(query: dict[str, Any], candidate: ProteinRecor
 
     query_terms = _meaningful_terms(query_text)
     candidate_terms = _meaningful_terms(candidate_text)
+    if _has_domain_functional_terms(query["record"]) or _has_domain_functional_terms(candidate):
+        reasons.append("Pfam/CDD functional terms used")
     shared = sorted((query_terms & candidate_terms) & MEANINGFUL_KEYWORDS)
     complementary = _complementary_terms(query_terms, candidate_terms)
     if complementary:
@@ -514,6 +685,16 @@ def _meaningful_terms(text: str) -> set[str]:
         if " " in keyword and keyword in normalized:
             terms.add(keyword)
     return terms
+
+
+def _has_domain_functional_terms(record: ProteinRecord | None) -> bool:
+    if record is None:
+        return False
+    for domain in record.domains:
+        domain_text = _record_domain_text(domain)
+        if _meaningful_terms(domain_text) & MEANINGFUL_KEYWORDS:
+            return True
+    return False
 
 
 def _all_terms(text: str) -> set[str]:
@@ -548,8 +729,21 @@ def _is_self_pair(query: dict[str, Any], candidate: ProteinRecord) -> bool:
 def _record_text(record: ProteinRecord | None, fallback_description: str) -> str:
     if record is None:
         return fallback_description
-    domains = " ".join(f"{domain.name} {domain.description}" for domain in record.domains)
+    domains = " ".join(_record_domain_text(domain) for domain in record.domains)
     return f"{record.description} {domains}"
+
+
+def _record_domain_text(domain: Any) -> str:
+    return " ".join(
+        str(value)
+        for value in (
+            getattr(domain, "source", ""),
+            getattr(domain, "accession", ""),
+            getattr(domain, "name", ""),
+            getattr(domain, "description", ""),
+        )
+        if value
+    )
 
 
 def _without_version(protein_id: str) -> str:
@@ -558,11 +752,14 @@ def _without_version(protein_id: str) -> str:
 
 __all__: tuple[str, ...] = (
     "CANDIDATE_SOURCE_MAP",
+    "INTERACTION_NEIGHBORHOOD_COLUMNS",
+    "INTERACTION_NEIGHBORHOOD_SHEET",
     "INTERACTION_PAIR_COLUMNS",
     "INTERACTION_QUERY_COLUMNS",
     "INTERACTION_SHEET_DESCRIPTIONS",
     "InteractionScoringResult",
     "interaction_index_rows",
+    "interaction_neighborhood_columns",
     "interaction_pair_columns",
     "interaction_sheet_name",
     "run_interaction_scoring",

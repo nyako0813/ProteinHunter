@@ -15,8 +15,10 @@ from openpyxl.worksheet.worksheet import Worksheet
 from core.exceptions import ExcelOutputError
 from core.models import BlastHit, ProteinRecord
 from analysis.interaction_scoring import (
+    INTERACTION_NEIGHBORHOOD_SHEET,
     INTERACTION_QUERY_COLUMNS,
     interaction_index_rows,
+    interaction_neighborhood_columns,
     interaction_pair_columns,
 )
 
@@ -303,6 +305,13 @@ def _interaction_dataframes(
     pair_columns = interaction_pair_columns(include_sequences)
     for sheet_name, rows in interaction_result.source_rows.items():
         sheets[sheet_name] = pd.DataFrame(rows, columns=pair_columns)
+
+    neighborhood_rows = getattr(interaction_result, "neighborhood_rows", [])
+    if neighborhood_rows:
+        sheets[INTERACTION_NEIGHBORHOOD_SHEET] = pd.DataFrame(
+            neighborhood_rows,
+            columns=interaction_neighborhood_columns(),
+        )
 
     return sheets
 
