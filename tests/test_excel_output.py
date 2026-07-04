@@ -398,7 +398,7 @@ def test_classification_workbook_adds_only_created_interaction_sheets(
             }
         ],
         source_rows={
-            "Interaction_Candidates": [
+            "Interaction_Positive_all": [
                 {
                     "query_id": "query_1",
                     "query_protein_id": "query_1",
@@ -406,10 +406,10 @@ def test_classification_workbook_adds_only_created_interaction_sheets(
                     "candidate_rank": 1,
                     "candidate_protein_id": "candidate_1",
                     "candidate_old_locus_tag": "",
-                    "candidate_source": "Candidates",
+                    "candidate_source": "Positive_all_sources",
                     "candidate_description": "candidate",
                     "interaction_priority_score": 42.0,
-                    "interaction_score_reasons": "candidate source: Candidates",
+                    "interaction_score_reasons": "candidate source: Positive_all_sources",
                     "candidate_priority_score": 30.0,
                     "same_gene_neighborhood_score": 0.0,
                     "distance_bp": None,
@@ -432,14 +432,16 @@ def test_classification_workbook_adds_only_created_interaction_sheets(
 
     workbook = load_workbook(result)
     assert "Interaction_query" in workbook.sheetnames
-    assert "Interaction_Candidates" in workbook.sheetnames
+    assert "Interaction_Positive_all" in workbook.sheetnames
+    assert "Interaction_Positive_all_sources" not in workbook.sheetnames
     assert "Interaction_No_hit" not in workbook.sheetnames
     index_values = [cell.value for cell in workbook["Index"]["A"]]
     assert "Interaction_query" in index_values
-    assert "Interaction_Candidates" in index_values
+    assert "Interaction_Positive_all" in index_values
+    assert "Interaction_Positive_all_sources" not in index_values
     assert "Interaction_No_hit" not in index_values
     assert workbook["Interaction_query"]["A1"].hyperlink.target == "#'Index'!A1"
-    assert workbook["Interaction_Candidates"]["A1"].hyperlink.target == "#'Index'!A1"
+    assert workbook["Interaction_Positive_all"]["A1"].hyperlink.target == "#'Index'!A1"
 
 
 def test_write_records_to_excel_applies_simple_formatting(tmp_path: Path) -> None:
@@ -481,3 +483,74 @@ def test_write_records_to_excel_raises_excel_output_error(
 
     with pytest.raises(ExcelOutputError, match="could not write the Excel file"):
         write_records_to_excel({"protein_1": make_record()}, tmp_path / "bad.xlsx")
+
+
+
+def test_index_hyperlinks_point_to_existing_sheets(tmp_path: Path) -> None:
+    """Every Index hyperlink should point to a sheet that exists."""
+    output_path = tmp_path / "reports" / "interaction_links.xlsx"
+    interaction_result = InteractionScoringResult(
+        query_rows=[
+            {
+                "query_id": "query_1",
+                "input_protein_id": "query_1",
+                "input_old_locus_tag": "",
+                "resolved_protein_id": "query_1",
+                "resolved_old_locus_tag": "",
+                "sequence_length": 10,
+                "resolution_status": "resolved",
+                "description": "query",
+                "notes": "",
+            }
+        ],
+        source_rows={
+            "Interaction_Positive_all": [
+                {
+                    "query_id": "query_1",
+                    "query_protein_id": "query_1",
+                    "query_old_locus_tag": "",
+                    "candidate_rank": 1,
+                    "candidate_protein_id": "candidate_1",
+                    "candidate_old_locus_tag": "",
+                    "candidate_source": "Positive_all_sources",
+                    "candidate_description": "candidate",
+                    "same_contig": True,
+                    "query_start": 1,
+                    "query_end": 100,
+                    "query_strand": "+",
+                    "candidate_start": 200,
+                    "candidate_end": 300,
+                    "candidate_strand": "+",
+                    "distance_bp": 100,
+                    "strand_relation": "same_strand",
+                    "same_gene_neighborhood_score": 25.0,
+                    "interaction_priority_score": 42.0,
+                    "interaction_score_reasons": "candidate source: Positive_all_sources",
+                    "candidate_priority_score": 30.0,
+                    "co_occurrence_score": 0.0,
+                    "domain_complementarity_score": 0.0,
+                    "alphafold_readiness_score": 10.0,
+                    "pair_total_length": 20,
+                    "alphafold_recommended": True,
+                }
+            ]
+        },
+        warnings=[],
+    )
+
+    result = write_classification_workbook(
+        candidates={},
+        output_path=output_path,
+        interaction_result=interaction_result,
+    )
+
+    workbook = load_workbook(result)
+    sheet_names = set(workbook.sheetnames)
+    for cell in workbook["Index"]["A"]:
+        if cell.hyperlink is None:
+            continue
+        target = cell.hyperlink.target
+        linked_sheet = target.split("'")[1]
+        assert linked_sheet in sheet_names
+    assert "Interaction_Positive_all" in sheet_names
+    assert "Interaction_Positive_all_sources" not in sheet_names

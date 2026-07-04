@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import re
 from pathlib import Path
 from urllib.parse import unquote
@@ -11,6 +12,16 @@ from core.models import ProteinRecord
 
 OLD_LOCUS_TAG_PATTERN = re.compile(r"\bMA_\d{4}\b")
 COMPACT_OLD_LOCUS_TAG_PATTERN = re.compile(r"\bMA(\d{4})\b")
+
+
+@dataclass(frozen=True)
+class GffFeatureLocation:
+    """Genomic coordinates for one GFF feature."""
+
+    contig: str
+    start: int
+    end: int
+    strand: str | None
 
 
 def parse_gff_attributes(attribute_text: str) -> dict[str, list[str]]:
@@ -90,6 +101,68 @@ def load_gff_locus_map(path: str | Path) -> dict[str, str]:
                 mapping.setdefault(key, locus_tag)
 
     return mapping
+
+
+def load_gff_feature_map(path: str | Path) -> dict[str, GffFeatureLocation]:
+    """Load protein/locus identifiers to genomic coordinates from a GFF file."""
+    gff_path = Path(path).expanduser().resolve()
+    feature_map: dict[str, GffFeatureLocation] = {}
+    gene_features: dict[str, GffFeatureLocation] = {}
+    gene_old_locus_tags: dict[str, str] = {}
+    cds_rows: list[tuple[GffFeatureLocation, dict[str, list[str]]]] = []
+
+    with gff_path.open(encoding="utf-8") as handle:
+        for line in handle:
+            if not line.strip() or line.startswith("#"):
+                continue
+
+            columns = line.rstrip("\n").split("\t")
+            if len(columns) < 9:
+                continue
+
+            feature_type = columns[2].lower()
+            if feature_type not in {"cds", "gene"}:
+                continue
+
+            location = GffFeatureLocation(
+                contig=columns[0],
+                start=int(columns[3]),
+                end=int(columns[4]),
+                strand=columns[6] if columns[6] not in {"", "."} else None,
+            )
+            attributes = parse_gff_attributes(columns[8])
+
+            if feature_type == "gene":
+                gene_id = _first_value(attributes, "ID")
+                old_locus_tag = _old_locus_tag_from_attributes(attributes)
+                if gene_id is not None:
+                    gene_features[gene_id] = location
+                    feature_map.setdefault(gene_id, location)
+                if gene_id is not None and old_locus_tag is not None:
+                    gene_old_locus_tags[gene_id] = old_locus_tag
+                    feature_map.setdefault(old_locus_tag, location)
+                locus_tag = _locus_tag_from_attributes(attributes)
+                if locus_tag is not None:
+                    feature_map.setdefault(locus_tag, location)
+                continue
+
+            cds_rows.append((location, attributes))
+
+    for location, attributes in cds_rows:
+        locus_tag = _cds_locus_tag_from_attributes(attributes, gene_old_locus_tags)
+        if locus_tag is not None:
+            feature_map.setdefault(locus_tag, location)
+
+        for parent_id in attributes.get("Parent", []):
+            parent_location = gene_features.get(parent_id)
+            if parent_location is not None and locus_tag is not None:
+                feature_map.setdefault(locus_tag, parent_location)
+
+        for protein_id in _protein_ids_from_attributes(attributes):
+            for key in _protein_id_lookup_keys(protein_id):
+                feature_map.setdefault(key, location)
+
+    return feature_map
 
 
 def annotate_records_with_gff_locus_tags(
@@ -218,8 +291,10 @@ def _first_ma_tag(values: list[str]) -> str | None:
 
 
 __all__: tuple[str, ...] = (
+    "GffFeatureLocation",
     "OLD_LOCUS_TAG_PATTERN",
     "annotate_records_with_gff_locus_tags",
+    "load_gff_feature_map",
     "load_gff_locus_map",
     "normalize_protein_id",
     "parse_gff_attributes",

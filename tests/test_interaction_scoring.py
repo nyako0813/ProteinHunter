@@ -27,9 +27,11 @@ def interaction_config(
     candidate_sources: dict[str, bool] | None = None,
     max_candidates_per_query: int = 200,
     include_sequences_in_excel: bool = False,
+    gff_file: Path | None = None,
 ) -> SimpleNamespace:
     """Build a minimal app config for interaction scoring tests."""
     return SimpleNamespace(
+        paths=SimpleNamespace(gff_file=gff_file),
         interaction_scoring=InteractionScoringConfig(
             enabled=enabled,
             query_proteins=query_proteins,
@@ -234,3 +236,126 @@ def test_scoring_adds_reasons_and_alphafold_readiness_without_running_alphafold(
     assert row["interaction_priority_score"] > 0
     assert row["alphafold_recommended"] is True
     assert "compatible for manual AlphaFold" in row["interaction_score_reasons"]
+
+
+
+def test_positive_all_sources_uses_short_interaction_sheet_name() -> None:
+    """Long source names should map to explicit Excel-safe sheet names."""
+    records = {
+        "query": record("query"),
+        "candidate": record("candidate"),
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+    cls = classification(records)
+    cls.positive_all_sources_records = {"candidate": records["candidate"]}
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"positive_all_sources": True},
+    )
+
+    result = run_interaction_scoring(cfg, cls)
+
+    assert result is not None
+    assert set(result.source_rows) == {"Interaction_Positive_all"}
+    assert result.source_rows["Interaction_Positive_all"][0]["candidate_source"] == (
+        "Positive_all_sources"
+    )
+
+
+def test_gff_distance_scoring_close_medium_far_different_missing_and_overlap(
+    tmp_path: Path,
+) -> None:
+    """GFF coordinates should drive same-gene-neighborhood scoring."""
+    gff = tmp_path / "coords.gff"
+    gff.write_text(
+        "contig1\tRefSeq\tCDS\t100\t200\t.\t+\t0\tID=cds-query;protein_id=query;old_locus_tag=MA_0001\n"
+        "contig1\tRefSeq\tCDS\t500\t600\t.\t+\t0\tID=cds-close;protein_id=close;old_locus_tag=MA_0002\n"
+        "contig1\tRefSeq\tCDS\t15000\t15100\t.\t-\t0\tID=cds-medium;protein_id=medium;old_locus_tag=MA_0003\n"
+        "contig1\tRefSeq\tCDS\t150000\t150100\t.\t+\t0\tID=cds-far;protein_id=far;old_locus_tag=MA_0004\n"
+        "contig2\tRefSeq\tCDS\t500\t600\t.\t+\t0\tID=cds-other;protein_id=other;old_locus_tag=MA_0005\n"
+        "contig1\tRefSeq\tCDS\t150\t250\t.\t+\t0\tID=cds-overlap;protein_id=overlap;old_locus_tag=MA_0006\n",
+        encoding="utf-8",
+    )
+    records = {
+        "query": record("query", old_locus_tag="MA_0001"),
+        "candidate": record("close", old_locus_tag="MA_0002"),
+        "relaxed": record("medium", old_locus_tag="MA_0003"),
+        "novel": record("far", old_locus_tag="MA_0004"),
+        "other": record("other", old_locus_tag="MA_0005"),
+        "overlap": record("overlap", old_locus_tag="MA_0006"),
+        "missing": record("missing", old_locus_tag="MA_9999"),
+    }
+    cls = classification(records)
+    cls.positive_only_records = {
+        key: records[key]
+        for key in ("candidate", "relaxed", "novel", "other", "overlap", "missing")
+    }
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+        gff_file=gff,
+    )
+
+    result = run_interaction_scoring(cfg, cls)
+
+    assert result is not None
+    by_id = {
+        row["candidate_protein_id"]: row
+        for row in result.source_rows["Interaction_Candidates"]
+    }
+    assert by_id["close"]["distance_bp"] == 300
+    assert by_id["close"]["same_gene_neighborhood_score"] == 25.0
+    assert by_id["medium"]["same_gene_neighborhood_score"] == 15.0
+    assert by_id["far"]["same_gene_neighborhood_score"] == 0.0
+    assert by_id["other"]["same_contig"] is False
+    assert by_id["missing"]["distance_bp"] is None
+    assert by_id["overlap"]["distance_bp"] == 0
+    assert by_id["close"]["strand_relation"] == "same_strand"
+    assert by_id["medium"]["strand_relation"] == "opposite_strand"
+
+
+def test_shared_generic_words_only_do_not_score() -> None:
+    """Generic description overlap should not create complementarity score."""
+    records = {
+        "query": record("query", description="hypothetical protein family domain"),
+        "candidate": record("candidate", description="putative protein family domain"),
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+    )
+
+    result = run_interaction_scoring(cfg, classification(records))
+
+    assert result is not None
+    row = result.source_rows["Interaction_Candidates"][0]
+    assert row["domain_complementarity_score"] == 0.0
+    assert "generic-only description overlap ignored" in row["interaction_score_reasons"]
+    assert "meaningful shared terms" not in row["interaction_score_reasons"]
+
+
+def test_meaningful_and_complementary_terms_score() -> None:
+    """Meaningful functional terms should still contribute conservatively."""
+    records = {
+        "query": record("query", description="radical SAM iron-sulfur protein"),
+        "candidate": record("candidate", description="radical SAM transferase"),
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+    )
+
+    result = run_interaction_scoring(cfg, classification(records))
+
+    assert result is not None
+    row = result.source_rows["Interaction_Candidates"][0]
+    assert row["domain_complementarity_score"] > 0
+    assert (
+        "meaningful shared terms" in row["interaction_score_reasons"]
+        or "complementary terms" in row["interaction_score_reasons"]
+    )
