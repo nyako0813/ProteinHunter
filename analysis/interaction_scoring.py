@@ -409,6 +409,64 @@ def run_interaction_scoring(config: Any, blast_classification: Any) -> Interacti
     )
 
 
+def resolve_cdd_annotation_targets(
+    config: Any, blast_classification: Any
+) -> dict[str, ProteinRecord]:
+    """Return extra records that should be CDD-annotated for interaction_scoring.
+
+    CDD annotation (analysis/domain_annotator.py::annotate_records_cdd)
+    normally only ever sees ``positive_only_records`` ("Candidates"), so
+    interaction_scoring's own domain_complementarity evaluation could never
+    see a real CDD hit for a query or candidate outside that one bucket
+    (see docs/implementation_plan_sequence_evidence.md's CDD investigation
+    notes for how this was discovered). This function returns the
+    de-duplicated union of:
+
+    - every record reachable through an enabled
+      ``interaction_scoring.candidate_sources`` bucket (the same
+      ``CANDIDATE_SOURCE_MAP`` lookup ``run_interaction_scoring`` itself
+      uses), and
+    - every interaction query that actually resolved to a target
+      ``ProteinRecord`` (a query given only an explicit ``sequence``, with
+      no matching target record, has no record object to annotate and is
+      excluded).
+
+    Returns an empty dict when ``interaction_scoring.enabled`` is false, so
+    CDD's default scope (``positive_only_records`` only) is unaffected for
+    runs that do not use interaction_scoring. The caller is expected to
+    merge this into ``positive_only_records`` itself, which is always
+    CDD-annotated regardless of interaction_scoring.
+    """
+    scoring_config = config.interaction_scoring
+    if not scoring_config.enabled:
+        return {}
+
+    targets: dict[str, ProteinRecord] = {}
+
+    for source_key, enabled in scoring_config.candidate_sources.items():
+        if not enabled:
+            continue
+        source_info = CANDIDATE_SOURCE_MAP.get(source_key)
+        if source_info is None:
+            continue
+        _source_label, attr_name, _sheet_name = source_info
+        candidate_records = getattr(blast_classification, attr_name, None)
+        if not candidate_records:
+            continue
+        for protein_id, record in candidate_records.items():
+            targets.setdefault(protein_id, record)
+
+    discarded_warnings: list[str] = []
+    queries = _load_query_specs(scoring_config, discarded_warnings)
+    for index, query in enumerate(queries, start=1):
+        resolved = _resolve_query(query, index, blast_classification.all_records)
+        record = resolved.get("record")
+        if record is not None:
+            targets.setdefault(record.protein_id, record)
+
+    return targets
+
+
 def interaction_neighborhood_columns() -> tuple[str, ...]:
     """Return columns for the optional neighborhood summary sheet."""
     return INTERACTION_NEIGHBORHOOD_COLUMNS
@@ -1412,6 +1470,7 @@ __all__: tuple[str, ...] = (
     "interaction_neighborhood_columns",
     "interaction_pair_columns",
     "interaction_sheet_name",
+    "resolve_cdd_annotation_targets",
     "run_interaction_scoring",
     "source_sheet_name",
 )

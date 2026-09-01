@@ -17,6 +17,7 @@ from config import (
 from core.models import BlastHit, DomainHit, ProteinRecord
 from analysis.interaction_scoring import (
     interaction_pair_columns,
+    resolve_cdd_annotation_targets,
     run_interaction_scoring,
 )
 
@@ -96,6 +97,142 @@ def classification(records: dict[str, ProteinRecord]) -> SimpleNamespace:
         negative_medium_hit_records={},
         negative_weak_hit_records={},
     )
+
+
+def build_classification(**buckets: dict[str, ProteinRecord]) -> SimpleNamespace:
+    """Build a minimal blast_classification-like object with only the given buckets set."""
+    defaults: dict[str, dict[str, ProteinRecord]] = {
+        "all_records": {},
+        "positive_only_records": {},
+        "candidates_relaxed_records": {},
+        "positive_all_sources_records": {},
+        "negative_unmatched_records": {},
+        "no_hit_records": {},
+        "negative_hit_records": {},
+        "negative_strong_hit_records": {},
+        "negative_medium_hit_records": {},
+        "negative_weak_hit_records": {},
+    }
+    defaults.update(buckets)
+    return SimpleNamespace(**defaults)
+
+
+def all_sources_disabled() -> dict[str, bool]:
+    """A candidate_sources mapping with every source turned off."""
+    return {key: False for key in INTERACTION_CANDIDATE_SOURCE_DEFAULTS}
+
+
+# ---------------------------------------------------------------------------
+# resolve_cdd_annotation_targets tests
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_cdd_annotation_targets_empty_when_disabled() -> None:
+    """Disabled interaction_scoring must not extend the CDD target set."""
+    cfg = interaction_config(enabled=False)
+    cls = build_classification()
+
+    assert resolve_cdd_annotation_targets(cfg, cls) == {}
+
+
+def test_resolve_cdd_annotation_targets_unions_enabled_sources_only() -> None:
+    """Only buckets whose candidate_sources flag is true should be included."""
+    candidate_a = record("candidate_a")
+    relaxed_b = record("relaxed_b")
+    no_hit_c = record("no_hit_c")
+    cls = build_classification(
+        all_records={"candidate_a": candidate_a, "relaxed_b": relaxed_b, "no_hit_c": no_hit_c},
+        positive_only_records={"candidate_a": candidate_a},
+        candidates_relaxed_records={"candidate_a": candidate_a, "relaxed_b": relaxed_b},
+        no_hit_records={"no_hit_c": no_hit_c},
+    )
+    sources = all_sources_disabled()
+    sources["candidates_relaxed"] = True
+    cfg = interaction_config(enabled=True, candidate_sources=sources)
+
+    targets = resolve_cdd_annotation_targets(cfg, cls)
+
+    assert set(targets) == {"candidate_a", "relaxed_b"}
+    assert targets["candidate_a"] is candidate_a
+
+
+def test_resolve_cdd_annotation_targets_excludes_disabled_sources() -> None:
+    """A bucket must be excluded entirely when its candidate_sources flag is false."""
+    no_hit_only = record("no_hit_only")
+    cls = build_classification(
+        all_records={"no_hit_only": no_hit_only},
+        no_hit_records={"no_hit_only": no_hit_only},
+    )
+    cfg = interaction_config(enabled=True, candidate_sources=all_sources_disabled())
+
+    assert resolve_cdd_annotation_targets(cfg, cls) == {}
+
+
+def test_resolve_cdd_annotation_targets_includes_resolved_query() -> None:
+    """A query that resolves to a real target record should be included."""
+    query_record = record("query_protein")
+    cls = build_classification(all_records={"query_protein": query_record})
+    cfg = interaction_config(
+        enabled=True,
+        query_proteins=(InteractionQueryConfig("query_protein", "", ""),),
+        candidate_sources=all_sources_disabled(),
+    )
+
+    targets = resolve_cdd_annotation_targets(cfg, cls)
+
+    assert set(targets) == {"query_protein"}
+    assert targets["query_protein"] is query_record
+
+
+def test_resolve_cdd_annotation_targets_resolves_multiple_queries() -> None:
+    """Every configured query_proteins entry should be resolved, not just the first."""
+    query_1 = record("query_1")
+    query_2 = record("query_2")
+    cls = build_classification(all_records={"query_1": query_1, "query_2": query_2})
+    cfg = interaction_config(
+        enabled=True,
+        query_proteins=(
+            InteractionQueryConfig("query_1", "", ""),
+            InteractionQueryConfig("query_2", "", ""),
+        ),
+        candidate_sources=all_sources_disabled(),
+    )
+
+    targets = resolve_cdd_annotation_targets(cfg, cls)
+
+    assert set(targets) == {"query_1", "query_2"}
+
+
+def test_resolve_cdd_annotation_targets_excludes_unmatched_sequence_only_query() -> None:
+    """A sequence-only query with no matching target record has no record to annotate."""
+    cls = build_classification(all_records={})
+    cfg = interaction_config(
+        enabled=True,
+        query_proteins=(InteractionQueryConfig("", "", "MSTNPKPQR"),),
+        candidate_sources=all_sources_disabled(),
+    )
+
+    assert resolve_cdd_annotation_targets(cfg, cls) == {}
+
+
+def test_resolve_cdd_annotation_targets_deduplicates_query_already_in_a_bucket() -> None:
+    """A query that is also a candidate_sources member should appear only once."""
+    shared = record("shared_protein")
+    cls = build_classification(
+        all_records={"shared_protein": shared},
+        positive_only_records={"shared_protein": shared},
+    )
+    sources = all_sources_disabled()
+    sources["candidates"] = True
+    cfg = interaction_config(
+        enabled=True,
+        query_proteins=(InteractionQueryConfig("shared_protein", "", ""),),
+        candidate_sources=sources,
+    )
+
+    targets = resolve_cdd_annotation_targets(cfg, cls)
+
+    assert set(targets) == {"shared_protein"}
 
 
 def test_interaction_scoring_disabled_returns_none() -> None:

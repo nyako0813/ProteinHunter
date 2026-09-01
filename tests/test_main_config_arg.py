@@ -7,9 +7,110 @@ from types import SimpleNamespace
 
 import yaml
 
-from config import AnnotationTargetConfig
+from config import (
+    INTERACTION_ALPHAFOLD_DEFAULT,
+    INTERACTION_CANDIDATE_SOURCE_DEFAULTS,
+    INTERACTION_NEIGHBORHOOD_DEFAULT,
+    INTERACTION_SCORING_WEIGHTS_DEFAULT,
+    AnnotationTargetConfig,
+    InteractionQueryConfig,
+    InteractionScoringConfig,
+)
 from core.models import ProteinRecord
-from main import build_arg_parser, _records_enabled_for_annotation
+from main import build_arg_parser, _build_cdd_target_records, _records_enabled_for_annotation
+
+
+def _interaction_config(
+    *,
+    enabled: bool,
+    candidate_sources: dict[str, bool] | None = None,
+    query_proteins: tuple[InteractionQueryConfig, ...] = (),
+) -> SimpleNamespace:
+    """Build a minimal app config exposing only interaction_scoring."""
+    return SimpleNamespace(
+        interaction_scoring=InteractionScoringConfig(
+            enabled=enabled,
+            query_proteins=query_proteins,
+            query_fasta=None,
+            candidate_sources=(
+                dict(INTERACTION_CANDIDATE_SOURCE_DEFAULTS)
+                if candidate_sources is None
+                else candidate_sources
+            ),
+            max_candidates_per_query=200,
+            include_sequences_in_excel=False,
+            scoring_weights=INTERACTION_SCORING_WEIGHTS_DEFAULT,
+            alphafold=INTERACTION_ALPHAFOLD_DEFAULT,
+            neighborhood=INTERACTION_NEIGHBORHOOD_DEFAULT,
+            scoring_model="legacy_additive",
+            scoring_engine_config=None,
+            functional_complementarity_ruleset=None,
+            pih_evidence_bundle=None,
+        )
+    )
+
+
+def _classification(**buckets: dict[str, ProteinRecord]) -> SimpleNamespace:
+    """Build a minimal blast_classification-like object with only the given buckets set."""
+    defaults: dict[str, dict[str, ProteinRecord]] = {
+        "all_records": {},
+        "positive_only_records": {},
+        "candidates_relaxed_records": {},
+        "positive_all_sources_records": {},
+        "negative_unmatched_records": {},
+        "no_hit_records": {},
+        "negative_hit_records": {},
+        "negative_strong_hit_records": {},
+        "negative_medium_hit_records": {},
+        "negative_weak_hit_records": {},
+    }
+    defaults.update(buckets)
+    return SimpleNamespace(**defaults)
+
+
+def test_build_cdd_target_records_extends_scope_without_mutating_candidates_dict() -> None:
+    """Extending CDD's target set must not change the Candidates-sheet record count.
+
+    This is the wiring guarantee Step 15's design relies on: main.py keeps
+    using its own `records` (positive_only_records) for candidate scoring
+    and the Excel "Candidates" sheet, while CDD itself is given a larger,
+    separate dict when interaction_scoring needs more records annotated.
+    """
+    candidate = ProteinRecord(protein_id="candidate_1", sequence="MSTNPKPQR")
+    no_hit = ProteinRecord(protein_id="no_hit_1", sequence="MSTNPKPQR")
+    positive_only_records = {"candidate_1": candidate}
+    cls = _classification(
+        all_records={"candidate_1": candidate, "no_hit_1": no_hit},
+        positive_only_records=positive_only_records,
+        no_hit_records={"no_hit_1": no_hit},
+    )
+    sources = {key: False for key in INTERACTION_CANDIDATE_SOURCE_DEFAULTS}
+    sources["no_hit"] = True
+    config = _interaction_config(enabled=True, candidate_sources=sources)
+
+    target_records = _build_cdd_target_records(positive_only_records, config, cls)
+
+    assert set(target_records) == {"candidate_1", "no_hit_1"}
+    # The caller's own positive_only_records dict (used later for
+    # score_records / the Excel "Candidates" sheet) must stay exactly as
+    # it was -- still just 1 record, not silently grown in place.
+    assert positive_only_records == {"candidate_1": candidate}
+
+
+def test_build_cdd_target_records_unaffected_when_interaction_scoring_disabled() -> None:
+    """With interaction_scoring disabled, the CDD target set is exactly Candidates."""
+    candidate = ProteinRecord(protein_id="candidate_1", sequence="MSTNPKPQR")
+    positive_only_records = {"candidate_1": candidate}
+    cls = _classification(
+        all_records={"candidate_1": candidate},
+        positive_only_records=positive_only_records,
+        no_hit_records={"no_hit_1": ProteinRecord(protein_id="no_hit_1")},
+    )
+    config = _interaction_config(enabled=False)
+
+    target_records = _build_cdd_target_records(positive_only_records, config, cls)
+
+    assert set(target_records) == {"candidate_1"}
 
 
 def test_main_config_arg_defaults_to_config_yaml() -> None:
