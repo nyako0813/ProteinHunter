@@ -31,6 +31,9 @@ def interaction_config(
     include_sequences_in_excel: bool = False,
     gff_file: Path | None = None,
     neighborhood: InteractionNeighborhoodConfig = INTERACTION_NEIGHBORHOOD_DEFAULT,
+    scoring_model: str = "legacy_additive",
+    scoring_engine_config: Path | None = None,
+    functional_complementarity_ruleset: Path | None = None,
 ) -> SimpleNamespace:
     """Build a minimal app config for interaction scoring tests."""
     return SimpleNamespace(
@@ -49,6 +52,9 @@ def interaction_config(
             scoring_weights=INTERACTION_SCORING_WEIGHTS_DEFAULT,
             alphafold=INTERACTION_ALPHAFOLD_DEFAULT,
             neighborhood=neighborhood,
+            scoring_model=scoring_model,
+            scoring_engine_config=scoring_engine_config,
+            functional_complementarity_ruleset=functional_complementarity_ruleset,
         )
     )
 
@@ -596,3 +602,203 @@ def test_distance_independent_rank_is_assigned_within_interaction_sheet() -> Non
     assert len(rows) == 2
     assert {row["distance_independent_rank"] for row in rows} == {1, 2}
     assert all("distance_independent_score" in row for row in rows)
+
+
+# ---------------------------------------------------------------------------
+# scoring model v2 (evidence-based, category-capped) integration tests
+# ---------------------------------------------------------------------------
+
+
+def test_v2_mode_is_opt_in_default_stays_legacy() -> None:
+    """Without an explicit scoring_model, behavior must stay legacy_additive."""
+    records = {
+        "query": record("query", positive_sources_hit=["A"]),
+        "candidate": record("candidate", positive_sources_hit=["A"]),
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+    )
+    result = run_interaction_scoring(cfg, classification(records))
+    assert result is not None
+    row = result.source_rows["Interaction_Candidates"][0]
+    # legacy rows never set scoring_model -- the column stays absent/None.
+    assert row.get("scoring_model") is None
+
+
+def test_v2_mode_scores_full_evidence_pair_near_100() -> None:
+    """A candidate with strong evidence in every category should score high."""
+    records = {
+        "query": record("query", description="radical SAM protein", positive_sources_hit=["A"]),
+        "candidate": record(
+            "candidate", description="iron-sulfur carrier protein", positive_sources_hit=["A"]
+        ),
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+        scoring_model="v2_evidence_based",
+    )
+
+    result = run_interaction_scoring(cfg, classification(records))
+
+    assert result is not None
+    row = result.source_rows["Interaction_Candidates"][0]
+    assert row["scoring_model"] == "v2_evidence_based"
+    assert row["formal_score_available"] is True
+    # source_classification (Candidates=30/30) + co_occurrence (full Jaccard
+    # overlap) + domain_complementarity (radical sam / iron-sulfur rule) are
+    # all available; genomic_context is missing (no GFF configured) and must
+    # be excluded from the denominator rather than counted as zero.
+    assert row["evidence_category_count"] == 2
+    assert row["interaction_priority_score"] == 100.0
+    assert row["evidence_tier"] == "Tier2_Strong"
+
+
+def test_v2_mode_distinguishes_missing_from_evaluated_no_match() -> None:
+    """Missing annotation must not score the same as an evaluated non-match."""
+    records = {
+        "query": record("query", description="", positive_sources_hit=[]),
+        "candidate": record("no_annotation", description="", positive_sources_hit=[]),
+        "no_annotation": record("no_annotation", description="", positive_sources_hit=[]),
+        "unrelated_annotation": record(
+            "unrelated_annotation", description="completely unrelated text here", positive_sources_hit=[]
+        ),
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+    cls = classification(records)
+    cls.positive_only_records = {
+        "no_annotation": records["no_annotation"],
+        "unrelated_annotation": records["unrelated_annotation"],
+    }
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+        scoring_model="v2_evidence_based",
+    )
+
+    result = run_interaction_scoring(cfg, cls)
+
+    assert result is not None
+    rows = {row["candidate_protein_id"]: row for row in result.source_rows["Interaction_Candidates"]}
+
+    # Query has no description at all -> domain_complementarity is MISSING
+    # for every candidate, and co_occurrence is also MISSING (no BLAST
+    # source pattern on either side and no negative hits to compare either,
+    # but the query record itself carries no positive_sources_hit -- this
+    # still resolves to the "no negative hit either side" weak-positive
+    # branch, not MISSING, because both records exist). The candidate with
+    # descriptive text should NOT score lower than the blank one just for
+    # having text that happens not to match.
+    no_annotation_row = rows["no_annotation"]
+    unrelated_row = rows["unrelated_annotation"]
+    assert no_annotation_row["evidence_category_count"] == unrelated_row["evidence_category_count"]
+
+
+def test_v2_mode_category_cap_limits_functional_annotation_contribution() -> None:
+    """co_occurrence and domain_complementarity must share one capped category."""
+    records = {
+        "query": record("query", description="radical sam protein", positive_sources_hit=["A", "B"]),
+        "candidate": record(
+            "candidate", description="iron-sulfur protein", positive_sources_hit=["A", "B"]
+        ),
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+        scoring_model="v2_evidence_based",
+    )
+
+    result = run_interaction_scoring(cfg, classification(records))
+
+    assert result is not None
+    row = result.source_rows["Interaction_Candidates"][0]
+    # Both co_occurrence (perfect source overlap) and domain_complementarity
+    # (rule match) are maxed out, but functional_annotation's cap (20) must
+    # not be exceeded, and it must not inflate source_classification (30)
+    # or push the total above what two active categories (30 + 20 = 50
+    # points of cap) can produce as a 0-100 score.
+    assert row["interaction_priority_score"] == 100.0
+    assert row["co_occurrence_score"] <= 10.0
+    assert row["domain_complementarity_score"] <= 10.0
+
+
+def test_v2_mode_uses_custom_scoring_engine_config(tmp_path: Path) -> None:
+    """A custom scoring_engine_config path should change eligibility/tiers."""
+    engine_config_path = tmp_path / "scoring.yaml"
+    engine_config_path.write_text(
+        """
+category_caps:
+  source_classification: 30
+  genomic_context: 25
+  functional_annotation: 20
+minimum_evidence:
+  min_categories: 5
+  min_available_weight: 0
+""",
+        encoding="utf-8",
+    )
+    records = {
+        "query": record("query", positive_sources_hit=["A"]),
+        "candidate": record("candidate", positive_sources_hit=["A"]),
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+        scoring_model="v2_evidence_based",
+        scoring_engine_config=engine_config_path,
+    )
+
+    result = run_interaction_scoring(cfg, classification(records))
+
+    assert result is not None
+    row = result.source_rows["Interaction_Candidates"][0]
+    # min_categories=5 is unreachable with this fixture's evidence, so no
+    # formal score should be produced.
+    assert row["formal_score_available"] is False
+    assert row["evidence_tier"] == "Unclassified"
+    assert row["interaction_priority_score"] is None
+
+
+def test_v2_mode_uses_custom_functional_complementarity_ruleset(tmp_path: Path) -> None:
+    """A project-specific ruleset should be picked up instead of the default."""
+    ruleset_path = tmp_path / "rules.yaml"
+    ruleset_path.write_text(
+        """
+version: test
+rules:
+  - rule_id: custom_pair
+    left_terms: [gizmo]
+    right_terms: [widget]
+meaningful_keywords: [gizmo, widget]
+stopwords: [protein]
+""",
+        encoding="utf-8",
+    )
+    records = {
+        "query": record("query", description="gizmo enzyme", positive_sources_hit=["A"]),
+        "candidate": record("candidate", description="widget carrier", positive_sources_hit=["A"]),
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+        scoring_model="v2_evidence_based",
+        functional_complementarity_ruleset=ruleset_path,
+    )
+
+    result = run_interaction_scoring(cfg, classification(records))
+
+    assert result is not None
+    row = result.source_rows["Interaction_Candidates"][0]
+    assert "custom_pair" in row["interaction_score_reasons"]

@@ -8,8 +8,29 @@ import re
 from typing import Any
 
 from annotation.gff import GffFeatureLocation, load_gff_feature_map
+from core.evidence import EvidenceComponent, EvidenceStatus
 from core.fasta import read_fasta_as_components
 from core.models import ProteinRecord
+from analysis.functional_complementarity_rules import (
+    FunctionalComplementarityRuleset,
+    load_functional_complementarity_ruleset,
+)
+from analysis.scoring_engine import ScoreBreakdown, rank_candidates, score_candidate
+from analysis.scoring_engine_config import ScoringEngineConfig, load_scoring_engine_config
+
+V2_SCORING_MODEL = "v2_evidence_based"
+
+# Per-component weight budget within each shared category for scoring model
+# v2. source_classification and genomic_context each hold exactly one
+# component today, so their weight value only needs to be > 0. The two
+# functional_annotation components split that category's cap evenly; see
+# design specification section 3.1/3.2 for the reasoning.
+V2_COMPONENT_WEIGHTS: dict[str, float] = {
+    "source_classification": 1.0,
+    "genomic_context": 1.0,
+    "co_occurrence": 10.0,
+    "domain_complementarity": 10.0,
+}
 
 
 @dataclass(frozen=True)
@@ -158,6 +179,13 @@ INTERACTION_PAIR_COLUMNS: tuple[str, ...] = (
     "alphafold_readiness_score",
     "pair_total_length",
     "alphafold_recommended",
+    # scoring model v2 only (blank/NaN for scoring_model: legacy_additive)
+    "scoring_model",
+    "evidence_tier",
+    "formal_score_available",
+    "evidence_category_count",
+    "evidence_component_count",
+    "available_weight_total",
 )
 
 SEQUENCE_COLUMNS: tuple[str, ...] = ("query_sequence", "candidate_sequence")
@@ -283,6 +311,17 @@ def run_interaction_scoring(config: Any, blast_classification: Any) -> Interacti
     query_rows = [_query_row(query) for query in resolved_queries]
     source_rows: dict[str, list[dict[str, Any]]] = {}
 
+    scoring_model = getattr(scoring_config, "scoring_model", "legacy_additive")
+    engine_config: ScoringEngineConfig | None = None
+    ruleset: FunctionalComplementarityRuleset | None = None
+    if scoring_model == V2_SCORING_MODEL:
+        engine_config = load_scoring_engine_config(
+            getattr(scoring_config, "scoring_engine_config", None)
+        )
+        ruleset = load_functional_complementarity_ruleset(
+            getattr(scoring_config, "functional_complementarity_ruleset", None)
+        )
+
     for source_key, enabled in scoring_config.candidate_sources.items():
         if not enabled:
             continue
@@ -297,13 +336,24 @@ def run_interaction_scoring(config: Any, blast_classification: Any) -> Interacti
             warnings.append(f"interaction candidate source has no records: {source_key}")
             continue
 
-        rows = _rank_source_candidates(
-            resolved_queries=resolved_queries,
-            candidate_records=candidate_records,
-            candidate_source=source_label,
-            scoring_config=scoring_config,
-            feature_map=feature_map,
-        )
+        if scoring_model == V2_SCORING_MODEL:
+            rows = _rank_source_candidates_v2(
+                resolved_queries=resolved_queries,
+                candidate_records=candidate_records,
+                candidate_source=source_label,
+                scoring_config=scoring_config,
+                feature_map=feature_map,
+                engine_config=engine_config,
+                ruleset=ruleset,
+            )
+        else:
+            rows = _rank_source_candidates(
+                resolved_queries=resolved_queries,
+                candidate_records=candidate_records,
+                candidate_source=source_label,
+                scoring_config=scoring_config,
+                feature_map=feature_map,
+            )
         if rows:
             source_rows[sheet_name] = rows
         else:
@@ -497,6 +547,348 @@ def _score_pair(query: dict[str, Any], candidate: ProteinRecord, candidate_sourc
         row["query_sequence"] = query["sequence"]
         row["candidate_sequence"] = candidate.sequence
     return row
+
+
+def _rank_source_candidates_v2(
+    resolved_queries: list[dict[str, Any]],
+    candidate_records: dict[str, ProteinRecord],
+    candidate_source: str,
+    scoring_config: Any,
+    feature_map: dict[str, GffFeatureLocation],
+    engine_config: ScoringEngineConfig,
+    ruleset: FunctionalComplementarityRuleset,
+) -> list[dict[str, Any]]:
+    """Evidence-based (scoring model v2) counterpart of _rank_source_candidates."""
+    all_rows: list[dict[str, Any]] = []
+    for query in resolved_queries:
+        if query["resolution_status"] != "resolved":
+            continue
+
+        pairs: list[tuple[str, dict[str, Any], ScoreBreakdown]] = []
+        for candidate in candidate_records.values():
+            if _is_self_pair(query, candidate):
+                continue
+            row, breakdown = _score_pair_v2(
+                query, candidate, candidate_source, scoring_config, feature_map, engine_config, ruleset
+            )
+            pairs.append((candidate.protein_id, row, breakdown))
+
+        ranked = rank_candidates(
+            [(candidate_id, breakdown) for candidate_id, _row, breakdown in pairs],
+            tie_precision=engine_config.tie_precision,
+        )
+        row_by_id = {candidate_id: row for candidate_id, row, _breakdown in pairs}
+        for ranked_item in ranked[: scoring_config.max_candidates_per_query]:
+            row = row_by_id[ranked_item.candidate_id]
+            row["candidate_rank"] = ranked_item.rank if ranked_item.rank is not None else 0
+            row["distance_independent_rank"] = row["candidate_rank"]
+            all_rows.append(row)
+
+    all_rows.sort(
+        key=lambda row: (str(row["query_id"]), int(row["candidate_rank"] or 0), str(row["candidate_protein_id"]))
+    )
+    return all_rows
+
+
+def _score_pair_v2(
+    query: dict[str, Any],
+    candidate: ProteinRecord,
+    candidate_source: str,
+    scoring_config: Any,
+    feature_map: dict[str, GffFeatureLocation],
+    engine_config: ScoringEngineConfig,
+    ruleset: FunctionalComplementarityRuleset,
+) -> tuple[dict[str, Any], ScoreBreakdown]:
+    """Score one query/candidate pair with the evidence-based engine."""
+    components, location_info = _build_evidence_components_v2(query, candidate, candidate_source, feature_map, ruleset)
+    breakdown = score_candidate(components, engine_config)
+
+    alphafold_readiness_score, pair_total_length, alphafold_recommended = _alphafold_readiness(
+        query, candidate, scoring_config
+    )
+
+    reasons: list[str] = [f"candidate source: {candidate_source}", "scoring model: v2_evidence_based"]
+    for component in components:
+        if component.explanation:
+            reasons.append(f"{component.name}: {component.explanation}")
+    reasons.append(
+        "compatible for manual AlphaFold"
+        if alphafold_recommended
+        else "missing sequence or length too large for manual AlphaFold "
+        "(reference only; not part of the v2 total score)"
+    )
+    if not breakdown.eligible:
+        reasons.append("insufficient evidence for a formal score; see evidence_tier=Unclassified")
+
+    final_score = breakdown.final_score
+    genomic_context_category = breakdown.category_scores.get("genomic_context")
+    source_category = breakdown.category_scores.get("source_classification")
+
+    row: dict[str, Any] = {
+        "query_id": query["query_id"],
+        "query_protein_id": query["resolved_protein_id"],
+        "query_old_locus_tag": query["resolved_old_locus_tag"],
+        "candidate_rank": 0,
+        "candidate_protein_id": candidate.protein_id,
+        "candidate_old_locus_tag": candidate.old_locus_tag or "",
+        "candidate_source": candidate_source,
+        "candidate_description": candidate.description,
+        **location_info,
+        "same_gene_neighborhood_score": round(genomic_context_category.capped_score, 3)
+        if genomic_context_category is not None
+        else None,
+        "interaction_priority_score": round(final_score, 3) if final_score is not None else None,
+        "distance_independent_score": round(final_score, 3) if final_score is not None else None,
+        "distance_independent_rank": 0,
+        "priority_group": breakdown.tier,
+        "interaction_score_reasons": "; ".join(reasons),
+        "candidate_priority_score": round(source_category.capped_score, 3)
+        if source_category is not None
+        else None,
+        "co_occurrence_score": _component_contribution(components, "co_occurrence"),
+        "domain_complementarity_score": _component_contribution(components, "domain_complementarity"),
+        "alphafold_readiness_score": round(alphafold_readiness_score, 3),
+        "pair_total_length": pair_total_length,
+        "alphafold_recommended": alphafold_recommended,
+        "scoring_model": V2_SCORING_MODEL,
+        "evidence_tier": breakdown.tier,
+        "formal_score_available": breakdown.eligible,
+        "evidence_category_count": breakdown.evidence_category_count,
+        "evidence_component_count": breakdown.evidence_component_count,
+        "available_weight_total": round(breakdown.available_weight_total, 3),
+    }
+    if scoring_config.include_sequences_in_excel:
+        row["query_sequence"] = query["sequence"]
+        row["candidate_sequence"] = candidate.sequence
+    return row, breakdown
+
+
+def _component_contribution(components: list[EvidenceComponent], name: str) -> float | None:
+    """Return a named component's weighted contribution, or None if unavailable."""
+    component = next((c for c in components if c.name == name), None)
+    if component is None or component.status is not EvidenceStatus.AVAILABLE:
+        return None
+    return round(component.contribution, 3)
+
+
+def _build_evidence_components_v2(
+    query: dict[str, Any],
+    candidate: ProteinRecord,
+    candidate_source: str,
+    feature_map: dict[str, GffFeatureLocation],
+    ruleset: FunctionalComplementarityRuleset,
+) -> tuple[list[EvidenceComponent], dict[str, Any]]:
+    """Build the evidence components for one pair, reusing v5's raw signals."""
+    components: list[EvidenceComponent] = []
+
+    source_value = min(1.0, CANDIDATE_PRIORITY_BASE.get(candidate_source, 10.0) / 30.0)
+    components.append(
+        EvidenceComponent.available(
+            "source_classification",
+            "source_classification",
+            source_value,
+            V2_COMPONENT_WEIGHTS["source_classification"],
+            raw_value=candidate_source,
+            source="blast_classification",
+            explanation=f"candidate source: {candidate_source}",
+        )
+    )
+
+    location_info, geo_status, geo_value, geo_reason = _gene_neighborhood_v2(query, candidate, feature_map)
+    if geo_status is EvidenceStatus.AVAILABLE:
+        components.append(
+            EvidenceComponent.available(
+                "genomic_context",
+                "genomic_context",
+                geo_value,
+                V2_COMPONENT_WEIGHTS["genomic_context"],
+                raw_value=location_info.get("distance_bp"),
+                source="gff",
+                explanation=geo_reason,
+            )
+        )
+    else:
+        components.append(
+            EvidenceComponent.unavailable(
+                "genomic_context", "genomic_context", geo_status, source="gff", explanation=geo_reason
+            )
+        )
+
+    co_status, co_value, co_reason = _co_occurrence_status_and_value(query["record"], candidate)
+    if co_status is EvidenceStatus.AVAILABLE:
+        components.append(
+            EvidenceComponent.available(
+                "co_occurrence",
+                "functional_annotation",
+                co_value,
+                V2_COMPONENT_WEIGHTS["co_occurrence"],
+                source="blast_sources",
+                explanation=co_reason,
+            )
+        )
+    else:
+        components.append(
+            EvidenceComponent.unavailable(
+                "co_occurrence", "functional_annotation", co_status, source="blast_sources", explanation=co_reason
+            )
+        )
+
+    dom_status, dom_value, dom_reason = _domain_complementarity_status_and_value(query, candidate, ruleset)
+    if dom_status is EvidenceStatus.AVAILABLE:
+        components.append(
+            EvidenceComponent.available(
+                "domain_complementarity",
+                "functional_annotation",
+                dom_value,
+                V2_COMPONENT_WEIGHTS["domain_complementarity"],
+                source="annotation_text",
+                explanation=dom_reason,
+            )
+        )
+    else:
+        components.append(
+            EvidenceComponent.unavailable(
+                "domain_complementarity",
+                "functional_annotation",
+                dom_status,
+                source="annotation_text",
+                explanation=dom_reason,
+            )
+        )
+
+    return components, location_info
+
+
+def _gene_neighborhood_v2(
+    query: dict[str, Any], candidate: ProteinRecord, feature_map: dict[str, GffFeatureLocation]
+) -> tuple[dict[str, Any], EvidenceStatus, float | None, str]:
+    """Evidence-status-aware counterpart of _gene_neighborhood."""
+    query_location = _record_location(query["resolved_protein_id"], query["resolved_old_locus_tag"], feature_map)
+    candidate_location = _record_location(candidate.protein_id, candidate.old_locus_tag or "", feature_map)
+    base = {
+        "same_contig": None,
+        "query_contig": None,
+        "query_start": None,
+        "query_end": None,
+        "query_strand": None,
+        "candidate_contig": None,
+        "candidate_start": None,
+        "candidate_end": None,
+        "candidate_strand": None,
+        "distance_bp": None,
+        "strand_relation": "unknown",
+    }
+    if query_location is None or candidate_location is None:
+        return base, EvidenceStatus.MISSING, None, "genomic coordinates unavailable"
+
+    base.update(
+        {
+            "query_contig": query_location.contig,
+            "query_start": query_location.start,
+            "query_end": query_location.end,
+            "query_strand": query_location.strand,
+            "candidate_contig": candidate_location.contig,
+            "candidate_start": candidate_location.start,
+            "candidate_end": candidate_location.end,
+            "candidate_strand": candidate_location.strand,
+        }
+    )
+    base["strand_relation"] = _strand_relation(query_location.strand, candidate_location.strand)
+    if query_location.contig != candidate_location.contig:
+        return {**base, "same_contig": False}, EvidenceStatus.NOT_APPLICABLE, None, "different contig"
+
+    distance = _interval_distance(query_location, candidate_location)
+    if distance <= 5000:
+        normalized_value = 1.0
+        reason = f"close genomic neighborhood: {distance} bp"
+    elif distance <= 20000:
+        normalized_value = 0.6
+        reason = f"moderate genomic neighborhood: {distance} bp"
+    elif distance <= 100000:
+        normalized_value = 0.2
+        reason = f"weak genomic neighborhood: {distance} bp"
+    else:
+        normalized_value = 0.0
+        reason = "distant genomic neighborhood"
+    return {**base, "same_contig": True, "distance_bp": distance}, EvidenceStatus.AVAILABLE, normalized_value, reason
+
+
+def _co_occurrence_status_and_value(
+    query_record: ProteinRecord | None, candidate: ProteinRecord
+) -> tuple[EvidenceStatus, float | None, str]:
+    """Evidence-status-aware counterpart of _co_occurrence_score."""
+    if query_record is None:
+        return EvidenceStatus.MISSING, None, "query has no BLAST classification record"
+
+    query_sources = set(query_record.positive_sources_hit)
+    candidate_sources = set(candidate.positive_sources_hit)
+    union = query_sources | candidate_sources
+    if union:
+        jaccard = len(query_sources & candidate_sources) / len(union)
+        return EvidenceStatus.AVAILABLE, jaccard, f"positive-source overlap (Jaccard): {jaccard:.2f}"
+    if not query_record.negative_hits and not candidate.negative_hits:
+        return (
+            EvidenceStatus.AVAILABLE,
+            0.5,
+            "no positive-source overlap evidence, but neither side has a negative BLAST hit",
+        )
+    return (
+        EvidenceStatus.AVAILABLE,
+        0.0,
+        "evaluated: no positive-source overlap and at least one side has a negative BLAST hit",
+    )
+
+
+def _domain_complementarity_status_and_value(
+    query: dict[str, Any], candidate: ProteinRecord, ruleset: FunctionalComplementarityRuleset
+) -> tuple[EvidenceStatus, float | None, str]:
+    """Evidence-status-aware counterpart of _domain_complementarity_score."""
+    query_text = _record_text(query["record"], query["description"])
+    candidate_text = _record_text(candidate, candidate.description)
+    if not query_text.strip() or not candidate_text.strip():
+        return EvidenceStatus.MISSING, None, "no domain/description evidence"
+
+    query_terms = _meaningful_terms_v2(query_text, ruleset)
+    candidate_terms = _meaningful_terms_v2(candidate_text, ruleset)
+    rule_note = ""
+    if _has_domain_functional_terms_v2(query["record"], ruleset) or _has_domain_functional_terms_v2(
+        candidate, ruleset
+    ):
+        rule_note = "Pfam/CDD functional terms used; "
+
+    match = ruleset.find_match(query_terms, candidate_terms)
+    if match is not None:
+        return EvidenceStatus.AVAILABLE, 1.0, f"{rule_note}complementary rule matched: {match.rule_id}"
+
+    shared = sorted((query_terms & candidate_terms) & ruleset.meaningful_keywords)
+    if len(shared) >= 2:
+        return EvidenceStatus.AVAILABLE, 8.0 / 15.0, f"{rule_note}meaningful shared terms: {', '.join(shared[:4])}"
+    if len(shared) == 1:
+        return EvidenceStatus.AVAILABLE, 3.0 / 15.0, f"{rule_note}meaningful shared term: {shared[0]}"
+
+    generic_overlap = _all_terms(query_text) & _all_terms(candidate_text)
+    if generic_overlap:
+        return EvidenceStatus.AVAILABLE, 0.0, f"{rule_note}generic-only description overlap ignored"
+    return EvidenceStatus.AVAILABLE, 0.0, f"{rule_note}no domain/description match"
+
+
+def _meaningful_terms_v2(text: str, ruleset: FunctionalComplementarityRuleset) -> set[str]:
+    normalized = _normalize_text(text)
+    terms = {term for term in _all_terms(normalized) if term not in ruleset.stopwords}
+    for keyword in ruleset.meaningful_keywords:
+        if " " in keyword and keyword in normalized:
+            terms.add(keyword)
+    return terms
+
+
+def _has_domain_functional_terms_v2(record: ProteinRecord | None, ruleset: FunctionalComplementarityRuleset) -> bool:
+    if record is None:
+        return False
+    for domain in record.domains:
+        domain_text = _record_domain_text(domain)
+        if _meaningful_terms_v2(domain_text, ruleset) & ruleset.meaningful_keywords:
+            return True
+    return False
 
 
 def _assign_distance_independent_ranks(rows: list[dict[str, Any]]) -> None:

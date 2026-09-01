@@ -1,0 +1,51 @@
+# Example configuration for scoring model v2 (evidence-based scoring).
+#
+# This file is NOT loaded automatically. Copy it, edit the numbers, and
+# point interaction_scoring.scoring_engine_config at your copy in
+# config.yaml. Leaving interaction_scoring.scoring_engine_config unset uses
+# these exact values as the built-in default (see
+# analysis/scoring_engine_config.py: DEFAULT_SCORING_ENGINE_CONFIG).
+#
+# None of these numbers are biologically calibrated yet -- they reproduce
+# the point budget of the old additive scorer as a safe starting point.
+# Once known interacting / non-interacting pairs are available, recalibrate
+# them (see the design specification, section 37) rather than guessing.
+
+output_scale: 100
+
+# Maximum points each evidence category can contribute to the final score.
+# Only categories with at least one AVAILABLE component for a given pair
+# count toward the total; a category with no evidence is excluded from the
+# denominator, not scored as zero.
+category_caps:
+  source_classification: 30   # BLAST positive/negative classification source
+  genomic_context: 25         # GFF-based gene neighborhood distance
+  functional_annotation: 20   # co_occurrence + domain_complementarity (shared cap)
+
+# Maximum points a negative (contradicting) evidence component can subtract
+# from the final score. Set to null for no cap.
+negative_penalty_cap: 30
+
+# A candidate needs at least this many active evidence categories and this
+# much available evidence weight before a formal (ranked) score is
+# produced at all. Candidates below this stay in the output with
+# evidence_tier=Unclassified and formal_score_available=false, rather than
+# being silently dropped.
+minimum_evidence:
+  min_categories: 1
+  min_available_weight: 0
+
+# Confidence tier thresholds. A candidate needs both the score and the
+# category-count minimum to reach a tier; falling short of tier3 still
+# reports Tier4_Weak (not Unclassified -- that is reserved for candidates
+# that never got a formal score at all).
+tiers:
+  tier1_min_score: 70
+  tier1_min_categories: 3
+  tier2_min_score: 50
+  tier2_min_categories: 2
+  tier3_min_score: 25
+  tier3_min_categories: 1
+
+# Decimal places used when comparing scores for ranking ties.
+tie_precision: 3

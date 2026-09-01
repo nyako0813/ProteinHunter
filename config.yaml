@@ -173,6 +173,25 @@ interaction_scoring:
     enabled: false
     max_pair_total_length: 2500
 
+  # Scoring model v2 (evidence-based, category-capped scoring). This is
+  # opt-in and defaults to "legacy_additive" so existing runs are
+  # unaffected. Set to "v2_evidence_based" to use the new engine, which
+  # distinguishes "no evidence" from "evaluated, no match", caps correlated
+  # evidence per category (source_classification / genomic_context /
+  # functional_annotation) instead of adding raw points, and reports an
+  # Evidence_Tier per candidate. See docs/scoring_engine_v2.md.
+  scoring_model: legacy_additive
+
+  # Optional path to a scoring engine config YAML (category caps, negative
+  # penalty cap, minimum evidence for a formal score, tier thresholds).
+  # Leave unset to use the built-in defaults.
+  # scoring_engine_config: "config/scoring_engine.example.yaml"
+
+  # Optional path to a functional complementarity ruleset YAML (used only
+  # by scoring_model: v2_evidence_based). Leave unset to use the built-in
+  # v1 ruleset at config/functional_complementarity_rules.v1.yaml.
+  # functional_complementarity_ruleset: "config/functional_complementarity_rules.v1.yaml"
+
 
 # ----------------------------------------------------------
 # Cache
