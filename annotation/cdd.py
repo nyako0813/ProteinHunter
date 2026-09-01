@@ -17,10 +17,18 @@ from core.models import DomainHit
 
 CDD_SEARCH_URL = "https://www.ncbi.nlm.nih.gov/Structure/bwrpsb/bwrpsb.cgi"
 
-#: NCBI's documented limit on protein sequences/identifiers per Batch
-#: CD-Search request (cdd_help.shtml, "Batch CD-Search Help > Input >
-#: Maximum input").
-CDD_MAX_QUERIES_PER_BATCH = 1000
+#: Maximum protein sequences/identifiers submitted in one Batch CD-Search
+#: request. NCBI's documentation (cdd_help.shtml, "Batch CD-Search Help >
+#: Input > Maximum input") states "1,000 protein sequences and/or
+#: identifiers", but a live submission of exactly 1000 queries was
+#: empirically rejected with "#status 2 msg Too many queries. Please
+#: submit 1000 or less queries per request" (observed while extending CDD
+#: annotation to interaction_scoring's larger candidate pools -- see
+#: docs/implementation_plan_sequence_evidence.md's CDD investigation
+#: notes). NCBI's real, enforced limit is stricter than its own documented
+#: one, so this stays one below the documented number as a safety margin
+#: rather than trusting "1,000 or less" literally.
+CDD_MAX_QUERIES_PER_BATCH = 999
 
 #: Seconds to wait between job-status checks. This matches NCBI's own
 #: sample client (bwrpsb.pl, "checking for completion, wait 5 seconds
@@ -32,6 +40,21 @@ CDD_POLL_INTERVAL_SECONDS = 5.0
 #: this bound is our own safety margin (not an NCBI-recommended value) to
 #: keep a stuck job from hanging the pipeline forever.
 CDD_MAX_POLL_SECONDS = 600.0
+
+#: How many times to retry one status check after a transport-level
+#: failure (connection error, timeout, ...) before giving up on it.
+#: Observed transient failure rates (~a few percent of individual requests
+#: in this environment, see the single-request-per-protein era of CDD
+#: annotation before batching) make a single unretried attempt too fragile
+#: once one status check runs dozens of times over a large batch's
+#: lifetime -- one blip used to fail the entire (up to
+#: CDD_MAX_QUERIES_PER_BATCH-sequence) batch. Not an NCBI-documented value.
+CDD_NETWORK_RETRY_ATTEMPTS = 3
+
+#: Seconds to wait between retry attempts after a transport-level failure.
+#: Short and separate from CDD_POLL_INTERVAL_SECONDS -- this is recovering
+#: from a connectivity blip, not waiting for the job itself to progress.
+CDD_NETWORK_RETRY_INTERVAL_SECONDS = 2.0
 
 #: Batch CD-Search job status codes, verbatim from cdd_help.shtml
 #: ("Batch CD-Search Help > Scripted Data Downloads (Web API) > Check
@@ -156,6 +179,8 @@ def poll_cdd_batch(
     poll_interval: float = CDD_POLL_INTERVAL_SECONDS,
     max_wait: float = CDD_MAX_POLL_SECONDS,
     sleep_fn: Callable[[float], None] = time.sleep,
+    network_retry_attempts: int = CDD_NETWORK_RETRY_ATTEMPTS,
+    network_retry_interval: float = CDD_NETWORK_RETRY_INTERVAL_SECONDS,
 ) -> None:
     """Poll a submitted batch job until it completes (status 0).
 
@@ -165,22 +190,31 @@ def poll_cdd_batch(
     malformed status response, or exceeding ``max_wait`` while still
     "running" (status 3) -- NCBI's own client has no such bound, so this is
     our own safety timeout, not an NCBI-mandated value.
+
+    A transport-level failure (connection error, timeout, ...) on one
+    status check is retried up to ``network_retry_attempts`` times,
+    ``network_retry_interval`` seconds apart, before being raised as a
+    hard failure. This is deliberately narrower than the job-status
+    handling above: NCBI's own status codes 1/2/4/5 mean the server
+    responded and reported a real failure, so retrying them would not
+    help and they are never retried. Retry backoff sleeps are tracked
+    separately from ``elapsed`` and never count against ``max_wait`` --
+    ``max_wait`` bounds how long we wait for the job itself to finish, not
+    how long we spend working around flaky connectivity.
     """
     elapsed = 0.0
     while True:
         sleep_fn(poll_interval)
         elapsed += poll_interval
 
-        try:
-            response = requests.post(
-                CDD_SEARCH_URL, data={"tdata": "hits", "cdsid": cdsid}, timeout=timeout
-            )
-            response.raise_for_status()
-        except requests.RequestException as exc:
-            raise CDDAnnotationError(
-                f"CDD status check failed for search '{cdsid}'. "
-                "Please check the network connection."
-            ) from exc
+        response = _post_with_network_retries(
+            data={"tdata": "hits", "cdsid": cdsid},
+            timeout=timeout,
+            cdsid=cdsid,
+            attempts=network_retry_attempts,
+            retry_interval=network_retry_interval,
+            sleep_fn=sleep_fn,
+        )
 
         match = _STATUS_PATTERN.search(response.text)
         if match is None:
@@ -203,6 +237,39 @@ def poll_cdd_batch(
                 f"CDD batch search '{cdsid}' did not complete within "
                 f"{max_wait:.0f} seconds."
             )
+
+
+def _post_with_network_retries(
+    *,
+    data: dict[str, str],
+    timeout: int,
+    cdsid: str,
+    attempts: int,
+    retry_interval: float,
+    sleep_fn: Callable[[float], None],
+) -> requests.Response:
+    """POST to the CDD endpoint, retrying only transport-level failures.
+
+    A response that comes back at all -- even one reporting a job failure
+    via NCBI's own status codes -- is returned as-is on the first try;
+    only ``requests.RequestException`` (connection errors, timeouts, ...)
+    triggers a retry, since those mean no response was received at all.
+    """
+    last_exc: requests.RequestException | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            response = requests.post(CDD_SEARCH_URL, data=data, timeout=timeout)
+            response.raise_for_status()
+            return response
+        except requests.RequestException as exc:
+            last_exc = exc
+            if attempt < attempts:
+                sleep_fn(retry_interval)
+
+    raise CDDAnnotationError(
+        f"CDD status check failed for search '{cdsid}' after {attempts} attempts. "
+        "Please check the network connection."
+    ) from last_exc
 
 
 def fetch_cdd_batch_results(cdsid: str, timeout: int = 60) -> str:
@@ -512,6 +579,8 @@ def _optional_int(value: object) -> int | None:
 __all__: tuple[str, ...] = (
     "CDD_MAX_POLL_SECONDS",
     "CDD_MAX_QUERIES_PER_BATCH",
+    "CDD_NETWORK_RETRY_ATTEMPTS",
+    "CDD_NETWORK_RETRY_INTERVAL_SECONDS",
     "CDD_POLL_INTERVAL_SECONDS",
     "CDD_SEARCH_URL",
     "CDD_STATUS_MESSAGES",

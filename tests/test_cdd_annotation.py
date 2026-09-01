@@ -136,6 +136,15 @@ def test_search_cdd_by_sequence_parses_and_caches_response(
     assert post_mock.call_args.kwargs["timeout"] == 5
 
 
+def test_cdd_max_queries_per_batch_stays_below_ncbis_documented_limit() -> None:
+    """A live submission of exactly 1000 queries was empirically rejected by NCBI
+    (status 2, "Too many queries..."), despite NCBI's own docs stating 1000 is
+    an acceptable maximum. This locks in the one-below-documented safety
+    margin so a future change does not silently raise it back to 1000.
+    """
+    assert CDD_MAX_QUERIES_PER_BATCH == 999
+
+
 def test_submit_cdd_batch_returns_search_id(monkeypatch: pytest.MonkeyPatch) -> None:
     """A successful submission should parse and return the #cdsid value."""
     response = Mock()
@@ -163,10 +172,13 @@ def test_submit_cdd_batch_rejects_empty_queries() -> None:
 
 
 def test_submit_cdd_batch_rejects_over_limit() -> None:
-    """More than NCBI's documented 1,000-sequence limit should be rejected."""
+    """More than CDD_MAX_QUERIES_PER_BATCH queries should be rejected client-side."""
     queries = [(f"protein_{i}", "MSTNPKPQR") for i in range(CDD_MAX_QUERIES_PER_BATCH + 1)]
 
-    with pytest.raises(CDDAnnotationError, match="exceeds the 1000-sequence limit"):
+    with pytest.raises(
+        CDDAnnotationError,
+        match=f"exceeds the {CDD_MAX_QUERIES_PER_BATCH}-sequence limit",
+    ):
         submit_cdd_batch(queries)
 
 
@@ -257,7 +269,8 @@ def test_poll_cdd_batch_times_out_while_still_running(
 
 
 def test_poll_cdd_batch_request_failure_raises(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Network failures during a status check should raise CDDAnnotationError."""
+    """Network failures during a status check should raise CDDAnnotationError
+    once the retry budget (network_retry_attempts) is exhausted."""
     monkeypatch.setattr(
         "annotation.cdd.requests.post",
         Mock(side_effect=requests.RequestException("network down")),
@@ -265,6 +278,95 @@ def test_poll_cdd_batch_request_failure_raises(monkeypatch: pytest.MonkeyPatch) 
 
     with pytest.raises(CDDAnnotationError, match="status check failed"):
         poll_cdd_batch("QM3-qcdsearch-ABCDEF", sleep_fn=lambda _seconds: None)
+
+
+def test_poll_cdd_batch_retries_transient_network_error_then_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A status check that fails once or twice on transport errors should
+    still succeed once a response finally comes back, within the default
+    retry budget."""
+    done = Mock()
+    done.raise_for_status.return_value = None
+    done.text = "#status\t0\n"
+    post_mock = Mock(
+        side_effect=[
+            requests.RequestException("blip"),
+            requests.RequestException("blip"),
+            done,
+        ]
+    )
+    monkeypatch.setattr("annotation.cdd.requests.post", post_mock)
+
+    poll_cdd_batch("QM3-qcdsearch-ABCDEF", sleep_fn=lambda _seconds: None)
+
+    assert post_mock.call_count == 3
+
+
+def test_poll_cdd_batch_exhausts_network_retries_and_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """More transport failures than network_retry_attempts should give up."""
+    post_mock = Mock(side_effect=requests.RequestException("still down"))
+    monkeypatch.setattr("annotation.cdd.requests.post", post_mock)
+
+    with pytest.raises(CDDAnnotationError, match="after 3 attempts"):
+        poll_cdd_batch(
+            "QM3-qcdsearch-ABCDEF",
+            network_retry_attempts=3,
+            sleep_fn=lambda _seconds: None,
+        )
+
+    assert post_mock.call_count == 3
+
+
+def test_poll_cdd_batch_does_not_retry_terminal_status_codes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A real NCBI failure status (server responded) must not be retried --
+    only a missing response (transport failure) is."""
+    response = Mock()
+    response.raise_for_status.return_value = None
+    response.text = "#status\t1\n"
+    post_mock = Mock(return_value=response)
+    monkeypatch.setattr("annotation.cdd.requests.post", post_mock)
+
+    with pytest.raises(CDDAnnotationError, match="Invalid search ID"):
+        poll_cdd_batch("QM3-qcdsearch-ABCDEF", sleep_fn=lambda _seconds: None)
+
+    assert post_mock.call_count == 1
+
+
+def test_poll_cdd_batch_network_retry_sleep_not_counted_against_max_wait(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Retry backoff time must not eat into max_wait's job-completion budget."""
+    done = Mock()
+    done.raise_for_status.return_value = None
+    done.text = "#status\t0\n"
+    post_mock = Mock(
+        side_effect=[
+            requests.RequestException("blip"),
+            requests.RequestException("blip"),
+            done,
+        ]
+    )
+    monkeypatch.setattr("annotation.cdd.requests.post", post_mock)
+    sleep_calls: list[float] = []
+
+    poll_cdd_batch(
+        "QM3-qcdsearch-ABCDEF",
+        poll_interval=100.0,
+        max_wait=100.0,  # exactly one poll_interval tick's worth of budget
+        network_retry_interval=1.0,
+        sleep_fn=sleep_calls.append,
+    )
+
+    # One poll_interval sleep (100.0) plus two retry sleeps (1.0 each). If
+    # the retry sleeps had counted toward `elapsed`, total would reach
+    # 102.0 >= max_wait=100.0 and this would have raised a timeout instead
+    # of returning successfully.
+    assert sleep_calls == [100.0, 1.0, 1.0]
 
 
 def test_poll_cdd_batch_malformed_response_raises(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -90,6 +90,30 @@ def _records_for_annotation_step(
     )
 
 
+def _build_cdd_target_records(
+    positive_only_records: dict[str, ProteinRecord],
+    config: Any,
+    blast_classification: Any,
+) -> dict[str, ProteinRecord]:
+    """Return the full CDD annotation target set for this run.
+
+    Always includes ``positive_only_records`` ("Candidates"), the existing
+    default scope, plus (when interaction_scoring is enabled) every record
+    interaction_scoring can actually score or query -- see
+    analysis/interaction_scoring.py::resolve_cdd_annotation_targets. This
+    is a plain dict merge; it deliberately does not mutate
+    ``positive_only_records`` itself, so the caller's own reference (used
+    later for candidate scoring and the Excel "Candidates" sheet) keeps its
+    original size regardless of how many extra records CDD ends up
+    annotating.
+    """
+    from analysis.interaction_scoring import resolve_cdd_annotation_targets
+
+    target_records = dict(positive_only_records)
+    target_records.update(resolve_cdd_annotation_targets(config, blast_classification))
+    return target_records
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     """Build the command-line parser for Protein Hunter."""
     parser = argparse.ArgumentParser(
@@ -376,16 +400,27 @@ def main(argv: Sequence[str] | None = None) -> None:
         with logger.section("CDD domain annotation"):
             if config.annotation.enable_cdd:
                 logger.info("CDD annotation is enabled.")
+                cdd_target_records = _build_cdd_target_records(
+                    records, config, blast_classification
+                )
+                extra_target_count = len(cdd_target_records) - len(records)
+                if extra_target_count > 0:
+                    logger.info(
+                        "Interaction scoring is enabled: extending CDD annotation to "
+                        f"{len(cdd_target_records)} records total "
+                        f"({extra_target_count} beyond the Candidates bucket)."
+                    )
+
                 with logger.timer("CDD domain annotation"):
-                    records = annotate_records_cdd(
-                        records,
+                    annotate_records_cdd(
+                        cdd_target_records,
                         cache=cache,
                     )
 
                 total_domain_hits = sum(
-                    len(record.domains) for record in records.values()
+                    len(record.domains) for record in cdd_target_records.values()
                 )
-                logger.info(f"Records after CDD annotation: {len(records)}")
+                logger.info(f"Records after CDD annotation: {len(cdd_target_records)}")
                 logger.info(f"Total CDD/domain hits: {total_domain_hits}")
                 logger.info(
                     "Individual CDD annotation failures are saved in each record's notes."
