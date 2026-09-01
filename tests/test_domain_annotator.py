@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
 
+from annotation.cdd import CDD_MAX_QUERIES_PER_BATCH, domain_hit_to_dict
 from annotation.domain_annotator import (
     annotate_cdd_domains,
     annotate_pfam_domains,
@@ -13,6 +15,7 @@ from annotation.domain_annotator import (
     annotate_records_pfam,
     filter_pfam_domains,
 )
+from core.cache import JsonCache
 from core.exceptions import CDDAnnotationError, PfamAnnotationError
 from core.models import DomainHit, ProteinRecord
 
@@ -115,23 +118,19 @@ def test_cdd_failure_adds_note_and_failed_annotation(
 def test_annotate_records_cdd_annotates_multiple_records(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Batch CDD annotation should annotate each record and return the same dict."""
-    domains_by_id = {
-        "protein_1": [make_domain("cd11111")],
-        "protein_2": [make_domain("cd22222")],
-    }
-
-    def fake_search(
-        protein_id: str,
-        *args: object,
-        **kwargs: object,
-    ) -> list[DomainHit]:
-        return domains_by_id[protein_id]
-
-    monkeypatch.setattr(
-        "annotation.domain_annotator.search_cdd_by_sequence",
-        fake_search,
+    """Batch CDD annotation should submit one job for all records and distribute hits."""
+    domain_1 = make_domain("cd11111")
+    domain_2 = make_domain("cd22222")
+    submit_mock = Mock(return_value="QM3-qcdsearch-TEST")
+    poll_mock = Mock()
+    fetch_mock = Mock(return_value="raw-results-text")
+    parse_mock = Mock(
+        return_value={"protein_1": [domain_1], "protein_2": [domain_2]}
     )
+    monkeypatch.setattr("annotation.domain_annotator.submit_cdd_batch", submit_mock)
+    monkeypatch.setattr("annotation.domain_annotator.poll_cdd_batch", poll_mock)
+    monkeypatch.setattr("annotation.domain_annotator.fetch_cdd_batch_results", fetch_mock)
+    monkeypatch.setattr("annotation.domain_annotator.parse_cdd_batch_response", parse_mock)
     records = {
         "protein_1": make_record("protein_1"),
         "protein_2": make_record("protein_2"),
@@ -140,10 +139,131 @@ def test_annotate_records_cdd_annotates_multiple_records(
     result = annotate_records_cdd(records, timeout=7)
 
     assert result is records
-    assert records["protein_1"].domains == domains_by_id["protein_1"]
-    assert records["protein_2"].domains == domains_by_id["protein_2"]
+    submit_mock.assert_called_once_with(
+        [("protein_1", "MSTNPKPQR"), ("protein_2", "MSTNPKPQR")], timeout=7
+    )
+    poll_mock.assert_called_once()
+    fetch_mock.assert_called_once_with("QM3-qcdsearch-TEST", timeout=7)
+    parse_mock.assert_called_once_with("raw-results-text")
+    assert records["protein_1"].domains == [domain_1]
+    assert records["protein_2"].domains == [domain_2]
     assert records["protein_1"].annotations["cdd"].success is True
     assert records["protein_2"].annotations["cdd"].success is True
+
+
+def test_annotate_records_cdd_batch_failure_marks_every_record_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed batch job must fail every record in it, never a silent zero-hit success."""
+    monkeypatch.setattr(
+        "annotation.domain_annotator.submit_cdd_batch",
+        Mock(side_effect=CDDAnnotationError("CDD batch submission failed.")),
+    )
+    records = {
+        "protein_1": make_record("protein_1"),
+        "protein_2": make_record("protein_2"),
+    }
+
+    annotate_records_cdd(records)
+
+    for protein_id, record in records.items():
+        assert record.domains == []
+        assert record.annotations["cdd"].success is False
+        assert f"CDD annotation failed for {protein_id}" in str(
+            record.annotations["cdd"].error
+        )
+        assert any(
+            f"CDD annotation failed for {protein_id}" in note for note in record.notes
+        )
+
+
+def test_annotate_records_cdd_uses_cache_without_calling_batch(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A fully cached record should be filled in without submitting any batch job."""
+    cache = JsonCache(tmp_path)
+    cached_domain = make_domain("cd99999")
+    cache.set("cdd", "protein_1", [domain_hit_to_dict(cached_domain)])
+    submit_mock = Mock()
+    monkeypatch.setattr("annotation.domain_annotator.submit_cdd_batch", submit_mock)
+    records = {"protein_1": make_record("protein_1")}
+
+    annotate_records_cdd(records, cache=cache)
+
+    assert records["protein_1"].domains == [cached_domain]
+    assert records["protein_1"].annotations["cdd"].success is True
+    submit_mock.assert_not_called()
+
+
+def test_annotate_records_cdd_only_batches_cache_misses(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A mix of cached and uncached records should only submit the uncached ones."""
+    cache = JsonCache(tmp_path)
+    cached_domain = make_domain("cd99999")
+    cache.set("cdd", "protein_1", [domain_hit_to_dict(cached_domain)])
+    fresh_domain = make_domain("cd11111")
+    submit_mock = Mock(return_value="QM3-qcdsearch-TEST")
+    monkeypatch.setattr("annotation.domain_annotator.submit_cdd_batch", submit_mock)
+    monkeypatch.setattr("annotation.domain_annotator.poll_cdd_batch", Mock())
+    monkeypatch.setattr(
+        "annotation.domain_annotator.fetch_cdd_batch_results", Mock(return_value="text")
+    )
+    monkeypatch.setattr(
+        "annotation.domain_annotator.parse_cdd_batch_response",
+        Mock(return_value={"protein_2": [fresh_domain]}),
+    )
+    records = {
+        "protein_1": make_record("protein_1"),
+        "protein_2": make_record("protein_2"),
+    }
+
+    annotate_records_cdd(records, cache=cache)
+
+    submit_mock.assert_called_once_with([("protein_2", "MSTNPKPQR")], timeout=60)
+    assert records["protein_1"].domains == [cached_domain]
+    assert records["protein_2"].domains == [fresh_domain]
+
+
+def test_annotate_records_cdd_skips_batch_for_blank_sequence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A record with no usable sequence should not be sent to CDD at all."""
+    submit_mock = Mock()
+    monkeypatch.setattr("annotation.domain_annotator.submit_cdd_batch", submit_mock)
+    records = {"protein_1": make_record("protein_1")}
+    records["protein_1"].sequence = "   "
+
+    annotate_records_cdd(records)
+
+    assert records["protein_1"].domains == []
+    assert records["protein_1"].annotations["cdd"].success is True
+    submit_mock.assert_not_called()
+
+
+def test_annotate_records_cdd_chunks_batches_over_the_ncbi_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """More than CDD_MAX_QUERIES_PER_BATCH pending records must span multiple jobs."""
+    count = CDD_MAX_QUERIES_PER_BATCH + 1
+    records = {f"protein_{i}": make_record(f"protein_{i}") for i in range(count)}
+    submit_mock = Mock(side_effect=["QM3-a", "QM3-b"])
+    monkeypatch.setattr("annotation.domain_annotator.submit_cdd_batch", submit_mock)
+    monkeypatch.setattr("annotation.domain_annotator.poll_cdd_batch", Mock())
+    monkeypatch.setattr(
+        "annotation.domain_annotator.fetch_cdd_batch_results", Mock(return_value="text")
+    )
+    monkeypatch.setattr(
+        "annotation.domain_annotator.parse_cdd_batch_response", Mock(return_value={})
+    )
+
+    annotate_records_cdd(records)
+
+    assert submit_mock.call_count == 2
+    first_chunk = submit_mock.call_args_list[0].args[0]
+    second_chunk = submit_mock.call_args_list[1].args[0]
+    assert len(first_chunk) == CDD_MAX_QUERIES_PER_BATCH
+    assert len(second_chunk) == 1
 
 
 def test_existing_domains_are_preserved_and_cdd_domains_are_appended(

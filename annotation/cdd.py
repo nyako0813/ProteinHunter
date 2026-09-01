@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import csv
 import re
+import time
 from io import StringIO
-from typing import Any
+from typing import Callable
 
 import requests
 
@@ -15,6 +16,37 @@ from core.models import DomainHit
 
 
 CDD_SEARCH_URL = "https://www.ncbi.nlm.nih.gov/Structure/bwrpsb/bwrpsb.cgi"
+
+#: NCBI's documented limit on protein sequences/identifiers per Batch
+#: CD-Search request (cdd_help.shtml, "Batch CD-Search Help > Input >
+#: Maximum input").
+CDD_MAX_QUERIES_PER_BATCH = 1000
+
+#: Seconds to wait between job-status checks. This matches NCBI's own
+#: sample client (bwrpsb.pl, "checking for completion, wait 5 seconds
+#: between checks" -> sleep(5)) -- not a value we invented.
+CDD_POLL_INTERVAL_SECONDS = 5.0
+
+#: Maximum total seconds to keep polling before giving up. NCBI's own
+#: sample client polls indefinitely and documents no maximum wait time, so
+#: this bound is our own safety margin (not an NCBI-recommended value) to
+#: keep a stuck job from hanging the pipeline forever.
+CDD_MAX_POLL_SECONDS = 600.0
+
+#: Batch CD-Search job status codes, verbatim from cdd_help.shtml
+#: ("Batch CD-Search Help > Scripted Data Downloads (Web API) > Check
+#: status > job status codes"). "0" (success) and "3" (still running) are
+#: handled separately by the polling loop below.
+CDD_STATUS_MESSAGES: dict[str, str] = {
+    "1": "Invalid search ID",
+    "2": "No effective input (usually no query proteins or search ID specified)",
+    "4": "Queue manager (qman) service error",
+    "5": "Data is corrupted or no longer available (cache cleaned, etc)",
+}
+
+_CDSID_PATTERN = re.compile(r"^#cdsid\s+(\S+)", re.MULTILINE)
+_STATUS_PATTERN = re.compile(r"^#status\s+(\d)", re.MULTILINE)
+_QUERY_COLUMN_PATTERN = re.compile(r"^Q#\d+\s*-\s*>(\S+)")
 
 
 def parse_cdd_response(text: str) -> list[DomainHit]:
@@ -79,6 +111,182 @@ def search_cdd_by_sequence(
         cache.set("cdd", protein_id, [domain_hit_to_dict(hit) for hit in hits])
 
     return hits
+
+
+def submit_cdd_batch(queries: list[tuple[str, str]], timeout: int = 60) -> str:
+    """Submit up to CDD_MAX_QUERIES_PER_BATCH (protein_id, sequence) pairs as one job.
+
+    Returns the job's search ID (``cdsid``), used to poll for completion and
+    retrieve results. Raises :class:`CDDAnnotationError` if the request
+    fails or the response does not contain a search ID.
+    """
+    if not queries:
+        raise CDDAnnotationError("CDD batch submission requires at least one query.")
+    if len(queries) > CDD_MAX_QUERIES_PER_BATCH:
+        raise CDDAnnotationError(
+            f"CDD batch submission exceeds the {CDD_MAX_QUERIES_PER_BATCH}-sequence "
+            f"limit ({len(queries)} given)."
+        )
+
+    fasta_text = "".join(
+        f">{protein_id}\n{sequence.strip()}\n" for protein_id, sequence in queries
+    )
+    data = {"queries": fasta_text, "tdata": "hits", "dmode": "rep"}
+
+    try:
+        response = requests.post(CDD_SEARCH_URL, data=data, timeout=timeout)
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        raise CDDAnnotationError(
+            "CDD batch submission failed. Please check the network connection."
+        ) from exc
+
+    match = _CDSID_PATTERN.search(response.text)
+    if match is None:
+        raise CDDAnnotationError(
+            "CDD batch submission did not return a search ID. "
+            f"Response: {response.text[:200]!r}"
+        )
+    return match.group(1)
+
+
+def poll_cdd_batch(
+    cdsid: str,
+    timeout: int = 60,
+    poll_interval: float = CDD_POLL_INTERVAL_SECONDS,
+    max_wait: float = CDD_MAX_POLL_SECONDS,
+    sleep_fn: Callable[[float], None] = time.sleep,
+) -> None:
+    """Poll a submitted batch job until it completes (status 0).
+
+    Follows the status codes documented in cdd_help.shtml and NCBI's own
+    sample client's polling loop (bwrpsb.pl). Raises
+    :class:`CDDAnnotationError` on a terminal error status (1/2/4/5), a
+    malformed status response, or exceeding ``max_wait`` while still
+    "running" (status 3) -- NCBI's own client has no such bound, so this is
+    our own safety timeout, not an NCBI-mandated value.
+    """
+    elapsed = 0.0
+    while True:
+        sleep_fn(poll_interval)
+        elapsed += poll_interval
+
+        try:
+            response = requests.post(
+                CDD_SEARCH_URL, data={"tdata": "hits", "cdsid": cdsid}, timeout=timeout
+            )
+            response.raise_for_status()
+        except requests.RequestException as exc:
+            raise CDDAnnotationError(
+                f"CDD status check failed for search '{cdsid}'. "
+                "Please check the network connection."
+            ) from exc
+
+        match = _STATUS_PATTERN.search(response.text)
+        if match is None:
+            raise CDDAnnotationError(
+                f"CDD status check returned an unexpected response for search "
+                f"'{cdsid}': {response.text[:200]!r}"
+            )
+
+        status = match.group(1)
+        if status == "0":
+            return
+        if status in CDD_STATUS_MESSAGES:
+            raise CDDAnnotationError(
+                f"CDD batch search '{cdsid}' failed: {CDD_STATUS_MESSAGES[status]} "
+                f"(status={status})."
+            )
+        # status == "3": still running/waiting -- keep polling.
+        if elapsed >= max_wait:
+            raise CDDAnnotationError(
+                f"CDD batch search '{cdsid}' did not complete within "
+                f"{max_wait:.0f} seconds."
+            )
+
+
+def fetch_cdd_batch_results(cdsid: str, timeout: int = 60) -> str:
+    """Retrieve the raw domain-hit results text for a completed batch job."""
+    try:
+        response = requests.post(
+            CDD_SEARCH_URL, data={"tdata": "hits", "cdsid": cdsid}, timeout=timeout
+        )
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        raise CDDAnnotationError(
+            f"CDD result retrieval failed for search '{cdsid}'. "
+            "Please check the network connection."
+        ) from exc
+    return response.text
+
+
+def parse_cdd_batch_response(text: str) -> dict[str, list[DomainHit]]:
+    """Parse a completed Batch CD-Search response into per-query domain hits.
+
+    Each data row's ``Query`` column has the form ``Q#<index> -
+    ><protein_id>`` (observed directly from a live Batch CD-Search job;
+    see docs/implementation_plan_sequence_evidence.md's CDD investigation
+    notes -- this is NOT the same line shape ``parse_cdd_response`` expects,
+    which never reflected real Batch CD-Search "Concise Results" output).
+    Column positions are read from the response's own header row rather
+    than hard-coded, so a future harmless column reorder does not silently
+    break parsing.
+    """
+    hits_by_query: dict[str, list[DomainHit]] = {}
+    column_index: dict[str, int] | None = None
+
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+
+        columns = line.split("\t")
+        if columns[0] == "Query":
+            column_index = {name.strip(): index for index, name in enumerate(columns)}
+            continue
+        if column_index is None:
+            continue
+
+        query_match = _QUERY_COLUMN_PATTERN.match(columns[0])
+        if query_match is None:
+            continue
+        protein_id = query_match.group(1)
+
+        hit = _domain_hit_from_columns(columns, column_index)
+        if hit is not None:
+            hits_by_query.setdefault(protein_id, []).append(hit)
+
+    return hits_by_query
+
+
+def _domain_hit_from_columns(
+    columns: list[str], column_index: dict[str, int]
+) -> DomainHit | None:
+    """Build one DomainHit from a Concise Results data row and its header map."""
+    accession = _column_value(columns, column_index, "Accession")
+    if not accession:
+        return None
+
+    return DomainHit(
+        source="CDD",
+        accession=accession,
+        name=_column_value(columns, column_index, "Short name") or accession,
+        description=_column_value(columns, column_index, "Superfamily"),
+        evalue=_optional_float(_column_value(columns, column_index, "E-Value")),
+        bitscore=_optional_float(_column_value(columns, column_index, "Bitscore")),
+        start=_optional_int(_column_value(columns, column_index, "From")),
+        end=_optional_int(_column_value(columns, column_index, "To")),
+    )
+
+
+def _column_value(
+    columns: list[str], column_index: dict[str, int], name: str
+) -> str | None:
+    index = column_index.get(name)
+    if index is None or index >= len(columns):
+        return None
+    value = columns[index].strip()
+    return value or None
 
 
 def domain_hit_to_dict(hit: DomainHit) -> dict[str, str | int | float | None]:
@@ -302,9 +510,17 @@ def _optional_int(value: object) -> int | None:
 
 
 __all__: tuple[str, ...] = (
+    "CDD_MAX_POLL_SECONDS",
+    "CDD_MAX_QUERIES_PER_BATCH",
+    "CDD_POLL_INTERVAL_SECONDS",
     "CDD_SEARCH_URL",
+    "CDD_STATUS_MESSAGES",
     "domain_hit_from_dict",
     "domain_hit_to_dict",
+    "fetch_cdd_batch_results",
+    "parse_cdd_batch_response",
     "parse_cdd_response",
+    "poll_cdd_batch",
     "search_cdd_by_sequence",
+    "submit_cdd_batch",
 )
