@@ -172,6 +172,19 @@ class InteractionScoringConfig:
     scoring_weights: InteractionScoringWeightsConfig
     alphafold: InteractionAlphaFoldConfig
     neighborhood: InteractionNeighborhoodConfig
+    # scoring model v2 (evidence-based, category-capped scoring). Defaults
+    # keep every existing run on the original "legacy_additive" behavior.
+    scoring_model: str = "legacy_additive"
+    scoring_engine_config: Path | None = None
+    functional_complementarity_ruleset: Path | None = None
+    # Optional path to a ProteinInteractionHunter candidate_evidence_bundle
+    # .jsonl file (scoring_model: v2_evidence_based only). PIH is never
+    # imported; this is a plain-file bridge. See
+    # analysis/pih_evidence_bridge.py.
+    pih_evidence_bundle: Path | None = None
+
+
+VALID_INTERACTION_SCORING_MODELS: tuple[str, ...] = ("legacy_additive", "v2_evidence_based")
 
 
 @dataclass
@@ -848,6 +861,37 @@ def _validate_interaction_scoring_section(raw: dict[object, object]) -> None:
             "must be a positive integer."
         )
 
+    scoring_model = section.get("scoring_model", "legacy_additive")
+    if scoring_model not in VALID_INTERACTION_SCORING_MODELS:
+        raise ConfigError(
+            "config.yaml value 'interaction_scoring.scoring_model' must be one of "
+            f"{VALID_INTERACTION_SCORING_MODELS}, got {scoring_model!r}."
+        )
+
+    scoring_engine_config = section.get("scoring_engine_config")
+    if scoring_engine_config is not None and not isinstance(scoring_engine_config, str):
+        raise ConfigError(
+            "config.yaml value 'interaction_scoring.scoring_engine_config' "
+            "must be a string path."
+        )
+
+    functional_complementarity_ruleset = section.get("functional_complementarity_ruleset")
+    if functional_complementarity_ruleset is not None and not isinstance(
+        functional_complementarity_ruleset, str
+    ):
+        raise ConfigError(
+            "config.yaml value "
+            "'interaction_scoring.functional_complementarity_ruleset' "
+            "must be a string path."
+        )
+
+    pih_evidence_bundle = section.get("pih_evidence_bundle")
+    if pih_evidence_bundle is not None and not isinstance(pih_evidence_bundle, str):
+        raise ConfigError(
+            "config.yaml value 'interaction_scoring.pih_evidence_bundle' "
+            "must be a string path."
+        )
+
 
 def _load_interaction_scoring(raw_scoring: object) -> InteractionScoringConfig:
     """Load optional lightweight interaction scoring settings."""
@@ -961,6 +1005,12 @@ def _load_interaction_scoring(raw_scoring: object) -> InteractionScoringConfig:
         scoring_weights=scoring_weights,
         alphafold=alphafold,
         neighborhood=neighborhood,
+        scoring_model=str(raw_scoring.get("scoring_model", "legacy_additive")),
+        scoring_engine_config=_optional_path(raw_scoring.get("scoring_engine_config")),
+        functional_complementarity_ruleset=_optional_path(
+            raw_scoring.get("functional_complementarity_ruleset")
+        ),
+        pih_evidence_bundle=_optional_path(raw_scoring.get("pih_evidence_bundle")),
     )
 
 

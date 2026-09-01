@@ -173,6 +173,37 @@ interaction_scoring:
     enabled: false
     max_pair_total_length: 2500
 
+  # Scoring model v2 (evidence-based, category-capped scoring). This is
+  # opt-in and defaults to "legacy_additive" so existing runs are
+  # unaffected. Set to "v2_evidence_based" to use the new engine, which
+  # distinguishes "no evidence" from "evaluated, no match", caps correlated
+  # evidence per category (source_classification / genomic_context /
+  # functional_annotation) instead of adding raw points, and reports an
+  # Evidence_Tier per candidate. See docs/scoring_engine_v2.md.
+  scoring_model: legacy_additive
+
+  # Optional path to a scoring engine config YAML (category caps, negative
+  # penalty cap, minimum evidence for a formal score, tier thresholds).
+  # Leave unset to use the built-in defaults.
+  # scoring_engine_config: "config/scoring_engine.example.yaml"
+
+  # Optional path to a functional complementarity ruleset YAML (used only
+  # by scoring_model: v2_evidence_based). Leave unset to use the built-in
+  # v1 ruleset at config/functional_complementarity_rules.v1.yaml.
+  # functional_complementarity_ruleset: "config/functional_complementarity_rules.v1.yaml"
+
+  # Optional path to a ProteinInteractionHunter (PIH) candidate_evidence_bundle.jsonl
+  # file (used only by scoring_model: v2_evidence_based). PIH is a separate,
+  # independent project and is never imported here -- this only reads its
+  # own JSONL output as plain data. Only PIH's cellular_compatibility,
+  # evolutionary, and direct_interaction categories are bridged in (v5
+  # already computes its own genomic_context and functional_annotation, so
+  # PIH's versions of those two are intentionally ignored to avoid double
+  # counting). Leave unset to run without PIH evidence at all -- a missing
+  # or absent file only produces a warning, never an error. See
+  # analysis/pih_evidence_bridge.py and docs/scoring_engine_v2.md.
+  # pih_evidence_bundle: "path/to/candidate_evidence_bundle.jsonl"
+
 
 # ----------------------------------------------------------
 # Cache

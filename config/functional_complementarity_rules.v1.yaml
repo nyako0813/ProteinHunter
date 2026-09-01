@@ -1,0 +1,184 @@
+# Functional complementarity rules for interaction scoring model v2.
+#
+# This is a straight migration of the COMPLEMENTARY_TERM_PAIRS,
+# MEANINGFUL_KEYWORDS, and DESCRIPTION_STOPWORDS constants that used to be
+# hard-coded in analysis/interaction_scoring.py. Keeping them here means a
+# new query protein or organism can extend the ruleset without touching
+# Python code, and the ruleset can be versioned independently of the code
+# that reads it (see design specification section 3.4).
+#
+# rule_id must be unique. left_terms/right_terms are lists so a rule can
+# recognize more than one synonym on each side; a match on any left/right
+# combination satisfies the rule.
+version: v1
+
+rules:
+  - rule_id: radical_sam_iron_sulfur
+    left_terms: [radical sam]
+    right_terms: [iron-sulfur]
+    note: "radical SAM enzyme paired with an Fe-S cluster protein"
+  - rule_id: radical_sam_ferredoxin
+    left_terms: [radical sam]
+    right_terms: [ferredoxin]
+    note: "radical SAM enzyme paired with a ferredoxin electron donor"
+  - rule_id: radical_iron_sulfur
+    left_terms: [radical]
+    right_terms: [iron-sulfur]
+    note: "generic radical-chemistry protein paired with an Fe-S protein"
+  - rule_id: sulfur_carrier
+    left_terms: [sulfur]
+    right_terms: [carrier]
+    note: "sulfur-transfer protein paired with a carrier protein"
+  - rule_id: sulphur_carrier
+    left_terms: [sulphur]
+    right_terms: [carrier]
+    note: "sulfur-transfer protein paired with a carrier protein (UK spelling)"
+  - rule_id: thiol_carrier
+    left_terms: [thiol]
+    right_terms: [carrier]
+    note: "thiol-chemistry protein paired with a carrier protein"
+  - rule_id: moad_this
+    left_terms: [moad]
+    right_terms: [this]
+    note: "MoaD-like sulfur carrier paired with a ThiS-like sulfur carrier"
+  - rule_id: moad_sulfur
+    left_terms: [moad]
+    right_terms: [sulfur]
+    note: "MoaD-like sulfur carrier paired with a sulfur-related protein"
+  - rule_id: this_sulfur
+    left_terms: [this]
+    right_terms: [sulfur]
+    note: "ThiS-like sulfur carrier paired with a sulfur-related protein"
+  - rule_id: tusa_sulfur
+    left_terms: [tusa]
+    right_terms: [sulfur]
+    note: "TusA-like sulfur relay protein paired with a sulfur-related protein"
+  - rule_id: dsre_sulfur
+    left_terms: [dsre]
+    right_terms: [sulfur]
+    note: "DsrE-like sulfur relay protein paired with a sulfur-related protein"
+  - rule_id: atpase_ligase
+    left_terms: [atpase]
+    right_terms: [ligase]
+    note: "ATPase paired with an ATP-dependent ligase"
+  - rule_id: atp_binding_ligase
+    left_terms: [atp-binding]
+    right_terms: [ligase]
+    note: "ATP-binding protein paired with a ligase"
+  - rule_id: nucleotidyltransferase_rna
+    left_terms: [nucleotidyltransferase]
+    right_terms: [rna]
+    note: "nucleotidyltransferase paired with an RNA-associated protein"
+  - rule_id: methyltransferase_rna
+    left_terms: [methyltransferase]
+    right_terms: [rna]
+    note: "methyltransferase paired with an RNA-associated protein"
+  - rule_id: aminotransferase_plp
+    left_terms: [aminotransferase]
+    right_terms: [plp]
+    note: "aminotransferase paired with a PLP-cofactor-related protein"
+  - rule_id: oxidoreductase_ferredoxin
+    left_terms: [oxidoreductase]
+    right_terms: [ferredoxin]
+    note: "oxidoreductase paired with a ferredoxin electron donor"
+  - rule_id: dehydrogenase_nad
+    left_terms: [dehydrogenase]
+    right_terms: [nad]
+    note: "dehydrogenase paired with an NAD-related protein"
+  - rule_id: hydrolase_amidase
+    left_terms: [hydrolase]
+    right_terms: [amidase]
+    note: "hydrolase paired with an amidase"
+  - rule_id: nuclease_dna
+    left_terms: [nuclease]
+    right_terms: [dna]
+    note: "nuclease paired with a DNA-associated protein"
+  - rule_id: helicase_dna
+    left_terms: [helicase]
+    right_terms: [dna]
+    note: "helicase paired with a DNA-associated protein"
+  - rule_id: transferase_cofactor
+    left_terms: [transferase]
+    right_terms: [cofactor]
+    note: "transferase paired with a cofactor-related protein"
+
+meaningful_keywords:
+  - atp-binding
+  - atpase
+  - ligase
+  - transferase
+  - methyltransferase
+  - aminotransferase
+  - nucleotidyltransferase
+  - hydrolase
+  - oxidoreductase
+  - dehydrogenase
+  - reductase
+  - radical
+  - sam
+  - radical sam
+  - sulfur
+  - sulphur
+  - thiol
+  - thioredoxin
+  - ferredoxin
+  - fe-s
+  - iron-sulfur
+  - molybdopterin
+  - moad
+  - this
+  - tusa
+  - dsre
+  - carrier
+  - kinase
+  - synthetase
+  - synthase
+  - deaminase
+  - amidase
+  - peptidase
+  - helicase
+  - nuclease
+  - rna
+  - trna
+  - rrna
+  - dna
+  - cofactor
+  - flavin
+  - fad
+  - nad
+  - plp
+  - biotin
+
+stopwords:
+  - protein
+  - family
+  - domain
+  - containing
+  - domain-containing
+  - hypothetical
+  - putative
+  - predicted
+  - probable
+  - possible
+  - uncharacterized
+  - conserved
+  - archaeal
+  - bacterial
+  - homolog
+  - homologous
+  - like
+  - subunit
+  - chain
+  - component
+  - associated
+  - related
+  - membrane
+  - cytosolic
+  - methanosarcina
+  - acetivorans
+  - source
+  - candidate
+  - enzyme
+  - factor
+  - alpha
+  - beta
