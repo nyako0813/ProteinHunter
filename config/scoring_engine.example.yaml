@@ -17,10 +17,26 @@ output_scale: 100
 # Only categories with at least one AVAILABLE component for a given pair
 # count toward the total; a category with no evidence is excluded from the
 # denominator, not scored as zero.
+#
+# IMPORTANT: every category name any POSITIVE (is_negative=False) evidence
+# component can attach to MUST have an entry here, or scoring will raise a
+# ConfigError the first time that category actually fires for a pair (see
+# analysis/scoring_engine.py::_score_categories). Negative-flagged
+# components (currently only negative_hit_strength, category
+# "source_reliability") are exempt -- they are summed into
+# negative_penalty_cap below instead and never look at category_caps, so
+# "source_reliability" deliberately has no entry here. If you add a new
+# *positive* evidence component with a new category name, add its cap here
+# too. tests/test_scoring_engine_config.py::test_example_config_matches_defaults
+# guards this file against silently drifting out of sync with the built-in
+# defaults again.
 category_caps:
-  source_classification: 30   # BLAST positive/negative classification source
-  genomic_context: 25         # GFF-based gene neighborhood distance
-  functional_annotation: 20   # co_occurrence + domain_complementarity (shared cap)
+  source_classification: 30       # BLAST positive/negative classification source
+  genomic_context: 25             # GFF-based gene neighborhood distance
+  functional_annotation: 20       # co_occurrence + domain_complementarity (shared cap)
+  pih_cellular_compatibility: 5   # optional ProteinInteractionHunter bridge (see interaction_scoring.pih_evidence_bundle)
+  pih_evolutionary: 10            # optional ProteinInteractionHunter bridge
+  pih_direct_interaction: 20      # optional ProteinInteractionHunter bridge
 
 # Maximum points a negative (contradicting) evidence component can subtract
 # from the final score. Set to null for no cap.

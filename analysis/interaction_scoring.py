@@ -15,6 +15,13 @@ from analysis.functional_complementarity_rules import (
     FunctionalComplementarityRuleset,
     load_functional_complementarity_ruleset,
 )
+from analysis.pih_evidence_bridge import (
+    BRIDGED_PIH_CATEGORIES,
+    PIH_CATEGORY_WEIGHTS,
+    PihEvidenceBundle,
+    load_pih_evidence_bundle,
+)
+from analysis.pih_evidence_bridge import without_version as _pih_without_version
 from analysis.scoring_engine import ScoreBreakdown, rank_candidates, score_candidate
 from analysis.scoring_engine_config import ScoringEngineConfig, load_scoring_engine_config
 
@@ -30,6 +37,20 @@ V2_COMPONENT_WEIGHTS: dict[str, float] = {
     "genomic_context": 1.0,
     "co_occurrence": 10.0,
     "domain_complementarity": 10.0,
+    # Negative-evidence weight, expressed directly in output_scale points
+    # (see analysis/scoring_engine.py::_negative_penalty): a "strong"
+    # negative BLAST hit alone can fully consume the default
+    # negative_penalty_cap (30). This reuses ortholog_filter.py's existing
+    # strong/medium/weak classification -- it does not add a new
+    # biological rule, only routes an existing v5 signal through the
+    # auditable evidence model.
+    "negative_hit_strength": 30.0,
+}
+
+_NEGATIVE_HIT_STRENGTH_VALUES: dict[str, float] = {
+    "strong": 1.0,
+    "medium": 0.5,
+    "weak": 0.2,
 }
 
 
@@ -314,6 +335,7 @@ def run_interaction_scoring(config: Any, blast_classification: Any) -> Interacti
     scoring_model = getattr(scoring_config, "scoring_model", "legacy_additive")
     engine_config: ScoringEngineConfig | None = None
     ruleset: FunctionalComplementarityRuleset | None = None
+    pih_bundle: PihEvidenceBundle | None = None
     if scoring_model == V2_SCORING_MODEL:
         engine_config = load_scoring_engine_config(
             getattr(scoring_config, "scoring_engine_config", None)
@@ -321,6 +343,10 @@ def run_interaction_scoring(config: Any, blast_classification: Any) -> Interacti
         ruleset = load_functional_complementarity_ruleset(
             getattr(scoring_config, "functional_complementarity_ruleset", None)
         )
+        pih_bundle_path = getattr(scoring_config, "pih_evidence_bundle", None)
+        if pih_bundle_path is not None:
+            pih_bundle = load_pih_evidence_bundle(pih_bundle_path)
+            warnings.extend(pih_bundle.warnings)
 
     for source_key, enabled in scoring_config.candidate_sources.items():
         if not enabled:
@@ -345,6 +371,7 @@ def run_interaction_scoring(config: Any, blast_classification: Any) -> Interacti
                 feature_map=feature_map,
                 engine_config=engine_config,
                 ruleset=ruleset,
+                pih_bundle=pih_bundle,
             )
         else:
             rows = _rank_source_candidates(
@@ -557,6 +584,7 @@ def _rank_source_candidates_v2(
     feature_map: dict[str, GffFeatureLocation],
     engine_config: ScoringEngineConfig,
     ruleset: FunctionalComplementarityRuleset,
+    pih_bundle: PihEvidenceBundle | None = None,
 ) -> list[dict[str, Any]]:
     """Evidence-based (scoring model v2) counterpart of _rank_source_candidates."""
     all_rows: list[dict[str, Any]] = []
@@ -569,7 +597,8 @@ def _rank_source_candidates_v2(
             if _is_self_pair(query, candidate):
                 continue
             row, breakdown = _score_pair_v2(
-                query, candidate, candidate_source, scoring_config, feature_map, engine_config, ruleset
+                query, candidate, candidate_source, scoring_config, feature_map, engine_config, ruleset,
+                pih_bundle=pih_bundle,
             )
             pairs.append((candidate.protein_id, row, breakdown))
 
@@ -598,9 +627,12 @@ def _score_pair_v2(
     feature_map: dict[str, GffFeatureLocation],
     engine_config: ScoringEngineConfig,
     ruleset: FunctionalComplementarityRuleset,
+    pih_bundle: PihEvidenceBundle | None = None,
 ) -> tuple[dict[str, Any], ScoreBreakdown]:
     """Score one query/candidate pair with the evidence-based engine."""
-    components, location_info = _build_evidence_components_v2(query, candidate, candidate_source, feature_map, ruleset)
+    components, location_info = _build_evidence_components_v2(
+        query, candidate, candidate_source, feature_map, ruleset, pih_bundle=pih_bundle
+    )
     breakdown = score_candidate(components, engine_config)
 
     alphafold_readiness_score, pair_total_length, alphafold_recommended = _alphafold_readiness(
@@ -677,6 +709,7 @@ def _build_evidence_components_v2(
     candidate_source: str,
     feature_map: dict[str, GffFeatureLocation],
     ruleset: FunctionalComplementarityRuleset,
+    pih_bundle: PihEvidenceBundle | None = None,
 ) -> tuple[list[EvidenceComponent], dict[str, Any]]:
     """Build the evidence components for one pair, reusing v5's raw signals."""
     components: list[EvidenceComponent] = []
@@ -756,7 +789,84 @@ def _build_evidence_components_v2(
             )
         )
 
+    neg_status, neg_value, neg_reason = _negative_hit_status_and_value(candidate)
+    if neg_status is EvidenceStatus.AVAILABLE:
+        components.append(
+            EvidenceComponent.available(
+                "negative_hit_strength",
+                "source_reliability",
+                neg_value,
+                V2_COMPONENT_WEIGHTS["negative_hit_strength"],
+                raw_value=candidate.negative_hit_strength,
+                is_negative=True,
+                source="ortholog_filter",
+                explanation=neg_reason,
+            )
+        )
+    else:
+        components.append(
+            EvidenceComponent.unavailable(
+                "negative_hit_strength",
+                "source_reliability",
+                neg_status,
+                source="ortholog_filter",
+                explanation=neg_reason,
+            )
+        )
+
+    if pih_bundle is not None:
+        query_keys = [
+            query["resolved_protein_id"],
+            query["resolved_old_locus_tag"],
+            _pih_without_version(query["resolved_protein_id"]),
+        ]
+        candidate_keys = [
+            candidate.protein_id,
+            candidate.old_locus_tag or "",
+            _pih_without_version(candidate.protein_id),
+        ]
+        pih_categories = pih_bundle.lookup(query_keys, candidate_keys)
+        for category_name in BRIDGED_PIH_CATEGORIES:
+            evidence = pih_categories.get(category_name)
+            if evidence is None:
+                # No "unavailable" placeholder is needed here: a category with
+                # no available evidence simply never appears in this pair's
+                # component list, and the scoring engine already excludes
+                # inactive categories from the score denominator (see
+                # analysis/scoring_engine.py::_score_categories).
+                continue
+            components.append(
+                EvidenceComponent.available(
+                    f"pih_{category_name}",
+                    f"pih_{category_name}",
+                    evidence.normalized_score,
+                    PIH_CATEGORY_WEIGHTS[category_name],
+                    raw_value=evidence.available_weight,
+                    source="protein_interaction_hunter",
+                    explanation=(
+                        f"PIH {category_name} category "
+                        f"(available_weight={evidence.available_weight:.1f})"
+                    ),
+                )
+            )
+
     return components, location_info
+
+
+def _negative_hit_status_and_value(candidate: ProteinRecord) -> tuple[EvidenceStatus, float | None, str]:
+    """Reuse ortholog_filter.py's negative-hit strength as negative evidence.
+
+    ortholog_filter.py itself is unchanged; this only reads its already
+    computed classification (record.negative_hit_strength) and lets the v2
+    scoring engine apply it as a capped penalty instead of an early hard
+    filter, for candidate sources (e.g. Candidates_relaxed, No_hit) that
+    intentionally retain records with a weak/medium negative hit.
+    """
+    strength = candidate.negative_hit_strength
+    value = _NEGATIVE_HIT_STRENGTH_VALUES.get(strength)
+    if value is None:
+        return EvidenceStatus.NOT_APPLICABLE, None, "no negative BLAST hit"
+    return EvidenceStatus.AVAILABLE, value, f"negative BLAST hit strength: {strength}"
 
 
 def _gene_neighborhood_v2(

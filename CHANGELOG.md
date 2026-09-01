@@ -14,14 +14,17 @@ ProteinHunter_v5 の変更履歴です。
 - `analysis/scoring_engine_config.py` + `config/scoring_engine.example.yaml`: スコアリングエンジンの重み・カテゴリ上限・ペナルティ・Tier閾値を設定ファイル化(コードへのハードコード禁止)。
 - `analysis/functional_complementarity_rules.py` + `config/functional_complementarity_rules.v1.yaml`: これまで `COMPLEMENTARY_TERM_PAIRS` としてコード内に固定していたキーワード対応表をバージョン管理可能なYAMLへ外部化。
 - `analysis/interaction_scoring.py`: `interaction_scoring.scoring_model: v2_evidence_based` を指定すると、上記エンジンを使った新しいスコアリング経路(`_score_pair_v2` 系)が有効になる。`legacy_additive`(デフォルト)は変更なし。
-- `docs/scoring_engine_v2.md`: v2スコアリングの設計意図と使い方をまとめたドキュメントを追加。
-- `tests/test_evidence.py`, `tests/test_scoring_engine.py`, `tests/test_scoring_engine_config.py`, `tests/test_functional_complementarity_rules.py`, および `tests/test_interaction_scoring.py` へのv2統合テストを追加。
+- `analysis/interaction_scoring.py`: `ortholog_filter.py` が既に計算している negative BLAST hit 強度(`record.negative_hit_strength`)を `negative_hit_strength` エビデンスコンポーネント(カテゴリ `source_reliability`、`is_negative=True`)としてv2エンジンに接続。negative hit がない場合は `NOT_APPLICABLE`(ペナルティなし)、ある場合はスコアから上限付きで減算されます。`ortholog_filter.py` 自体は無変更(既存の分類結果を読むだけ)。
+- `analysis/pih_evidence_bridge.py`: ProteinInteractionHunter(PIH、別リポジトリ・コード非依存)が出力する `candidate_evidence_bundle.jsonl` をプレーンなJSONとして読み込む、ファイルベースの任意連携ブリッジを追加。PIHのコードは一切importしません。PIHの5カテゴリのうち、v5が既に自前で計算している `genomic_context`/`functional_annotation` は二重加点を避けるため意図的に除外し、v5に相当機能がない `cellular_compatibility`/`evolutionary`/`direct_interaction` の3カテゴリのみを `pih_*` 名で取り込みます。`interaction_scoring.pih_evidence_bundle` で有効化(未設定なら従来どおり無効)。ファイルが存在しない・壊れている場合も実行を止めず、warningとして記録します。
+- `docs/scoring_engine_v2.md`: v2スコアリングの設計意図と使い方をまとめたドキュメントを追加。negative_hit_strength とPIHブリッジの節を追記。
+- `tests/test_evidence.py`, `tests/test_scoring_engine.py`, `tests/test_scoring_engine_config.py`, `tests/test_functional_complementarity_rules.py`, および `tests/test_interaction_scoring.py` へのv2統合テストを追加(negative evidence、PIHブリッジの正常系・異常系を含む)。
 
 ### Notes
 
 - `analysis/ortholog_filter.py`(negative BLAST hit強度分類・homolog除去)は一切変更していません。
 - v2モードでも `alphafold_readiness_score` は参考情報として出力されますが、合計スコアには加算されません(構造予測しやすさは相互作用の証拠ではないため)。
-- v2の重み・カテゴリ上限・Tier閾値は、旧方式の配点を踏襲した暫定値です。正解データ(既知の相互作用/非相互作用ペア)による校正は未実施です。
+- v2の重み・カテゴリ上限・Tier閾値は、旧方式の配点を踏襲した暫定値です。正解データ(既知の相互作用/非相互作用ペア)による校正は未実施です。PIHブリッジのカテゴリ重みも同様に未校正です。
+- セルフレビューで発見・修正: `config/scoring_engine.example.yaml` が `DEFAULT_CATEGORY_CAPS` の `pih_*` カテゴリ追加後も更新されておらず、そのままコピーして使うと実データでPIHブリッジのカテゴリが初めて発火した瞬間に `ConfigError` で落ちる状態でした。サンプルファイルを修正し、`tests/test_scoring_engine_config.py::test_example_config_matches_defaults` で今後の再発を防止しています。
 
 ## 開発版 v0.1.0
 

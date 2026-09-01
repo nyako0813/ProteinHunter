@@ -192,6 +192,18 @@ interaction_scoring:
   # v1 ruleset at config/functional_complementarity_rules.v1.yaml.
   # functional_complementarity_ruleset: "config/functional_complementarity_rules.v1.yaml"
 
+  # Optional path to a ProteinInteractionHunter (PIH) candidate_evidence_bundle.jsonl
+  # file (used only by scoring_model: v2_evidence_based). PIH is a separate,
+  # independent project and is never imported here -- this only reads its
+  # own JSONL output as plain data. Only PIH's cellular_compatibility,
+  # evolutionary, and direct_interaction categories are bridged in (v5
+  # already computes its own genomic_context and functional_annotation, so
+  # PIH's versions of those two are intentionally ignored to avoid double
+  # counting). Leave unset to run without PIH evidence at all -- a missing
+  # or absent file only produces a warning, never an error. See
+  # analysis/pih_evidence_bridge.py and docs/scoring_engine_v2.md.
+  # pih_evidence_bundle: "path/to/candidate_evidence_bundle.jsonl"
+
 
 # ----------------------------------------------------------
 # Cache

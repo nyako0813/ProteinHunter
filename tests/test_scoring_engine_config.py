@@ -8,9 +8,20 @@ import pytest
 
 from core.exceptions import ConfigError
 from analysis.scoring_engine_config import (
+    DEFAULT_CATEGORY_CAPS,
     DEFAULT_SCORING_ENGINE_CONFIG,
     load_scoring_engine_config,
 )
+
+#: config/scoring_engine.example.yaml is documentation a user is expected to
+#: copy and edit; it is never loaded automatically. If it silently drifts
+#: out of sync with DEFAULT_CATEGORY_CAPS (e.g. a new evidence category is
+#: added to the code but not to the example file), a user who copies the
+#: example verbatim as their scoring_engine_config would hit a ConfigError
+#: the first time that category actually fires for a real pair -- see
+#: analysis/scoring_engine.py::_score_categories. This path matches the
+#: layout documented in <repo_root>/config/scoring_engine.example.yaml.
+_EXAMPLE_CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "scoring_engine.example.yaml"
 
 
 def test_default_config_used_when_no_path() -> None:
@@ -99,3 +110,22 @@ def test_non_numeric_cap_rejected(tmp_path: Path) -> None:
     path.write_text("category_caps:\n  source_classification: not_a_number\n", encoding="utf-8")
     with pytest.raises(ConfigError):
         load_scoring_engine_config(path)
+
+
+def test_example_config_matches_defaults() -> None:
+    """config/scoring_engine.example.yaml must stay in sync with the code.
+
+    This guards against exactly the kind of drift found during self-review:
+    a new evidence category (e.g. the ProteinInteractionHunter bridge's
+    pih_* categories) added to DEFAULT_CATEGORY_CAPS in code but forgotten
+    in the example file a user is expected to copy.
+    """
+    assert _EXAMPLE_CONFIG_PATH.exists(), (
+        f"expected example scoring engine config at {_EXAMPLE_CONFIG_PATH}"
+    )
+    config = load_scoring_engine_config(_EXAMPLE_CONFIG_PATH)
+    assert config.category_caps == DEFAULT_CATEGORY_CAPS
+    assert config.negative_penalty_cap == DEFAULT_SCORING_ENGINE_CONFIG.negative_penalty_cap
+    assert config.tiers == DEFAULT_SCORING_ENGINE_CONFIG.tiers
+    assert config.minimum_evidence == DEFAULT_SCORING_ENGINE_CONFIG.minimum_evidence
+    assert config.tie_precision == DEFAULT_SCORING_ENGINE_CONFIG.tie_precision

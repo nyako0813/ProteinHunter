@@ -34,6 +34,7 @@ def interaction_config(
     scoring_model: str = "legacy_additive",
     scoring_engine_config: Path | None = None,
     functional_complementarity_ruleset: Path | None = None,
+    pih_evidence_bundle: Path | None = None,
 ) -> SimpleNamespace:
     """Build a minimal app config for interaction scoring tests."""
     return SimpleNamespace(
@@ -55,6 +56,7 @@ def interaction_config(
             scoring_model=scoring_model,
             scoring_engine_config=scoring_engine_config,
             functional_complementarity_ruleset=functional_complementarity_ruleset,
+            pih_evidence_bundle=pih_evidence_bundle,
         )
     )
 
@@ -802,3 +804,245 @@ stopwords: [protein]
     assert result is not None
     row = result.source_rows["Interaction_Candidates"][0]
     assert "custom_pair" in row["interaction_score_reasons"]
+
+
+def test_v2_mode_applies_negative_hit_strength_as_penalty() -> None:
+    """A strong negative BLAST hit should reduce the score via a capped penalty."""
+    clean_candidate = record("clean_candidate", positive_sources_hit=["A"])
+    flagged_candidate = record("flagged_candidate", positive_sources_hit=["A"])
+    flagged_candidate.negative_hit_strength = "strong"
+
+    records = {
+        "query": record("query", positive_sources_hit=["A"]),
+        "candidate": clean_candidate,
+        "flagged": flagged_candidate,
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+    cls = classification(records)
+    cls.positive_only_records = {"clean_candidate": clean_candidate, "flagged_candidate": flagged_candidate}
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+        scoring_model="v2_evidence_based",
+    )
+
+    result = run_interaction_scoring(cfg, cls)
+
+    assert result is not None
+    rows = {row["candidate_protein_id"]: row for row in result.source_rows["Interaction_Candidates"]}
+    clean_row = rows["clean_candidate"]
+    flagged_row = rows["flagged_candidate"]
+    assert clean_row["interaction_priority_score"] > flagged_row["interaction_priority_score"]
+    assert "negative BLAST hit strength: strong" in flagged_row["interaction_score_reasons"]
+    assert clean_row["candidate_rank"] < flagged_row["candidate_rank"]
+
+
+def test_v2_mode_no_negative_hit_is_not_applicable_not_a_penalty() -> None:
+    """A candidate with no negative hit must not carry a phantom penalty."""
+    records = {
+        "query": record("query", positive_sources_hit=["A"]),
+        "candidate": record("candidate", positive_sources_hit=["A"]),
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+        scoring_model="v2_evidence_based",
+    )
+
+    result = run_interaction_scoring(cfg, classification(records))
+
+    assert result is not None
+    row = result.source_rows["Interaction_Candidates"][0]
+    assert "negative BLAST hit strength" not in row["interaction_score_reasons"]
+
+
+# ---------------------------------------------------------------------------
+# ProteinInteractionHunter (PIH) evidence bridge (Phase 4) integration tests
+# ---------------------------------------------------------------------------
+
+
+def _write_pih_bundle(path: Path, *, query_id: str, candidate_id: str, category_scores: list[dict]) -> None:
+    """Write a single-line PIH candidate_evidence_bundle.jsonl fixture."""
+    import json
+
+    record_line = {
+        "query_id": query_id,
+        "candidate_id": candidate_id,
+        "integrated_scoring": {"category_scores": category_scores},
+    }
+    path.write_text(json.dumps(record_line) + "\n", encoding="utf-8")
+
+
+def test_pih_bridge_adds_only_non_overlapping_categories(tmp_path: Path) -> None:
+    """Only cellular_compatibility/evolutionary/direct_interaction are bridged."""
+    bundle_path = tmp_path / "candidate_evidence_bundle.jsonl"
+    _write_pih_bundle(
+        bundle_path,
+        query_id="query",
+        candidate_id="candidate",
+        category_scores=[
+            {"category_name": "direct_interaction", "normalized_score": 1.0, "available_weight": 1.0},
+            {"category_name": "evolutionary", "normalized_score": 1.0, "available_weight": 1.0},
+            {"category_name": "cellular_compatibility", "normalized_score": 1.0, "available_weight": 1.0},
+            # These two must be ignored: v5 already computes its own versions
+            # of genomic_context and functional_annotation independently.
+            {"category_name": "genomic_context", "normalized_score": 1.0, "available_weight": 1.0},
+            {"category_name": "functional_annotation", "normalized_score": 1.0, "available_weight": 1.0},
+        ],
+    )
+    records = {
+        "query": record("query", description="", positive_sources_hit=[]),
+        "candidate": record("candidate", description="", positive_sources_hit=[]),
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+        scoring_model="v2_evidence_based",
+        pih_evidence_bundle=bundle_path,
+    )
+
+    result = run_interaction_scoring(cfg, classification(records))
+
+    assert result is not None
+    row = result.source_rows["Interaction_Candidates"][0]
+    reasons = row["interaction_score_reasons"]
+    assert "pih_direct_interaction" in reasons
+    assert "pih_evolutionary" in reasons
+    assert "pih_cellular_compatibility" in reasons
+    assert "pih_genomic_context" not in reasons
+    assert "pih_functional_annotation" not in reasons
+
+
+def test_pih_bridge_raises_score_and_category_count_relative_to_no_bridge(tmp_path: Path) -> None:
+    """Bridged evidence should add categories and raise the final score."""
+    bundle_path = tmp_path / "candidate_evidence_bundle.jsonl"
+    _write_pih_bundle(
+        bundle_path,
+        query_id="query",
+        candidate_id="candidate",
+        category_scores=[
+            {"category_name": "direct_interaction", "normalized_score": 1.0, "available_weight": 1.0},
+            {"category_name": "evolutionary", "normalized_score": 1.0, "available_weight": 1.0},
+            {"category_name": "cellular_compatibility", "normalized_score": 1.0, "available_weight": 1.0},
+        ],
+    )
+    records = {
+        "query": record("query", description="", positive_sources_hit=[]),
+        "candidate": record("candidate", description="", positive_sources_hit=[]),
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+
+    cfg_without_bridge = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+        scoring_model="v2_evidence_based",
+    )
+    cfg_with_bridge = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+        scoring_model="v2_evidence_based",
+        pih_evidence_bundle=bundle_path,
+    )
+
+    row_without = run_interaction_scoring(cfg_without_bridge, classification(records)).source_rows[
+        "Interaction_Candidates"
+    ][0]
+    row_with = run_interaction_scoring(cfg_with_bridge, classification(records)).source_rows[
+        "Interaction_Candidates"
+    ][0]
+
+    assert row_with["evidence_category_count"] > row_without["evidence_category_count"]
+    assert row_with["interaction_priority_score"] > row_without["interaction_priority_score"]
+
+
+def test_pih_bridge_missing_file_warns_and_does_not_crash(tmp_path: Path) -> None:
+    """A configured but absent bundle file must degrade gracefully, not raise."""
+    missing_path = tmp_path / "does_not_exist.jsonl"
+    records = {
+        "query": record("query", positive_sources_hit=["A"]),
+        "candidate": record("candidate", positive_sources_hit=["A"]),
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+        scoring_model="v2_evidence_based",
+        pih_evidence_bundle=missing_path,
+    )
+
+    result = run_interaction_scoring(cfg, classification(records))
+
+    assert result is not None
+    assert any("PIH evidence bundle not found" in warning for warning in result.warnings)
+    row = result.source_rows["Interaction_Candidates"][0]
+    assert "pih_" not in row["interaction_score_reasons"]
+
+
+def test_pih_bridge_matches_version_stripped_query_id(tmp_path: Path) -> None:
+    """v5's own versioned protein id should still match an unversioned PIH key.
+
+    PIH and v5 were not designed to share an identifier convention; PIH's
+    bundle may be keyed without the trailing '.N' version suffix that v5's
+    resolved protein id carries. The bridge must try the version-stripped
+    form on the query side, exactly as it already does on the candidate side.
+    """
+    bundle_path = tmp_path / "candidate_evidence_bundle.jsonl"
+    _write_pih_bundle(
+        bundle_path,
+        query_id="query",
+        candidate_id="candidate",
+        category_scores=[
+            {"category_name": "direct_interaction", "normalized_score": 1.0, "available_weight": 1.0},
+        ],
+    )
+    records = {
+        "query.2": record("query.2", positive_sources_hit=["A"]),
+        "candidate": record("candidate", positive_sources_hit=["A"]),
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query.2", "", ""),),
+        candidate_sources={"candidates": True},
+        scoring_model="v2_evidence_based",
+        pih_evidence_bundle=bundle_path,
+    )
+
+    result = run_interaction_scoring(cfg, classification(records))
+
+    assert result is not None
+    row = result.source_rows["Interaction_Candidates"][0]
+    assert "pih_direct_interaction" in row["interaction_score_reasons"]
+
+
+def test_pih_bridge_malformed_line_is_skipped_with_warning(tmp_path: Path) -> None:
+    """A malformed JSONL line must not abort the whole run."""
+    bundle_path = tmp_path / "candidate_evidence_bundle.jsonl"
+    bundle_path.write_text("not valid json\n", encoding="utf-8")
+    records = {
+        "query": record("query", positive_sources_hit=["A"]),
+        "candidate": record("candidate", positive_sources_hit=["A"]),
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+        scoring_model="v2_evidence_based",
+        pih_evidence_bundle=bundle_path,
+    )
+
+    result = run_interaction_scoring(cfg, classification(records))
+
+    assert result is not None
+    assert any("not valid JSON" in warning for warning in result.warnings)
+    row = result.source_rows["Interaction_Candidates"][0]
+    assert "pih_" not in row["interaction_score_reasons"]
+    assert "no negative BLAST hit" in row["interaction_score_reasons"]

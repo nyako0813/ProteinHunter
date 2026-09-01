@@ -177,6 +177,11 @@ class InteractionScoringConfig:
     scoring_model: str = "legacy_additive"
     scoring_engine_config: Path | None = None
     functional_complementarity_ruleset: Path | None = None
+    # Optional path to a ProteinInteractionHunter candidate_evidence_bundle
+    # .jsonl file (scoring_model: v2_evidence_based only). PIH is never
+    # imported; this is a plain-file bridge. See
+    # analysis/pih_evidence_bridge.py.
+    pih_evidence_bundle: Path | None = None
 
 
 VALID_INTERACTION_SCORING_MODELS: tuple[str, ...] = ("legacy_additive", "v2_evidence_based")
@@ -880,6 +885,13 @@ def _validate_interaction_scoring_section(raw: dict[object, object]) -> None:
             "must be a string path."
         )
 
+    pih_evidence_bundle = section.get("pih_evidence_bundle")
+    if pih_evidence_bundle is not None and not isinstance(pih_evidence_bundle, str):
+        raise ConfigError(
+            "config.yaml value 'interaction_scoring.pih_evidence_bundle' "
+            "must be a string path."
+        )
+
 
 def _load_interaction_scoring(raw_scoring: object) -> InteractionScoringConfig:
     """Load optional lightweight interaction scoring settings."""
@@ -998,6 +1010,7 @@ def _load_interaction_scoring(raw_scoring: object) -> InteractionScoringConfig:
         functional_complementarity_ruleset=_optional_path(
             raw_scoring.get("functional_complementarity_ruleset")
         ),
+        pih_evidence_bundle=_optional_path(raw_scoring.get("pih_evidence_bundle")),
     )
 
 

@@ -59,10 +59,21 @@ class ScoringEngineConfig:
 #: scorer (candidate_priority=30, gene_neighborhood=25,
 #: co_occurrence+domain_complementarity=20 combined instead of 20+15=35, to
 #: reduce double counting -- see the design document, section 3.1/3.2).
+#:
+#: The three "pih_*" caps are always present but only ever active for a
+#: pair when the optional ProteinInteractionHunter evidence bridge
+#: (analysis/pih_evidence_bridge.py) is configured and actually finds
+#: matching evidence; a run that never uses the bridge is unaffected,
+#: because a category with no available evidence contributes nothing and
+#: is excluded from the score denominator. Values must match
+#: analysis.pih_evidence_bridge.BRIDGED_PIH_CATEGORY_CAPS.
 DEFAULT_CATEGORY_CAPS: dict[str, float] = {
     "source_classification": 30.0,
     "genomic_context": 25.0,
     "functional_annotation": 20.0,
+    "pih_cellular_compatibility": 5.0,
+    "pih_evolutionary": 10.0,
+    "pih_direct_interaction": 20.0,
 }
 
 DEFAULT_SCORING_ENGINE_CONFIG = ScoringEngineConfig(
