@@ -44,6 +44,33 @@ class MinimumEvidenceConfig:
 
 
 @dataclass(slots=True, frozen=True)
+class SequenceEvidenceConfig:
+    """Normalization parameters for the ``sequence_evidence`` component.
+
+    Converts a candidate's best positive BLAST hit (identity/coverage/evalue)
+    into a 0.0-1.0 strength value -- see
+    ``docs/implementation_plan_sequence_evidence.md`` for the rationale.
+    ``identity_floor``/``coverage_floor`` default to the same values as
+    ``ortholog_filter``'s ``weak`` threshold (reusing an already-vetted
+    biological floor instead of inventing a new one); ``evalue_reference_ceiling``
+    defaults to the same value as the default BLAST evalue cutoff itself
+    (``config.blast.evalue``), so a hit right at the cutoff scores 0.
+    bitscore is deliberately not included (its scale depends on alignment
+    length, and no calibrated absolute threshold exists in this project yet).
+    """
+
+    identity_floor: float = 25.0
+    identity_ceiling: float = 90.0
+    coverage_floor: float = 50.0
+    coverage_ceiling: float = 100.0
+    evalue_reference_ceiling: float = 1e-5
+    evalue_reference_floor: float = 1e-100
+    identity_weight: float = 1.0
+    coverage_weight: float = 1.0
+    evalue_weight: float = 1.0
+
+
+@dataclass(slots=True, frozen=True)
 class ScoringEngineConfig:
     """Everything the scoring engine needs that is not biology-specific."""
 
@@ -52,6 +79,7 @@ class ScoringEngineConfig:
     negative_penalty_cap: float | None = 30.0
     minimum_evidence: MinimumEvidenceConfig = field(default_factory=MinimumEvidenceConfig)
     tiers: TierThresholds = field(default_factory=TierThresholds)
+    sequence_evidence: SequenceEvidenceConfig = field(default_factory=SequenceEvidenceConfig)
     tie_precision: int = 3
 
 
@@ -173,12 +201,66 @@ def _parse_scoring_engine_config(raw: dict[object, object], path: Path) -> Scori
 
     tie_precision = _positive_int(raw.get("tie_precision", 3), "tie_precision", path, allow_zero=True)
 
+    sequence_evidence_raw = raw.get("sequence_evidence", {}) or {}
+    if not isinstance(sequence_evidence_raw, dict):
+        raise ConfigError(f"'sequence_evidence' in {path} must be a mapping.")
+    sequence_evidence = SequenceEvidenceConfig(
+        identity_floor=_positive_float(
+            sequence_evidence_raw.get("identity_floor", 25.0),
+            "sequence_evidence.identity_floor",
+            path,
+            allow_zero=True,
+        ),
+        identity_ceiling=_positive_float(
+            sequence_evidence_raw.get("identity_ceiling", 90.0),
+            "sequence_evidence.identity_ceiling",
+            path,
+        ),
+        coverage_floor=_positive_float(
+            sequence_evidence_raw.get("coverage_floor", 50.0),
+            "sequence_evidence.coverage_floor",
+            path,
+            allow_zero=True,
+        ),
+        coverage_ceiling=_positive_float(
+            sequence_evidence_raw.get("coverage_ceiling", 100.0),
+            "sequence_evidence.coverage_ceiling",
+            path,
+        ),
+        evalue_reference_ceiling=_positive_float(
+            sequence_evidence_raw.get("evalue_reference_ceiling", 1e-5),
+            "sequence_evidence.evalue_reference_ceiling",
+            path,
+        ),
+        evalue_reference_floor=_positive_float(
+            sequence_evidence_raw.get("evalue_reference_floor", 1e-100),
+            "sequence_evidence.evalue_reference_floor",
+            path,
+        ),
+        identity_weight=_positive_float(
+            sequence_evidence_raw.get("identity_weight", 1.0),
+            "sequence_evidence.identity_weight",
+            path,
+        ),
+        coverage_weight=_positive_float(
+            sequence_evidence_raw.get("coverage_weight", 1.0),
+            "sequence_evidence.coverage_weight",
+            path,
+        ),
+        evalue_weight=_positive_float(
+            sequence_evidence_raw.get("evalue_weight", 1.0),
+            "sequence_evidence.evalue_weight",
+            path,
+        ),
+    )
+
     return ScoringEngineConfig(
         output_scale=output_scale,
         category_caps=category_caps,
         negative_penalty_cap=negative_penalty_cap,
         minimum_evidence=minimum_evidence,
         tiers=tiers,
+        sequence_evidence=sequence_evidence,
         tie_precision=tie_precision,
     )
 
@@ -214,6 +296,7 @@ __all__: tuple[str, ...] = (
     "DEFAULT_SCORING_ENGINE_CONFIG",
     "MinimumEvidenceConfig",
     "ScoringEngineConfig",
+    "SequenceEvidenceConfig",
     "TierThresholds",
     "load_scoring_engine_config",
 )

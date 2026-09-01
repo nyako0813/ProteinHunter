@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from pathlib import Path
 import re
 from typing import Any
 
 from annotation.gff import GffFeatureLocation, load_gff_feature_map
-from core.evidence import EvidenceComponent, EvidenceStatus
+from core.evidence import EvidenceComponent, EvidenceStatus, linear_normalize
 from core.fasta import read_fasta_as_components
 from core.models import ProteinRecord
+from analysis.candidates import get_best_hit
 from analysis.functional_complementarity_rules import (
     FunctionalComplementarityRuleset,
     load_functional_complementarity_ruleset,
@@ -23,17 +25,24 @@ from analysis.pih_evidence_bridge import (
 )
 from analysis.pih_evidence_bridge import without_version as _pih_without_version
 from analysis.scoring_engine import ScoreBreakdown, rank_candidates, score_candidate
-from analysis.scoring_engine_config import ScoringEngineConfig, load_scoring_engine_config
+from analysis.scoring_engine_config import (
+    ScoringEngineConfig,
+    SequenceEvidenceConfig,
+    load_scoring_engine_config,
+)
 
 V2_SCORING_MODEL = "v2_evidence_based"
 
 # Per-component weight budget within each shared category for scoring model
-# v2. source_classification and genomic_context each hold exactly one
-# component today, so their weight value only needs to be > 0. The two
-# functional_annotation components split that category's cap evenly; see
-# design specification section 3.1/3.2 for the reasoning.
+# v2. genomic_context holds exactly one component today, so its weight value
+# only needs to be > 0. source_classification now holds two components
+# (source_classification itself and sequence_evidence, weighted evenly) that
+# share its category cap, the same pattern the two functional_annotation
+# components (co_occurrence, domain_complementarity) already use; see
+# docs/implementation_plan_sequence_evidence.md for the reasoning.
 V2_COMPONENT_WEIGHTS: dict[str, float] = {
     "source_classification": 1.0,
+    "sequence_evidence": 1.0,
     "genomic_context": 1.0,
     "co_occurrence": 10.0,
     "domain_complementarity": 10.0,
@@ -631,7 +640,7 @@ def _score_pair_v2(
 ) -> tuple[dict[str, Any], ScoreBreakdown]:
     """Score one query/candidate pair with the evidence-based engine."""
     components, location_info = _build_evidence_components_v2(
-        query, candidate, candidate_source, feature_map, ruleset, pih_bundle=pih_bundle
+        query, candidate, candidate_source, feature_map, ruleset, engine_config, pih_bundle=pih_bundle
     )
     breakdown = score_candidate(components, engine_config)
 
@@ -709,6 +718,7 @@ def _build_evidence_components_v2(
     candidate_source: str,
     feature_map: dict[str, GffFeatureLocation],
     ruleset: FunctionalComplementarityRuleset,
+    engine_config: ScoringEngineConfig,
     pih_bundle: PihEvidenceBundle | None = None,
 ) -> tuple[list[EvidenceComponent], dict[str, Any]]:
     """Build the evidence components for one pair, reusing v5's raw signals."""
@@ -726,6 +736,32 @@ def _build_evidence_components_v2(
             explanation=f"candidate source: {candidate_source}",
         )
     )
+
+    seq_status, seq_value, seq_reason = _sequence_evidence_status_and_value(
+        candidate, engine_config.sequence_evidence
+    )
+    if seq_status is EvidenceStatus.AVAILABLE:
+        components.append(
+            EvidenceComponent.available(
+                "sequence_evidence",
+                "source_classification",
+                seq_value,
+                V2_COMPONENT_WEIGHTS["sequence_evidence"],
+                raw_value=get_best_hit(candidate.positive_hits).percent_identity,
+                source="blast_hit",
+                explanation=seq_reason,
+            )
+        )
+    else:
+        components.append(
+            EvidenceComponent.unavailable(
+                "sequence_evidence",
+                "source_classification",
+                seq_status,
+                source="blast_hit",
+                explanation=seq_reason,
+            )
+        )
 
     location_info, geo_status, geo_value, geo_reason = _gene_neighborhood_v2(query, candidate, feature_map)
     if geo_status is EvidenceStatus.AVAILABLE:
@@ -851,6 +887,65 @@ def _build_evidence_components_v2(
             )
 
     return components, location_info
+
+
+def _sequence_evidence_status_and_value(
+    candidate: ProteinRecord, cfg: SequenceEvidenceConfig
+) -> tuple[EvidenceStatus, float | None, str]:
+    """Normalize the candidate's best positive BLAST hit into a 0.0-1.0 strength value.
+
+    Reuses analysis.candidates.get_best_hit's existing (bitscore, then
+    lowest evalue) representative-hit rule -- the same rule already used by
+    output/excel.py's best_positive_hit columns -- instead of inventing a
+    new way to aggregate multiple positive_hits. A candidate with no
+    positive BLAST hit at all (e.g. the No_hit source) is MISSING, not a
+    scored zero: "evaluated, weak hit" and "never evaluated" must stay
+    distinguishable (see docs/implementation_plan_sequence_evidence.md).
+    """
+    if not candidate.positive_hits:
+        return EvidenceStatus.MISSING, None, "no positive BLAST hit"
+
+    hit = get_best_hit(candidate.positive_hits)
+
+    identity_score = linear_normalize(hit.percent_identity, cfg.identity_floor, cfg.identity_ceiling)
+    evalue_score = _evalue_strength_score(hit.evalue, cfg)
+    weighted_sum = cfg.identity_weight * identity_score + cfg.evalue_weight * evalue_score
+    total_weight = cfg.identity_weight + cfg.evalue_weight
+
+    coverage = hit.query_coverage
+    if coverage is None:
+        coverage_note = "coverage unavailable"
+    else:
+        coverage_score = linear_normalize(coverage, cfg.coverage_floor, cfg.coverage_ceiling)
+        weighted_sum += cfg.coverage_weight * coverage_score
+        total_weight += cfg.coverage_weight
+        coverage_note = f"coverage={coverage:.1f}%"
+
+    normalized_value = weighted_sum / total_weight
+    reason = (
+        f"best positive BLAST hit: identity={hit.percent_identity:.1f}%, "
+        f"{coverage_note}, evalue={hit.evalue:.2e} -> strength={normalized_value:.2f}"
+    )
+    return EvidenceStatus.AVAILABLE, normalized_value, reason
+
+
+def _evalue_strength_score(evalue: float, cfg: SequenceEvidenceConfig) -> float:
+    """Map a BLAST e-value onto 0.0-1.0 strength via a log-scale normalization.
+
+    e-values are exponentially distributed and already upper-bounded by the
+    BLAST evalue cutoff used to produce positive_hits in the first place, so
+    a plain linear scale would be meaningless; -log10(evalue) is normalized
+    instead. e-value <= 0 (BLAST can report an exact 0.0 for extremely
+    significant hits, a floating-point underflow) is treated directly as the
+    strongest possible signal, since -log10(0) is mathematically undefined.
+    """
+    if evalue <= 0:
+        return 1.0
+    return linear_normalize(
+        -math.log10(evalue),
+        -math.log10(cfg.evalue_reference_ceiling),
+        -math.log10(cfg.evalue_reference_floor),
+    )
 
 
 def _negative_hit_status_and_value(candidate: ProteinRecord) -> tuple[EvidenceStatus, float | None, str]:

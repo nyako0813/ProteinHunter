@@ -65,3 +65,28 @@ tiers:
 
 # Decimal places used when comparing scores for ranking ties.
 tie_precision: 3
+
+# Normalization parameters for the sequence_evidence component: converts a
+# candidate's best positive BLAST hit (identity/coverage/evalue) into a
+# 0.0-1.0 strength value, shared into the source_classification category
+# cap above (see docs/implementation_plan_sequence_evidence.md).
+#
+# identity_floor/coverage_floor reuse ortholog_filter's "weak" threshold
+# (config.yaml: ortholog_filter.weak.min_identity=25.0,
+# min_query_coverage=50.0) rather than inventing new floor values.
+# evalue_reference_ceiling matches the default BLAST evalue cutoff itself
+# (config.blast.evalue=1e-5), so a hit right at the cutoff scores 0.
+# identity_ceiling, coverage_ceiling (a natural 100%), and the evalue
+# reference range are otherwise uncalibrated placeholders, same as the rest
+# of this file. bitscore is intentionally not included: its scale depends
+# on alignment length and no calibrated absolute threshold exists yet.
+sequence_evidence:
+  identity_floor: 25.0
+  identity_ceiling: 90.0
+  coverage_floor: 50.0
+  coverage_ceiling: 100.0
+  evalue_reference_ceiling: 1e-5
+  evalue_reference_floor: 1e-100
+  identity_weight: 1.0
+  coverage_weight: 1.0
+  evalue_weight: 1.0

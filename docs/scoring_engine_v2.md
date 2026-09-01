@@ -30,11 +30,26 @@ description keyword complementarity) through:
   (`source_classification`, `genomic_context`, `functional_annotation`),
   normalizes each category against only its available evidence, and caps
   each category's contribution so correlated components (`co_occurrence`
-  and `domain_complementarity`, both in `functional_annotation`) cannot
-  exceed one shared budget. Produces a `ScoreBreakdown` with a 0-100
-  `final_score` (or `None` when evidence is insufficient), an `Evidence_Tier`
-  (`Tier1_VeryStrong` .. `Tier4_Weak`, or `Unclassified`), and a full,
-  auditable per-component trace.
+  and `domain_complementarity`, both in `functional_annotation`;
+  `source_classification` and `sequence_evidence`, both in
+  `source_classification`) cannot exceed one shared budget. Produces a
+  `ScoreBreakdown` with a 0-100 `final_score` (or `None` when evidence is
+  insufficient), an `Evidence_Tier` (`Tier1_VeryStrong` .. `Tier4_Weak`, or
+  `Unclassified`), and a full, auditable per-component trace.
+- `sequence_evidence` (category `source_classification`) -- normalizes the
+  candidate's best positive BLAST hit (`ProteinRecord.positive_hits`,
+  selected via `analysis/candidates.py::get_best_hit`'s existing
+  `(bitscore, -evalue)` rule) into a 0.0-1.0 strength value from identity,
+  query coverage, and a log-scaled e-value, so a very strong BLAST hit and a
+  barely-passing one are no longer scored the same just for sharing a
+  `candidate_source` bucket. `MISSING` (not a scored zero) when the
+  candidate has no positive BLAST hit at all. bitscore is intentionally not
+  used (its scale depends on alignment length; no calibrated absolute
+  threshold exists in this project yet). Tunable via
+  `ScoringEngineConfig.sequence_evidence` /
+  `config/scoring_engine.example.yaml`'s `sequence_evidence:` block; see
+  `docs/implementation_plan_sequence_evidence.md` for the normalization
+  design and the floor/ceiling rationale.
 - `analysis/functional_complementarity_rules.py` +
   `config/functional_complementarity_rules.v1.yaml` -- the keyword pair
   table that used to be a Python constant (`COMPLEMENTARY_TERM_PAIRS`) is
@@ -128,6 +143,11 @@ misleading number.
 
 ## What is not done yet
 
+- `sequence_evidence`'s identity/coverage floor values reuse
+  `ortholog_filter`'s `weak` threshold and its e-value reference ceiling
+  reuses the default BLAST e-value cutoff; the remaining floor/ceiling
+  values (identity ceiling, e-value reference floor) are uncalibrated
+  placeholders, same as the rest of v2 (see the item below).
 - The category caps, per-component weights, and tier thresholds in
   `analysis/scoring_engine_config.py` / `config/scoring_engine.example.yaml`
   reproduce the old point budget as a safe default. They are not

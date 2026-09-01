@@ -2,6 +2,48 @@
 
 ProteinHunter_v5 の変更履歴です。
 
+## 未リリース: sequence_evidence (BLAST hit強度のスコアリング反映)
+
+統合設計書3章・9章の指摘「非常に強いBLAST hitと弱いBLAST hitが、同じpositive hit
+として同程度に扱われる可能性がある」への対応。`scoring_model: v2_evidence_based`
+限定の追加で、デフォルト(`legacy_additive`)挙動には影響しません。
+
+### Added
+
+- `analysis/interaction_scoring.py`: `_build_evidence_components_v2` に
+  `sequence_evidence` コンポーネントを追加。`ProteinRecord.positive_hits` の
+  代表ヒット(`analysis/candidates.py::get_best_hit` の既存
+  `(bitscore, -evalue)` ルールをそのまま再利用、新しい集約ロジックは追加せず)
+  のidentity/coverage/evalueを0.0-1.0の強度値へ正規化し、`source_classification`
+  カテゴリの30点キャップを `source_classification` コンポーネントと共有します
+  (`co_occurrence`/`domain_complementarity` が `functional_annotation` を
+  共有している既存パターンと同一)。`positive_hits` が空の候補は `MISSING`
+  として扱い、0点として減点しません。bitscoreは今回のスコアリングには
+  使用していません(配列長依存でこのプロジェクトに校正済みの絶対閾値が
+  ないため)。
+- `analysis/scoring_engine_config.py` + `config/scoring_engine.example.yaml`:
+  `SequenceEvidenceConfig`(identity/coverage/evalueのfloor・ceiling・
+  サブ重み)を追加。identity/coverage floorは `ortholog_filter.weak` の
+  既存閾値(25.0% / 50.0%)を、evalue参照上限は `config.blast.evalue` の
+  既定カットオフ(1e-5)をそれぞれ転用しています(詳細と根拠は
+  `docs/implementation_plan_sequence_evidence.md` を参照)。
+- evalue == 0.0(BLASTの浮動小数点丸めによる完全一致相当の値)は
+  `-log10` を計算せず、直接最強スコア(1.0)として扱うガードを追加。
+- `tests/test_interaction_scoring.py`: 強いhit/弱いhit/hitなし(MISSING)/
+  複数hit(代表選択)/evalue=0 の5ケースを追加。
+- `tests/test_scoring_engine.py`: zero weight コンポーネント、複数negative
+  コンポーネントの合算後cap、の2ユニットテストを追加(41章チェックリスト
+  残り2件)。
+- `tests/test_scoring_engine_config.py`: `sequence_evidence` の既定値・
+  カスタム上書きのテストを追加。
+
+### Notes
+
+- `analysis/ortholog_filter.py` と `legacy_additive` 経路
+  (`_score_pair`, `_candidate_priority_score` 等)は一切変更していません。
+- identity ceiling(90.0)・evalue参照下限(1e-100)は実データでの校正
+  裏付けがない暫定値です(他のv2の重み・cap値と同様)。
+
 ## 未リリース: interaction_scoring v2 (evidence-based scoring)
 
 `ProteinHunter_v5 × ProteinInteractionHunter 統合設計書 v1.0` に基づく、相互作用スコアリングの改修。

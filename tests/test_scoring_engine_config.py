@@ -112,6 +112,46 @@ def test_non_numeric_cap_rejected(tmp_path: Path) -> None:
         load_scoring_engine_config(path)
 
 
+def test_sequence_evidence_defaults() -> None:
+    config = load_scoring_engine_config(None)
+    seq = config.sequence_evidence
+    assert seq.identity_floor == 25.0
+    assert seq.identity_ceiling == 90.0
+    assert seq.coverage_floor == 50.0
+    assert seq.coverage_ceiling == 100.0
+    assert seq.evalue_reference_ceiling == pytest.approx(1e-5)
+    assert seq.evalue_reference_floor == pytest.approx(1e-100)
+    assert seq.identity_weight == 1.0
+    assert seq.coverage_weight == 1.0
+    assert seq.evalue_weight == 1.0
+
+
+def test_sequence_evidence_custom_override(tmp_path: Path) -> None:
+    path = tmp_path / "scoring.yaml"
+    path.write_text(
+        """
+category_caps:
+  source_classification: 30
+sequence_evidence:
+  identity_floor: 20
+  identity_ceiling: 95
+  coverage_floor: 40
+  coverage_ceiling: 100
+  evalue_reference_ceiling: 1e-4
+  evalue_reference_floor: 1e-80
+  identity_weight: 2
+  coverage_weight: 1
+  evalue_weight: 1
+""",
+        encoding="utf-8",
+    )
+    config = load_scoring_engine_config(path)
+    assert config.sequence_evidence.identity_floor == 20.0
+    assert config.sequence_evidence.identity_ceiling == 95.0
+    assert config.sequence_evidence.evalue_reference_ceiling == pytest.approx(1e-4)
+    assert config.sequence_evidence.identity_weight == 2.0
+
+
 def test_example_config_matches_defaults() -> None:
     """config/scoring_engine.example.yaml must stay in sync with the code.
 
@@ -129,3 +169,4 @@ def test_example_config_matches_defaults() -> None:
     assert config.tiers == DEFAULT_SCORING_ENGINE_CONFIG.tiers
     assert config.minimum_evidence == DEFAULT_SCORING_ENGINE_CONFIG.minimum_evidence
     assert config.tie_precision == DEFAULT_SCORING_ENGINE_CONFIG.tie_precision
+    assert config.sequence_evidence == DEFAULT_SCORING_ENGINE_CONFIG.sequence_evidence
