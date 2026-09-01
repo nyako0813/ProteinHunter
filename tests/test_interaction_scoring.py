@@ -14,7 +14,7 @@ from config import (
     InteractionQueryConfig,
     InteractionScoringConfig,
 )
-from core.models import DomainHit, ProteinRecord
+from core.models import BlastHit, DomainHit, ProteinRecord
 from analysis.interaction_scoring import (
     interaction_pair_columns,
     run_interaction_scoring,
@@ -857,6 +857,133 @@ def test_v2_mode_no_negative_hit_is_not_applicable_not_a_penalty() -> None:
     assert result is not None
     row = result.source_rows["Interaction_Candidates"][0]
     assert "negative BLAST hit strength" not in row["interaction_score_reasons"]
+
+
+# ---------------------------------------------------------------------------
+# sequence_evidence (BLAST hit strength) tests
+# ---------------------------------------------------------------------------
+
+
+def _hit(protein_id: str, *, identity: float, evalue: float, bitscore: float) -> BlastHit:
+    return BlastHit(
+        query_id=protein_id,
+        subject_id=f"ref_{protein_id}",
+        percent_identity=identity,
+        alignment_length=90,
+        evalue=evalue,
+        bitscore=bitscore,
+        query_length=100,
+    )
+
+
+def test_v2_mode_strong_positive_hit_scores_higher_than_weak_hit() -> None:
+    """A stronger BLAST hit (identity/evalue) should score higher via sequence_evidence."""
+    strong_candidate = record("candidate", positive_sources_hit=["A"])
+    strong_candidate.positive_hits = [
+        _hit("candidate", identity=85.0, evalue=1e-40, bitscore=200.0)
+    ]
+    weak_candidate = record("flagged", positive_sources_hit=["A"])
+    weak_candidate.positive_hits = [_hit("flagged", identity=27.0, evalue=5e-6, bitscore=40.0)]
+
+    records = {
+        "query": record("query", positive_sources_hit=["A"]),
+        "candidate": strong_candidate,
+        "flagged": weak_candidate,
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+    cls = classification(records)
+    cls.positive_only_records = {"candidate": strong_candidate, "flagged": weak_candidate}
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+        scoring_model="v2_evidence_based",
+    )
+
+    result = run_interaction_scoring(cfg, cls)
+
+    assert result is not None
+    rows = {row["candidate_protein_id"]: row for row in result.source_rows["Interaction_Candidates"]}
+    strong_row = rows["candidate"]
+    weak_row = rows["flagged"]
+    assert strong_row["candidate_priority_score"] > weak_row["candidate_priority_score"]
+    assert "best positive BLAST hit" in strong_row["interaction_score_reasons"]
+
+
+def test_v2_mode_missing_positive_hit_is_missing_not_zero_penalty() -> None:
+    """A candidate with no positive BLAST hits should get MISSING, not a scored zero."""
+    records = {
+        "query": record("query", positive_sources_hit=["A"]),
+        "candidate": record("candidate", positive_sources_hit=["A"]),
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+        scoring_model="v2_evidence_based",
+    )
+
+    result = run_interaction_scoring(cfg, classification(records))
+
+    assert result is not None
+    row = result.source_rows["Interaction_Candidates"][0]
+    assert "no positive BLAST hit" in row["interaction_score_reasons"]
+    # source_classification's own component is still AVAILABLE, so the
+    # shared category still produces a score -- MISSING must not zero it out.
+    assert row["candidate_priority_score"] is not None
+
+
+def test_v2_mode_sequence_evidence_uses_best_hit_among_multiple() -> None:
+    """Multiple positive_hits use get_best_hit's (bitscore, -evalue) rule, not an average."""
+    candidate = record("candidate", positive_sources_hit=["A"])
+    weak_hit = _hit("candidate", identity=27.0, evalue=5e-6, bitscore=40.0)
+    strong_hit = _hit("candidate", identity=88.0, evalue=1e-50, bitscore=210.0)
+    candidate.positive_hits = [weak_hit, strong_hit]
+
+    records = {
+        "query": record("query", positive_sources_hit=["A"]),
+        "candidate": candidate,
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+        scoring_model="v2_evidence_based",
+    )
+
+    result = run_interaction_scoring(cfg, classification(records))
+
+    assert result is not None
+    row = result.source_rows["Interaction_Candidates"][0]
+    assert "identity=88.0%" in row["interaction_score_reasons"]
+    assert "identity=27.0%" not in row["interaction_score_reasons"]
+
+
+def test_v2_mode_sequence_evidence_handles_zero_evalue() -> None:
+    """evalue == 0.0 (floating-point underflow) must not crash log10 and scores as strongest."""
+    candidate = record("candidate", positive_sources_hit=["A"])
+    candidate.positive_hits = [_hit("candidate", identity=95.0, evalue=0.0, bitscore=300.0)]
+
+    records = {
+        "query": record("query", positive_sources_hit=["A"]),
+        "candidate": candidate,
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+        scoring_model="v2_evidence_based",
+    )
+
+    result = run_interaction_scoring(cfg, classification(records))
+
+    assert result is not None
+    row = result.source_rows["Interaction_Candidates"][0]
+    assert row["candidate_priority_score"] is not None
+    assert "evalue=0.00e+00" in row["interaction_score_reasons"]
 
 
 # ---------------------------------------------------------------------------

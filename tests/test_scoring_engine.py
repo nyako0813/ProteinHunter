@@ -81,6 +81,42 @@ def test_category_cap_prevents_double_counting() -> None:
     assert breakdown.final_score == pytest.approx(100.0)  # only category active, capped at 20/20
 
 
+def test_zero_weight_component_contributes_nothing_and_does_not_activate_category() -> None:
+    """A weight=0.0 AVAILABLE component must not activate its category or divide by zero."""
+    components = [
+        EvidenceComponent.available("noise", "genomic_context", 1.0, 0.0),
+        EvidenceComponent.available("domain", "functional_annotation", 0.5, 20.0),
+    ]
+    breakdown = score_candidate(components, make_engine_config())
+    genomic = breakdown.category_scores["genomic_context"]
+    assert genomic.component_count == 1
+    assert genomic.available_weight == pytest.approx(0.0)
+    assert genomic.normalized_score == pytest.approx(0.0)
+    assert genomic.capped_score == pytest.approx(0.0)
+    # Only functional_annotation (cap 20) has nonzero available weight, so it
+    # alone should count toward total_cap/evidence_category_count.
+    assert breakdown.total_cap == pytest.approx(20.0)
+    assert breakdown.evidence_category_count == 1
+    assert breakdown.final_score == pytest.approx(50.0)  # 0.5 normalized * 100
+
+
+def test_multiple_negative_components_are_summed_then_capped() -> None:
+    """Multiple AVAILABLE negative components sum before the cap applies."""
+    components = [
+        EvidenceComponent.available("source", "source_classification", 1.0, 30.0),
+        EvidenceComponent.available(
+            "neg_a", "source_reliability", 0.5, 20.0, is_negative=True
+        ),
+        EvidenceComponent.available(
+            "neg_b", "source_reliability", 0.5, 20.0, is_negative=True
+        ),
+    ]
+    breakdown = score_candidate(components, make_engine_config(negative_penalty_cap=15.0))
+    # Raw penalty = 0.5*20 + 0.5*20 = 20.0, capped at 15.0 (not 2x the cap).
+    assert breakdown.negative_penalty_points == pytest.approx(15.0)
+    assert breakdown.final_score == pytest.approx(100.0 - 15.0)
+
+
 def test_negative_evidence_applies_capped_penalty() -> None:
     components = [
         EvidenceComponent.available("source", "source_classification", 1.0, 30.0),
