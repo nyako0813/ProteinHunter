@@ -212,6 +212,17 @@ interaction_scoring:
   # analysis/pih_evidence_bridge.py and docs/scoring_engine_v2.md.
   # pih_evidence_bundle: "path/to/candidate_evidence_bundle.jsonl"
 
+  # Which score determines candidate_rank / row order within each
+  # Interaction_* sheet (design spec section 22, protein_hunter_score /
+  # interaction_score split). "interaction_priority_score" (default)
+  # preserves the original ranking behavior unchanged. "interaction_score"
+  # ranks by query-specific evidence only (genomic_context +
+  # domain_complementarity; co_occurrence and candidate quality excluded --
+  # see analysis/interaction_scoring.py::INTERACTION_SCORE_COMPONENT_NAMES).
+  # interaction_priority_score/evidence_tier/priority_group columns keep
+  # their original values either way -- only candidate_rank/row order change.
+  ranking_metric: interaction_priority_score
+
 
 # ----------------------------------------------------------
 # Cache

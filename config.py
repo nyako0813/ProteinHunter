@@ -199,9 +199,23 @@ class InteractionScoringConfig:
     evidence_detail_sheet: InteractionEvidenceDetailConfig = field(
         default_factory=InteractionEvidenceDetailConfig
     )
+    # Which score determines candidate_rank / sheet ordering within each
+    # Interaction_* source (design spec section 22, Phase 5 M5).
+    # "interaction_priority_score" (default) preserves the exact pre-Phase-5
+    # ranking behavior. "interaction_score" ranks by query-specific evidence
+    # only (see analysis/interaction_scoring.py::INTERACTION_SCORE_COMPONENT_NAMES);
+    # interaction_priority_score/evidence_tier/priority_group columns keep
+    # their original values and meaning either way -- only candidate_rank
+    # and row order change.
+    ranking_metric: str = "interaction_priority_score"
 
 
 VALID_INTERACTION_SCORING_MODELS: tuple[str, ...] = ("legacy_additive", "v2_evidence_based")
+
+VALID_INTERACTION_RANKING_METRICS: tuple[str, ...] = (
+    "interaction_priority_score",
+    "interaction_score",
+)
 
 
 @dataclass
@@ -332,6 +346,7 @@ INTERACTION_SCORING_DEFAULT = InteractionScoringConfig(
     alphafold=INTERACTION_ALPHAFOLD_DEFAULT,
     neighborhood=INTERACTION_NEIGHBORHOOD_DEFAULT,
     evidence_detail_sheet=INTERACTION_EVIDENCE_DETAIL_DEFAULT,
+    ranking_metric="interaction_priority_score",
 )
 
 
@@ -348,6 +363,7 @@ def _default_interaction_scoring() -> InteractionScoringConfig:
         alphafold=INTERACTION_ALPHAFOLD_DEFAULT,
         neighborhood=INTERACTION_NEIGHBORHOOD_DEFAULT,
         evidence_detail_sheet=INTERACTION_EVIDENCE_DETAIL_DEFAULT,
+        ranking_metric="interaction_priority_score",
     )
 
 
@@ -931,6 +947,13 @@ def _validate_interaction_scoring_section(raw: dict[object, object]) -> None:
             "must be true or false."
         )
 
+    ranking_metric = section.get("ranking_metric", "interaction_priority_score")
+    if ranking_metric not in VALID_INTERACTION_RANKING_METRICS:
+        raise ConfigError(
+            "config.yaml value 'interaction_scoring.ranking_metric' must be "
+            f"one of {VALID_INTERACTION_RANKING_METRICS}, got {ranking_metric!r}."
+        )
+
 
 def _load_interaction_scoring(raw_scoring: object) -> InteractionScoringConfig:
     """Load optional lightweight interaction scoring settings."""
@@ -1063,6 +1086,9 @@ def _load_interaction_scoring(raw_scoring: object) -> InteractionScoringConfig:
         ),
         pih_evidence_bundle=_optional_path(raw_scoring.get("pih_evidence_bundle")),
         evidence_detail_sheet=evidence_detail_sheet,
+        ranking_metric=str(
+            raw_scoring.get("ranking_metric", "interaction_priority_score")
+        ),
     )
 
 

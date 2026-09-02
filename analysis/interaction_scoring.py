@@ -740,6 +740,12 @@ def _rank_source_candidates(
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     all_rows: list[dict[str, Any]] = []
     detail_rows: list[dict[str, Any]] = []
+    ranking_metric = getattr(scoring_config, "ranking_metric", "interaction_priority_score")
+    # M5: legacy's interaction_score is always a plain float (never None --
+    # see _legacy_interaction_score), so ranking by it needs no special
+    # eligibility handling the way v2's rank_candidates does.
+    sort_field = "interaction_score" if ranking_metric == "interaction_score" else "interaction_priority_score"
+
     for query in resolved_queries:
         if query["resolution_status"] != "resolved":
             continue
@@ -749,7 +755,7 @@ def _rank_source_candidates(
                 continue
             query_rows.append(_score_pair(query, candidate, candidate_source, scoring_config, feature_map))
         _assign_distance_independent_ranks(query_rows)
-        query_rows.sort(key=lambda row: (-float(row["interaction_priority_score"]), not bool(row["alphafold_recommended"]), str(row["candidate_protein_id"])))
+        query_rows.sort(key=lambda row: (-float(row[sort_field]), not bool(row["alphafold_recommended"]), str(row["candidate_protein_id"])))
         for rank, row in enumerate(query_rows[: scoring_config.max_candidates_per_query], start=1):
             row["candidate_rank"] = rank
             all_rows.append(row)
@@ -879,34 +885,49 @@ def _rank_source_candidates_v2(
     """Evidence-based (scoring model v2) counterpart of _rank_source_candidates."""
     all_rows: list[dict[str, Any]] = []
     detail_rows: list[dict[str, Any]] = []
+    ranking_metric = getattr(scoring_config, "ranking_metric", "interaction_priority_score")
+
     for query in resolved_queries:
         if query["resolution_status"] != "resolved":
             continue
 
-        pairs: list[tuple[str, dict[str, Any], ScoreBreakdown]] = []
+        pairs: list[tuple[str, dict[str, Any], ScoreBreakdown, ScoreBreakdown]] = []
         for candidate in candidate_records.values():
             if _is_self_pair(query, candidate):
                 continue
-            row, breakdown = _score_pair_v2(
+            row, breakdown, interaction_breakdown = _score_pair_v2(
                 query, candidate, candidate_source, scoring_config, feature_map, engine_config, ruleset,
                 pih_bundle=pih_bundle,
             )
-            pairs.append((candidate.protein_id, row, breakdown))
+            pairs.append((candidate.protein_id, row, breakdown, interaction_breakdown))
 
+        # M5: candidate_rank/row order can be driven by either the full
+        # composite breakdown (default, unchanged since Phase 5) or the
+        # query-specific-only breakdown -- interaction_priority_score,
+        # evidence_tier, and interaction_score themselves never change
+        # based on this setting, only which one ranks.
+        ranking_breakdown_by_id = {
+            candidate_id: (interaction_breakdown if ranking_metric == "interaction_score" else breakdown)
+            for candidate_id, _row, breakdown, interaction_breakdown in pairs
+        }
         ranked = rank_candidates(
-            [(candidate_id, breakdown) for candidate_id, _row, breakdown in pairs],
+            list(ranking_breakdown_by_id.items()),
             tie_precision=engine_config.tie_precision,
         )
-        row_by_id = {candidate_id: row for candidate_id, row, _breakdown in pairs}
-        breakdown_by_id = {candidate_id: breakdown for candidate_id, _row, breakdown in pairs}
+        row_by_id = {candidate_id: row for candidate_id, row, _breakdown, _interaction_breakdown in pairs}
+        breakdown_by_id = {
+            candidate_id: breakdown for candidate_id, _row, breakdown, _interaction_breakdown in pairs
+        }
         for ranked_item in ranked[: scoring_config.max_candidates_per_query]:
             row = row_by_id[ranked_item.candidate_id]
             row["candidate_rank"] = ranked_item.rank if ranked_item.rank is not None else 0
             row["distance_independent_rank"] = row["candidate_rank"]
             all_rows.append(row)
             if collect_evidence_detail:
-                breakdown = breakdown_by_id[ranked_item.candidate_id]
-                detail_rows.extend(_evidence_detail_rows_v2(row, breakdown, engine_config))
+                # Evidence_Detail always audits the full breakdown, regardless
+                # of which score is currently driving candidate_rank.
+                full_breakdown = breakdown_by_id[ranked_item.candidate_id]
+                detail_rows.extend(_evidence_detail_rows_v2(row, full_breakdown, engine_config))
 
     all_rows.sort(
         key=lambda row: (str(row["query_id"]), int(row["candidate_rank"] or 0), str(row["candidate_protein_id"]))
@@ -986,8 +1007,16 @@ def _score_pair_v2(
     engine_config: ScoringEngineConfig,
     ruleset: FunctionalComplementarityRuleset,
     pih_bundle: PihEvidenceBundle | None = None,
-) -> tuple[dict[str, Any], ScoreBreakdown]:
-    """Score one query/candidate pair with the evidence-based engine."""
+) -> tuple[dict[str, Any], ScoreBreakdown, ScoreBreakdown]:
+    """Score one query/candidate pair with the evidence-based engine.
+
+    Returns ``(row, breakdown, interaction_breakdown)``: the full composite
+    breakdown (drives interaction_priority_score/evidence_tier, unchanged
+    since Phase 5) and the query-specific-only breakdown (drives
+    interaction_score/interaction_evidence_tier, and -- when
+    ``ranking_metric: interaction_score`` -- candidate_rank itself; see
+    ``_rank_source_candidates_v2``).
+    """
     components, location_info = _build_evidence_components_v2(
         query, candidate, candidate_source, feature_map, ruleset, engine_config, pih_bundle=pih_bundle
     )
@@ -1055,7 +1084,7 @@ def _score_pair_v2(
     if scoring_config.include_sequences_in_excel:
         row["query_sequence"] = query["sequence"]
         row["candidate_sequence"] = candidate.sequence
-    return row, breakdown
+    return row, breakdown, interaction_breakdown
 
 
 def _component_contribution(components: list[EvidenceComponent], name: str) -> float | None:
