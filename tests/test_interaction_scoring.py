@@ -493,8 +493,65 @@ def test_interaction_score_reflects_genomic_context_when_available(tmp_path: Pat
     assert row["interaction_evidence_tier"] != "Unclassified"
 
 
-def test_legacy_mode_leaves_interaction_score_columns_blank() -> None:
-    """M4 has not landed yet -- legacy_additive rows must not populate interaction_score."""
+# ---------------------------------------------------------------------------
+# legacy_additive interaction_score (M4)
+# ---------------------------------------------------------------------------
+
+
+def test_legacy_interaction_score_matches_renormalized_formula() -> None:
+    """legacy interaction_score = (gene_neighborhood + domain_complementarity) /
+    (their configured weights) * 100 -- co_occurrence and candidate_priority excluded."""
+    records = {
+        "query": record("query", description="radical SAM protein", positive_sources_hit=["A"]),
+        "candidate": record(
+            "candidate", description="iron-sulfur carrier protein", positive_sources_hit=["A"]
+        ),
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+    )
+
+    result = run_interaction_scoring(cfg, classification(records))
+
+    assert result is not None
+    row = result.source_rows["Interaction_Candidates"][0]
+    # No GFF configured -> same_gene_neighborhood_score = 0; domain match is a
+    # full complementary-term hit -> domain_complementarity_score = weight (15).
+    assert row["same_gene_neighborhood_score"] == 0.0
+    assert row["domain_complementarity_score"] == 15.0
+    assert row["interaction_score"] == round((0.0 + 15.0) / (25.0 + 15.0) * 100, 3)
+    assert row["interaction_evidence_tier"] is None
+
+
+def test_legacy_interaction_score_excludes_co_occurrence_and_source() -> None:
+    """Same MA_0050/MA_0238-style pattern as the v2 test: a legacy row whose
+    interaction_priority_score comes entirely from candidate_priority_score +
+    co_occurrence_score must score 0 on interaction_score (unlike v2, legacy
+    has no MISSING concept, so this is a numeric 0, not None)."""
+    records = {
+        "query": record("query", description="", positive_sources_hit=["A"]),
+        "candidate": record("candidate", description="", positive_sources_hit=["A"]),
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+    )
+
+    result = run_interaction_scoring(cfg, classification(records))
+
+    assert result is not None
+    row = result.source_rows["Interaction_Candidates"][0]
+    assert row["interaction_priority_score"] > 0
+    assert row["interaction_score"] == 0.0
+
+
+def test_legacy_mode_leaves_interaction_evidence_tier_blank() -> None:
+    """legacy_additive has no per-category tiering concept -- always blank (M4)."""
     records = {
         "query": record("query", positive_sources_hit=["A"]),
         "candidate": record("candidate", positive_sources_hit=["A"]),
@@ -510,7 +567,6 @@ def test_legacy_mode_leaves_interaction_score_columns_blank() -> None:
 
     assert result is not None
     row = result.source_rows["Interaction_Candidates"][0]
-    assert row.get("interaction_score") is None
     assert row.get("interaction_evidence_tier") is None
 
 

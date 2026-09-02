@@ -807,6 +807,9 @@ def _score_pair(query: dict[str, Any], candidate: ProteinRecord, candidate_sourc
         reasons.append("distant candidate retained by co-occurrence/domain evidence")
 
     total_score = candidate_priority_score + neighborhood["same_gene_neighborhood_score"] + co_occurrence_score + domain_complementarity_score + alphafold_readiness_score
+    interaction_score = _legacy_interaction_score(
+        neighborhood["same_gene_neighborhood_score"], domain_complementarity_score, weights
+    )
     row = {
         "query_id": query["query_id"],
         "query_protein_id": query["resolved_protein_id"],
@@ -828,11 +831,38 @@ def _score_pair(query: dict[str, Any], candidate: ProteinRecord, candidate_sourc
         "alphafold_readiness_score": round(alphafold_readiness_score, 3),
         "pair_total_length": pair_total_length,
         "alphafold_recommended": alphafold_recommended,
+        "interaction_score": interaction_score,
+        # legacy_additive has no per-category tiering concept (no evidence
+        # categories/status to count) -- left blank, same as v2's own
+        # evidence_tier is left blank on legacy rows.
+        "interaction_evidence_tier": None,
     }
     if scoring_config.include_sequences_in_excel:
         row["query_sequence"] = query["sequence"]
         row["candidate_sequence"] = candidate.sequence
     return row
+
+
+def _legacy_interaction_score(
+    same_gene_neighborhood_score: float, domain_complementarity_score: float, weights: Any
+) -> float | None:
+    """legacy_additive counterpart of interaction_score: query-specific evidence only.
+
+    Same INTERACTION_SCORE_COMPONENT_NAMES scope as v2 (genomic_context +
+    domain_complementarity, co_occurrence excluded) re-normalized to 0-100
+    against the configured weight budget for those two components. Unlike
+    v2, legacy_additive has no MISSING/AVAILABLE evidence-status concept --
+    every legacy sub-score is always a plain number (0 when there is no
+    evidence, never None) -- so this can only ever be a numeric 0-100
+    value, not the "no evidence at all" None that v2's interaction_score
+    can report. Returns None only when gene_neighborhood/domain_complementarity
+    both carry zero weight in scoring_weights (nothing to normalize against).
+    """
+    max_points = weights.gene_neighborhood + weights.domain_complementarity
+    if max_points <= 0:
+        return None
+    raw = same_gene_neighborhood_score + domain_complementarity_score
+    return round(raw / max_points * 100, 3)
 
 
 def _rank_source_candidates_v2(
