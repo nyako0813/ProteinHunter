@@ -226,6 +226,14 @@ INTERACTION_SCORE_EXPLANATIONS: tuple[tuple[str, str], ...] = (
         "interaction_score_reasons",
         "Human-readable reasons explaining why the candidate received its score.",
     ),
+    (
+        "protein_hunter_score",
+        "Query-independent 'is this generally a good candidate' score for the candidate "
+        "protein alone (same formula as the Candidates sheet's total_score, but computed "
+        "for every interaction_scoring candidate source, not just Candidates). Does not "
+        "change if the query changes, and is never part of interaction_priority_score, "
+        "candidate_rank, or sheet sort order -- reference only.",
+    ),
 )
 
 INTERACTION_SCORE_NOTES: tuple[str, ...] = (

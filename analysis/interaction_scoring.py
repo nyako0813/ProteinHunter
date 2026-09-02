@@ -231,6 +231,14 @@ INTERACTION_PAIR_COLUMNS: tuple[str, ...] = (
     "evidence_category_count",
     "evidence_component_count",
     "available_weight_total",
+    # protein_hunter_score reference columns (M1/M2, design spec section 22):
+    # the candidate's own query-independent "is this generally a good
+    # candidate" score -- see resolve_protein_hunter_scores. Present for
+    # both scoring models; never affects interaction_priority_score,
+    # candidate_rank, or sort order.
+    "protein_hunter_score",
+    "protein_hunter_score_components",
+    "protein_hunter_score_reasons",
 )
 
 SEQUENCE_COLUMNS: tuple[str, ...] = ("query_sequence", "candidate_sequence")
@@ -425,6 +433,8 @@ def run_interaction_scoring(config: Any, blast_classification: Any) -> Interacti
             pih_bundle = load_pih_evidence_bundle(pih_bundle_path)
             warnings.extend(pih_bundle.warnings)
 
+    protein_hunter_scores = resolve_protein_hunter_scores(config, blast_classification)
+
     for source_key, enabled in scoring_config.candidate_sources.items():
         if not enabled:
             continue
@@ -463,6 +473,7 @@ def run_interaction_scoring(config: Any, blast_classification: Any) -> Interacti
                 collect_evidence_detail=collect_evidence_detail,
             )
         if rows:
+            _attach_protein_hunter_score_columns(rows, protein_hunter_scores)
             source_rows[sheet_name] = rows
             evidence_detail_rows.extend(detail_rows)
         else:
@@ -584,6 +595,29 @@ def resolve_protein_hunter_scores(
     return {
         protein_id: build_candidate_score(record) for protein_id, record in targets.items()
     }
+
+
+def _attach_protein_hunter_score_columns(
+    rows: list[dict[str, Any]], protein_hunter_scores: dict[str, CandidateScore]
+) -> None:
+    """Attach protein_hunter_score reference columns to each pair row in place.
+
+    Purely additive/read-only relative to everything else on the row:
+    never touches candidate_rank, interaction_priority_score, or any other
+    existing field.
+    """
+    for row in rows:
+        score = protein_hunter_scores.get(row["candidate_protein_id"])
+        if score is None:
+            row["protein_hunter_score"] = None
+            row["protein_hunter_score_components"] = ""
+            row["protein_hunter_score_reasons"] = ""
+            continue
+        row["protein_hunter_score"] = score.total_score
+        row["protein_hunter_score_components"] = "; ".join(
+            f"{name}={value}" for name, value in score.components.items()
+        )
+        row["protein_hunter_score_reasons"] = "; ".join(score.reasons)
 
 
 def interaction_neighborhood_columns() -> tuple[str, ...]:

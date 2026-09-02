@@ -390,6 +390,7 @@ def test_index_sheet_explains_interaction_scoring_columns(tmp_path: Path) -> Non
     assert "interaction_priority_score" in index_text
     assert "distance_independent_score" in index_text
     assert "priority_group" in index_text
+    assert "protein_hunter_score" in index_text
     assert "alphafold_readiness_score" in index_text
     assert "not a direct protein-protein interaction probability" in index_text
 
@@ -652,7 +653,37 @@ def _minimal_pair_row(candidate_protein_id: str = "candidate_1") -> dict:
         "alphafold_readiness_score": 10.0,
         "pair_total_length": 20,
         "alphafold_recommended": True,
+        "protein_hunter_score": 14.0,
+        "protein_hunter_score_components": "no_negative_hit=5.0; domain_hit=4.0",
+        "protein_hunter_score_reasons": "This protein has no negative BLAST hits.",
     }
+
+
+def test_interaction_candidates_sheet_shows_protein_hunter_score_column(
+    tmp_path: Path,
+) -> None:
+    """protein_hunter_score reference columns should render in Interaction_* sheets."""
+    output_path = tmp_path / "reports" / "protein_hunter_score.xlsx"
+    interaction_result = InteractionScoringResult(
+        query_rows=[],
+        source_rows={"Interaction_Candidates": [_minimal_pair_row()]},
+        neighborhood_rows=[],
+        warnings=[],
+    )
+
+    result = write_classification_workbook(
+        candidates={},
+        output_path=output_path,
+        interaction_result=interaction_result,
+    )
+
+    dataframe = pd.read_excel(result, sheet_name="Interaction_Candidates", header=1)
+    assert dataframe.loc[0, "protein_hunter_score"] == 14.0
+    assert dataframe.loc[0, "protein_hunter_score_components"] == (
+        "no_negative_hit=5.0; domain_hit=4.0"
+    )
+    # interaction_priority_score is unaffected by the new reference columns.
+    assert dataframe.loc[0, "interaction_priority_score"] == 42.0
 
 
 def test_classification_workbook_writes_v2_evidence_detail_sheet(tmp_path: Path) -> None:

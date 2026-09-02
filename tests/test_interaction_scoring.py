@@ -312,6 +312,87 @@ def test_resolve_protein_hunter_scores_does_not_mutate_shared_records() -> None:
     assert relaxed_only.score is None
 
 
+# ---------------------------------------------------------------------------
+# protein_hunter_score reference columns (M2)
+# ---------------------------------------------------------------------------
+
+
+def test_interaction_row_carries_protein_hunter_score_reference_columns() -> None:
+    """Every Interaction_* pair row should carry the candidate's own protein_hunter_score."""
+    records = {
+        "query": record("query", positive_sources_hit=["A"]),
+        "candidate": record("candidate", positive_sources_hit=["A"]),
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+    )
+
+    result = run_interaction_scoring(cfg, classification(records))
+
+    assert result is not None
+    row = result.source_rows["Interaction_Candidates"][0]
+    expected = build_candidate_score(records["candidate"])
+    assert row["protein_hunter_score"] == expected.total_score
+    assert "no_negative_hit=" in row["protein_hunter_score_components"]
+    assert row["protein_hunter_score_reasons"]
+
+
+def test_protein_hunter_score_reference_column_covers_relaxed_bucket_too() -> None:
+    """M1's scope fix must actually reach Interaction_Candidates_relaxed rows."""
+    records = {
+        "query": record("query", positive_sources_hit=["A"]),
+        "candidate": record("candidate", positive_sources_hit=["A"]),
+        "relaxed": record("relaxed", positive_sources_hit=["A"]),
+        "novel": record("novel"),
+    }
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates_relaxed": True},
+    )
+
+    result = run_interaction_scoring(cfg, classification(records))
+
+    assert result is not None
+    rows = {r["candidate_protein_id"]: r for r in result.source_rows["Interaction_Candidates_relaxed"]}
+    # "relaxed" is not in positive_only_records, so the plain Candidate
+    # scoring pipeline step never scores it -- protein_hunter_score must
+    # still be populated here via the wider interaction_scoring scope.
+    assert rows["relaxed"]["protein_hunter_score"] is not None
+    assert rows["relaxed"]["protein_hunter_score"] == build_candidate_score(
+        records["relaxed"]
+    ).total_score
+
+
+def test_protein_hunter_score_does_not_affect_ranking_or_existing_columns() -> None:
+    """protein_hunter_score must be purely additive: rank/score/tier stay identical."""
+    records = {
+        "query": record("query", description="radical SAM protein", positive_sources_hit=["A"]),
+        "candidate": record(
+            "candidate", description="iron-sulfur carrier protein", positive_sources_hit=["A"]
+        ),
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+        scoring_model="v2_evidence_based",
+    )
+
+    result = run_interaction_scoring(cfg, classification(records))
+
+    assert result is not None
+    row = result.source_rows["Interaction_Candidates"][0]
+    # Same values as the pre-M2 behavior (test_v2_mode_scores_full_evidence_pair_near_100).
+    assert row["candidate_rank"] == 1
+    assert row["interaction_priority_score"] == 100.0
+    assert row["evidence_tier"] == "Tier2_Strong"
+    assert row["protein_hunter_score"] is not None
+
+
 def test_interaction_scoring_disabled_returns_none() -> None:
     """Disabled interaction scoring should not create output."""
     cfg = interaction_config(enabled=False)
