@@ -20,6 +20,7 @@ from core.exceptions import (
     ProteinHunterError,
     ScoringError,
     StartupCheckError,
+    StringPpiAnnotationError,
     UniProtAnnotationError,
 )
 
@@ -38,6 +39,7 @@ CUSTOM_EXCEPTIONS: tuple[type[ProteinHunterError], ...] = (
     UniProtAnnotationError,
     AlphaFoldAnnotationError,
     GeneContextError,
+    StringPpiAnnotationError,
     CacheError,
     ScoringError,
     ExcelOutputError,
@@ -55,6 +57,7 @@ ANNOTATION_EXCEPTIONS: tuple[type[AnnotationError], ...] = (
     UniProtAnnotationError,
     AlphaFoldAnnotationError,
     GeneContextError,
+    StringPpiAnnotationError,
 )
 
 

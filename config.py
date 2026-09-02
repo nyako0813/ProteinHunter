@@ -208,6 +208,17 @@ class InteractionScoringConfig:
     # their original values and meaning either way -- only candidate_rank
     # and row order change.
     ranking_metric: str = "interaction_priority_score"
+    # NCBI taxonomy id for STRING (string-db.org) PPI evidence
+    # (scoring_model: v2_evidence_based only; Phase 6a, see
+    # claude/phase6_external_evidence_design.md). Must be STRING's own
+    # taxid for the exact strain, which is not always the species-level
+    # NCBI taxid -- e.g. M. acetivorans's species taxid 2214 returns
+    # nothing from STRING; the strain-level taxid 188937 ("... C2A") is
+    # what actually has data. Leave unset (None) to disable STRING
+    # evidence entirely -- every pair is then MISSING for the
+    # external_ppi_evidence category and genomic_context's
+    # string_neighborhood component.
+    string_ppi_ncbi_taxon_id: int | None = None
 
 
 VALID_INTERACTION_SCORING_MODELS: tuple[str, ...] = ("legacy_additive", "v2_evidence_based")
@@ -954,6 +965,13 @@ def _validate_interaction_scoring_section(raw: dict[object, object]) -> None:
             f"one of {VALID_INTERACTION_RANKING_METRICS}, got {ranking_metric!r}."
         )
 
+    string_ppi_ncbi_taxon_id = section.get("string_ppi_ncbi_taxon_id")
+    if string_ppi_ncbi_taxon_id is not None and not _is_positive_int(string_ppi_ncbi_taxon_id):
+        raise ConfigError(
+            "config.yaml value 'interaction_scoring.string_ppi_ncbi_taxon_id' "
+            "must be a positive integer or left unset."
+        )
+
 
 def _load_interaction_scoring(raw_scoring: object) -> InteractionScoringConfig:
     """Load optional lightweight interaction scoring settings."""
@@ -1088,6 +1106,11 @@ def _load_interaction_scoring(raw_scoring: object) -> InteractionScoringConfig:
         evidence_detail_sheet=evidence_detail_sheet,
         ranking_metric=str(
             raw_scoring.get("ranking_metric", "interaction_priority_score")
+        ),
+        string_ppi_ncbi_taxon_id=(
+            int(raw_scoring["string_ppi_ncbi_taxon_id"])
+            if raw_scoring.get("string_ppi_ncbi_taxon_id") is not None
+            else None
         ),
     )
 

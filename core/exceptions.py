@@ -96,6 +96,12 @@ class GeneContextError(AnnotationError):
     default_message = "ProteinHunter could not analyze the gene context."
 
 
+class StringPpiAnnotationError(AnnotationError):
+    """Raised when STRING PPI evidence cannot be downloaded/parsed and no cache exists."""
+
+    default_message = "STRING PPI evidence could not be retrieved."
+
+
 class CacheError(ProteinHunterError):
     """Raised when cached data cannot be read or written."""
 
@@ -129,6 +135,7 @@ __all__: tuple[str, ...] = (
     "UniProtAnnotationError",
     "AlphaFoldAnnotationError",
     "GeneContextError",
+    "StringPpiAnnotationError",
     "CacheError",
     "ScoringError",
     "ExcelOutputError",
