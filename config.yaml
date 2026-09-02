@@ -176,6 +176,9 @@ interaction_scoring:
     co_occurrence: 20
     domain_complementarity: 15
     alphafold_readiness: 10
+    # legacy_additive counterpart of v2's external_ppi_evidence category
+    # cap (Phase 6a M4). Only used when string_ppi_ncbi_taxon_id is set.
+    external_ppi: 15
 
   alphafold:
     enabled: false

@@ -146,6 +146,10 @@ class InteractionScoringWeightsConfig:
     co_occurrence: float
     domain_complementarity: float
     alphafold_readiness: float
+    # legacy_additive counterpart of v2's external_ppi_evidence category
+    # cap (Phase 6a M4, analysis/scoring_engine_config.py::DEFAULT_CATEGORY_CAPS).
+    # Same provisional value (15.0), not derived from a fit.
+    external_ppi: float = 15.0
 
 
 @dataclass(frozen=True)
@@ -853,6 +857,7 @@ def _validate_interaction_scoring_section(raw: dict[object, object]) -> None:
         "co_occurrence",
         "domain_complementarity",
         "alphafold_readiness",
+        "external_ppi",
     ):
         if key not in scoring_weights:
             continue
@@ -1032,6 +1037,12 @@ def _load_interaction_scoring(raw_scoring: object) -> InteractionScoringConfig:
             raw_weights.get(
                 "alphafold_readiness",
                 INTERACTION_SCORING_WEIGHTS_DEFAULT.alphafold_readiness,
+            )
+        ),
+        external_ppi=float(
+            raw_weights.get(
+                "external_ppi",
+                INTERACTION_SCORING_WEIGHTS_DEFAULT.external_ppi,
             )
         ),
     )

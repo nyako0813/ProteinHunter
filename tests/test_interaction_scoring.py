@@ -576,6 +576,74 @@ def test_legacy_mode_leaves_interaction_evidence_tier_blank() -> None:
     assert row.get("interaction_evidence_tier") is None
 
 
+def test_legacy_string_ppi_score_feeds_both_scores(tmp_path: Path) -> None:
+    """legacy_additive's string_ppi_score (Phase 6a M4) contributes to both
+    interaction_priority_score and interaction_score once STRING is configured."""
+    records = {
+        "query": record("query", old_locus_tag="MA_0001", description="", positive_sources_hit=[]),
+        "candidate": record(
+            "candidate", old_locus_tag="MA_0002", description="", positive_sources_hit=[]
+        ),
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+    _seed_string_files(tmp_path, 188937, ["188937.MA_0001 188937.MA_0002 0 0 600 0 0 0 0 600"])
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+        cache_dir=tmp_path,
+    )
+    cfg.interaction_scoring = replace(cfg.interaction_scoring, string_ppi_ncbi_taxon_id=188937)
+
+    result = run_interaction_scoring(cfg, classification(records))
+
+    assert result is not None
+    row = result.source_rows["Interaction_Candidates"][0]
+    # cooccurrence=600, neighborhood=0 (not seeded) -> average 0.3, scaled
+    # by the default external_ppi weight (15) -> 4.5.
+    assert row["string_ppi_score"] == pytest.approx(4.5)
+    assert row["interaction_priority_score"] == pytest.approx(
+        row["candidate_priority_score"]
+        + row["same_gene_neighborhood_score"]
+        + row["co_occurrence_score"]
+        + row["domain_complementarity_score"]
+        + row["alphafold_readiness_score"]
+        + row["string_ppi_score"]
+    )
+    # No GFF neighborhood, no domain match -> string_ppi_score (4.5) is the
+    # entire interaction_score numerator, over (25 + 15 + 15) = 55 points
+    # (gene_neighborhood + domain_complementarity + external_ppi, all
+    # active once STRING is configured).
+    assert row["interaction_score"] == pytest.approx(4.5 / 55.0 * 100, abs=0.01)
+
+
+def test_legacy_string_ppi_score_absent_when_taxon_id_unset() -> None:
+    """Without string_ppi_ncbi_taxon_id, string_ppi_score must be 0 and the
+    interaction_score denominator must NOT include external_ppi -- otherwise
+    every existing legacy_additive run would silently change once this
+    field exists at all."""
+    records = {
+        "query": record("query", description="radical SAM protein", positive_sources_hit=["A"]),
+        "candidate": record(
+            "candidate", description="iron-sulfur carrier protein", positive_sources_hit=["A"]
+        ),
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+    )
+
+    result = run_interaction_scoring(cfg, classification(records))
+
+    assert result is not None
+    row = result.source_rows["Interaction_Candidates"][0]
+    assert row["string_ppi_score"] == 0.0
+    # Same formula as before Phase 6a M4: (0 + 15) / (25 + 15) * 100.
+    assert row["interaction_score"] == pytest.approx((0.0 + 15.0) / 40.0 * 100, abs=0.01)
+
+
 # ---------------------------------------------------------------------------
 # ranking_metric (M5): candidate_rank/row order can be driven by
 # interaction_score instead of interaction_priority_score

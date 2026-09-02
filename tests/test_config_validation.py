@@ -263,6 +263,7 @@ def test_interaction_scoring_can_be_configured(tmp_path: Path) -> None:
         "scoring_weights": {
             "candidate_priority": 11,
             "alphafold_readiness": 3,
+            "external_ppi": 7,
         },
         "alphafold": {
             "enabled": False,
@@ -293,6 +294,7 @@ def test_interaction_scoring_can_be_configured(tmp_path: Path) -> None:
     assert cfg.interaction_scoring.include_sequences_in_excel is True
     assert cfg.interaction_scoring.scoring_weights.candidate_priority == 11
     assert cfg.interaction_scoring.scoring_weights.alphafold_readiness == 3
+    assert cfg.interaction_scoring.scoring_weights.external_ppi == 7
     assert cfg.interaction_scoring.alphafold.enabled is False
     assert cfg.interaction_scoring.alphafold.max_pair_total_length == 1200
     assert cfg.interaction_scoring.neighborhood.enabled is False
