@@ -236,13 +236,25 @@ INTERACTION_SCORE_EXPLANATIONS: tuple[tuple[str, str], ...] = (
     ),
     (
         "interaction_score",
-        "Query-specific evidence only: genomic_context + domain_complementarity, "
-        "re-normalized to 0-100 (scoring_model: v2_evidence_based only; blank for "
-        "legacy_additive). Deliberately excludes source_classification, sequence_evidence, "
-        "and co_occurrence, which mainly reflect the candidate's own conservation profile "
-        "rather than evidence specific to this query pair. Blank/None means no query-specific "
-        "evidence was available at all, not a scored zero. Reference only -- does not affect "
-        "interaction_priority_score, candidate_rank, or sheet sort order.",
+        "Query-specific evidence only, re-normalized to 0-100: genomic_context "
+        "(+ STRING's neighborhood channel) + domain_complementarity + external_ppi_evidence "
+        "(STRING's cooccurrence channel). Populated for both scoring models -- v2_evidence_based "
+        "computes it from EvidenceComponent categories (blank/None means no query-specific "
+        "evidence was available at all, not a scored zero); legacy_additive computes an "
+        "equivalent blended sum (always a number, 0 when there is no evidence, since legacy has "
+        "no 'missing vs. evaluated-zero' concept). Deliberately excludes source_classification, "
+        "sequence_evidence, and co_occurrence, which mainly reflect the candidate's own "
+        "conservation profile rather than evidence specific to this query pair. Reference only -- "
+        "does not affect interaction_priority_score, candidate_rank, or sheet sort order.",
+    ),
+    (
+        "string_ppi_score",
+        "legacy_additive only (blank for v2_evidence_based, which reports STRING evidence as "
+        "separate string_cooccurrence/string_neighborhood rows in Interaction_Evidence_Detail "
+        "instead). Averages STRING's cooccurrence and neighborhood channels for this pair into "
+        "one 0-weights.external_ppi point score. 0 when interaction_scoring.string_ppi_ncbi_taxon_id "
+        "is unset or STRING has no data for this pair -- reference only, folded into both "
+        "interaction_priority_score and interaction_score.",
     ),
 )
 
@@ -251,6 +263,10 @@ INTERACTION_SCORE_NOTES: tuple[str, ...] = (
     "Gene neighborhood is used as positive evidence only.",
     "Distant archaeal candidates should not be excluded solely because they are far from the query gene.",
     "AlphaFold readiness does not mean AlphaFold predicts interaction.",
+    "string_cooccurrence/string_neighborhood/string_ppi_score are derived from STRING "
+    "(https://string-db.org), used under the Creative Commons Attribution 4.0 "
+    "International (CC BY 4.0) license. Please credit STRING if these values are "
+    "published or redistributed.",
 )
 
 

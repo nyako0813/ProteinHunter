@@ -393,6 +393,9 @@ def test_index_sheet_explains_interaction_scoring_columns(tmp_path: Path) -> Non
     assert "protein_hunter_score" in index_text
     assert "alphafold_readiness_score" in index_text
     assert "not a direct protein-protein interaction probability" in index_text
+    assert "string_ppi_score" in index_text
+    assert "string-db.org" in index_text
+    assert "CC BY 4.0" in index_text
 
 def test_classification_workbook_index_links_all_sheets(tmp_path: Path) -> None:
     """Index should be first and link to every classification sheet."""
