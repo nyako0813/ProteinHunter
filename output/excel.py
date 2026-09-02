@@ -234,6 +234,16 @@ INTERACTION_SCORE_EXPLANATIONS: tuple[tuple[str, str], ...] = (
         "change if the query changes, and is never part of interaction_priority_score, "
         "candidate_rank, or sheet sort order -- reference only.",
     ),
+    (
+        "interaction_score",
+        "Query-specific evidence only: genomic_context + domain_complementarity, "
+        "re-normalized to 0-100 (scoring_model: v2_evidence_based only; blank for "
+        "legacy_additive). Deliberately excludes source_classification, sequence_evidence, "
+        "and co_occurrence, which mainly reflect the candidate's own conservation profile "
+        "rather than evidence specific to this query pair. Blank/None means no query-specific "
+        "evidence was available at all, not a scored zero. Reference only -- does not affect "
+        "interaction_priority_score, candidate_rank, or sheet sort order.",
+    ),
 )
 
 INTERACTION_SCORE_NOTES: tuple[str, ...] = (

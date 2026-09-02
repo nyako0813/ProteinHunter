@@ -239,6 +239,16 @@ INTERACTION_PAIR_COLUMNS: tuple[str, ...] = (
     "protein_hunter_score",
     "protein_hunter_score_components",
     "protein_hunter_score_reasons",
+    # interaction_score reference columns (M3/M4, design spec section 22):
+    # query-specific evidence only (genomic_context + domain_complementarity
+    # for v2, an equivalent re-normalized sum for legacy_additive;
+    # co_occurrence deliberately excluded, see INTERACTION_SCORE_COMPONENT_NAMES).
+    # scoring_model: v2_evidence_based only for interaction_evidence_tier --
+    # legacy_additive has no per-category tiering concept, so it stays blank.
+    # Like protein_hunter_score, purely additive: never affects
+    # interaction_priority_score, candidate_rank, or sort order.
+    "interaction_score",
+    "interaction_evidence_tier",
 )
 
 SEQUENCE_COLUMNS: tuple[str, ...] = ("query_sequence", "candidate_sequence")
@@ -903,6 +913,40 @@ def _evidence_detail_rows_v2(
     return detail_rows
 
 
+#: Components that constitute query-specific "does this candidate actually
+#: interact with THIS query" evidence (design spec section 22's
+#: interaction_score). Deliberately excludes source_classification and
+#: sequence_evidence (candidate-only conservation quality, see
+#: protein_hunter_score) and negative_hit_strength (candidate-only
+#: penalty). co_occurrence is also excluded: despite technically taking the
+#: query as an input, it measures each protein's own BLAST hit pattern
+#: against the positive reference genomes independently, not any
+#: relationship between query and candidate -- and with only a handful of
+#: configured positive sources its Jaccard value is coarse-grained enough
+#: (this project's default config has exactly two, so it can only be 0.0,
+#: 0.5, or 1.0) that it behaves like a candidate-quality signal in
+#: practice. co_occurrence is still shown, unchanged, in
+#: Interaction_Evidence_Detail for audit -- it is only excluded from this
+#: sum. PIH-bridged categories are intentionally left out of this first cut
+#: (all pih_* categories are query-specific in principle, but the scope for
+#: this phase was fixed to genomic_context + domain_complementarity only).
+INTERACTION_SCORE_COMPONENT_NAMES: frozenset[str] = frozenset({"genomic_context", "domain_complementarity"})
+
+
+def _interaction_only_breakdown(
+    components: list[EvidenceComponent], engine_config: ScoringEngineConfig
+) -> ScoreBreakdown:
+    """Re-score a pair using only query-specific (interaction_score) components.
+
+    Reuses analysis/scoring_engine.py::score_candidate unmodified: feeding it
+    a filtered component list is enough to get a correctly cap-renormalized
+    0-100 score, tier, and eligibility for the restricted view -- no new
+    scoring engine code needed.
+    """
+    interaction_components = [c for c in components if c.name in INTERACTION_SCORE_COMPONENT_NAMES]
+    return score_candidate(interaction_components, engine_config)
+
+
 def _score_pair_v2(
     query: dict[str, Any],
     candidate: ProteinRecord,
@@ -918,6 +962,7 @@ def _score_pair_v2(
         query, candidate, candidate_source, feature_map, ruleset, engine_config, pih_bundle=pih_bundle
     )
     breakdown = score_candidate(components, engine_config)
+    interaction_breakdown = _interaction_only_breakdown(components, engine_config)
 
     alphafold_readiness_score, pair_total_length, alphafold_recommended = _alphafold_readiness(
         query, candidate, scoring_config
@@ -972,6 +1017,10 @@ def _score_pair_v2(
         "evidence_category_count": breakdown.evidence_category_count,
         "evidence_component_count": breakdown.evidence_component_count,
         "available_weight_total": round(breakdown.available_weight_total, 3),
+        "interaction_score": round(interaction_breakdown.final_score, 3)
+        if interaction_breakdown.final_score is not None
+        else None,
+        "interaction_evidence_tier": interaction_breakdown.tier,
     }
     if scoring_config.include_sequences_in_excel:
         row["query_sequence"] = query["sequence"]
