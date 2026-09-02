@@ -62,6 +62,10 @@ V2_COMPONENT_WEIGHTS: dict[str, float] = {
     # string_neighborhood (Phase 6a M3) shares genomic_context's weight/cap
     # instead of adding a second external_ppi_evidence component.
     "string_cooccurrence": 1.0,
+    # Shares genomic_context's category cap (equal weight to
+    # genomic_context itself, the same "average the two components evenly"
+    # pattern source_classification+sequence_evidence already use).
+    "string_neighborhood": 1.0,
 }
 
 _NEGATIVE_HIT_STRENGTH_VALUES: dict[str, float] = {
@@ -1006,11 +1010,12 @@ def _evidence_detail_rows_v2(
 #: Phase 6a adds "string_cooccurrence" (STRING's own, far more rigorous
 #: cross-species phylogenetic-profiling cooccurrence method -- judged on
 #: its own merits, not excluded just because this project's own
-#: co_occurrence proxy was). "string_neighborhood" (M3) shares
-#: genomic_context's weight/cap as a second component of that same
-#: category, so it does not need a separate entry here.
+#: co_occurrence proxy was) and "string_neighborhood" (shares
+#: genomic_context's category/cap as a second component, but is filtered
+#: by component *name* here, same as every other entry, so it needs its
+#: own listing even though its category name is already present).
 INTERACTION_SCORE_COMPONENT_NAMES: frozenset[str] = frozenset(
-    {"genomic_context", "domain_complementarity", "string_cooccurrence"}
+    {"genomic_context", "domain_complementarity", "string_cooccurrence", "string_neighborhood"}
 )
 
 
@@ -1196,6 +1201,32 @@ def _build_evidence_components_v2(
         components.append(
             EvidenceComponent.unavailable(
                 "genomic_context", "genomic_context", geo_status, source="gff", explanation=geo_reason
+            )
+        )
+
+    string_neighborhood_status, string_neighborhood_value, string_neighborhood_reason = (
+        _string_neighborhood_status_and_value(query, candidate, string_ppi_bundle)
+    )
+    if string_neighborhood_status is EvidenceStatus.AVAILABLE:
+        components.append(
+            EvidenceComponent.available(
+                "string_neighborhood",
+                "genomic_context",
+                string_neighborhood_value,
+                V2_COMPONENT_WEIGHTS["string_neighborhood"],
+                raw_value=string_neighborhood_value * 1000 if string_neighborhood_value is not None else None,
+                source="string_db",
+                explanation=string_neighborhood_reason,
+            )
+        )
+    else:
+        components.append(
+            EvidenceComponent.unavailable(
+                "string_neighborhood",
+                "genomic_context",
+                string_neighborhood_status,
+                source="string_db",
+                explanation=string_neighborhood_reason,
             )
         )
 
@@ -1434,6 +1465,35 @@ def _string_cooccurrence_status_and_value(
         EvidenceStatus.AVAILABLE,
         normalized,
         f"STRING cooccurrence score: {scores.cooccurrence}/1000",
+    )
+
+
+def _string_neighborhood_status_and_value(
+    query: dict[str, Any], candidate: ProteinRecord, string_ppi_bundle: StringPpiBundle | None
+) -> tuple[EvidenceStatus, float | None, str]:
+    """STRING (string-db.org) neighborhood-channel evidence for this pair.
+
+    Shares the genomic_context category with the pipeline's own GFF-based
+    gene-distance component (see V2_COMPONENT_WEIGHTS["string_neighborhood"]):
+    a conceptually related but methodologically different signal
+    (cross-species conserved gene order, vs. this genome's own bp
+    distance), not a duplicate of it. Same NOT_RUN/MISSING/AVAILABLE rules
+    as _string_cooccurrence_status_and_value.
+    """
+    if string_ppi_bundle is None:
+        return EvidenceStatus.NOT_RUN, None, "STRING PPI evidence is disabled in configuration"
+
+    query_tag = query["resolved_old_locus_tag"]
+    candidate_tag = candidate.old_locus_tag or ""
+    scores = string_ppi_bundle.lookup(query_tag, candidate_tag)
+    if scores is None:
+        return EvidenceStatus.MISSING, None, "not found in STRING for this species"
+
+    normalized = scores.neighborhood / 1000.0
+    return (
+        EvidenceStatus.AVAILABLE,
+        normalized,
+        f"STRING neighborhood score: {scores.neighborhood}/1000",
     )
 
 

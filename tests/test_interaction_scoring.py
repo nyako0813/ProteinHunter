@@ -871,10 +871,13 @@ def test_string_cooccurrence_available_and_feeds_interaction_score(tmp_path: Pat
     assert detail["category"] == "external_ppi_evidence"
     assert detail["category_cap"] == 15.0
 
-    # No genomic_context (no GFF) or domain_complementarity (empty
-    # description on both sides -> MISSING) evidence -- string_cooccurrence
-    # alone must be the entire interaction_score.
-    assert row["interaction_score"] == pytest.approx(0.8 * 15.0 / 15.0 * 100, abs=0.01)
+    # domain_complementarity is MISSING (empty description both sides), so
+    # functional_annotation stays inactive. genomic_context has no GFF
+    # evidence of its own, but string_neighborhood (same seeded row,
+    # neighborhood=0) makes the category active at zero -- so the total
+    # cap is external_ppi_evidence(15) + genomic_context(25) = 40, with
+    # only the string_cooccurrence contribution (0.8*15=12) as raw score.
+    assert row["interaction_score"] == pytest.approx(12.0 / 40.0 * 100, abs=0.01)
     assert row["interaction_score"] > 0
 
 
@@ -906,6 +909,92 @@ def test_string_evidence_reuses_cache_across_runs(tmp_path: Path) -> None:
     assert result is not None
     row = result.source_rows["Interaction_Candidates"][0]
     assert row["interaction_score"] > 0
+
+
+# ---------------------------------------------------------------------------
+# string_neighborhood: shares genomic_context's category (Phase 6a M3)
+# ---------------------------------------------------------------------------
+
+
+def test_string_neighborhood_shares_genomic_context_category(tmp_path: Path) -> None:
+    """string_neighborhood must appear under genomic_context and combine with the GFF-based component."""
+    gff_file = tmp_path / "genome.gff"
+    gff_file.write_text(
+        "##gff-version 3\n"
+        "contig1\tRefSeq\tgene\t100\t400\t.\t+\t.\tID=query\n"
+        "contig1\tRefSeq\tgene\t500\t800\t.\t+\t.\tID=candidate\n",
+        encoding="utf-8",
+    )
+    records = {
+        "query": record("query", old_locus_tag="MA_0001", description="", positive_sources_hit=[]),
+        "candidate": record(
+            "candidate", old_locus_tag="MA_0002", description="", positive_sources_hit=[]
+        ),
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+    _seed_string_files(tmp_path, 188937, ["188937.MA_0001 188937.MA_0002 850 0 0 0 0 0 0 850"])
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+        scoring_model="v2_evidence_based",
+        gff_file=gff_file,
+        cache_dir=tmp_path,
+    )
+    cfg.interaction_scoring = replace(cfg.interaction_scoring, string_ppi_ncbi_taxon_id=188937)
+
+    result = run_interaction_scoring(cfg, classification(records))
+
+    assert result is not None
+    detail_rows = {
+        r["component_name"]: r
+        for r in result.evidence_detail_rows
+        if r["candidate_protein_id"] == "candidate"
+    }
+    string_neighborhood = detail_rows["string_neighborhood"]
+    assert string_neighborhood["status"] == "AVAILABLE"
+    assert string_neighborhood["category"] == "genomic_context"
+    assert string_neighborhood["normalized_value"] == pytest.approx(0.85)
+    assert string_neighborhood["raw_value"] == pytest.approx(850.0)
+    # Shares its cap with the pipeline's own GFF-based genomic_context
+    # component -- same cap value on both rows.
+    assert detail_rows["genomic_context"]["category_cap"] == string_neighborhood["category_cap"]
+
+    row = result.source_rows["Interaction_Candidates"][0]
+    # genomic_context: GFF's own component (close proximity, normalized
+    # 1.0) averaged with string_neighborhood (0.85) -> (1.0 + 0.85) / 2 *
+    # 25 = 23.125 raw. The same seeded STRING row also makes
+    # string_cooccurrence AVAILABLE at 0 (cooccurrence=0 in the fixture),
+    # which activates external_ppi_evidence's 15-point cap at zero raw.
+    # total_cap = 15 (external_ppi_evidence) + 25 (genomic_context) = 40;
+    # raw = 0 + 23.125 = 23.125.
+    assert row["interaction_score"] == pytest.approx(23.125 / 40.0 * 100, abs=0.01)
+
+
+def test_string_neighborhood_not_run_when_taxon_id_unset() -> None:
+    """Without string_ppi_ncbi_taxon_id, string_neighborhood must be NOT_RUN, matching string_cooccurrence."""
+    records = {
+        "query": record("query", old_locus_tag="MA_0001", positive_sources_hit=["A"]),
+        "candidate": record("candidate", old_locus_tag="MA_0002", positive_sources_hit=["A"]),
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+        scoring_model="v2_evidence_based",
+    )
+
+    result = run_interaction_scoring(cfg, classification(records))
+
+    assert result is not None
+    detail = next(
+        r
+        for r in result.evidence_detail_rows
+        if r["candidate_protein_id"] == "candidate" and r["component_name"] == "string_neighborhood"
+    )
+    assert detail["status"] == "NOT_RUN"
+    assert detail["category"] == "genomic_context"
 
 
 def test_interaction_scoring_disabled_returns_none() -> None:
@@ -2018,10 +2107,10 @@ def test_evidence_detail_v2_long_format_has_one_row_per_component() -> None:
         r for r in result.evidence_detail_rows if r["candidate_protein_id"] == "candidate"
     ]
     # source_classification, sequence_evidence, genomic_context, co_occurrence,
-    # domain_complementarity, negative_hit_strength, string_cooccurrence --
-    # always exactly seven, whether AVAILABLE or not (see
-    # _build_evidence_components_v2).
-    assert len(detail_rows) == 7
+    # domain_complementarity, negative_hit_strength, string_cooccurrence,
+    # string_neighborhood -- always exactly eight, whether AVAILABLE or not
+    # (see _build_evidence_components_v2).
+    assert len(detail_rows) == 8
     assert {r["component_name"] for r in detail_rows} == {
         "source_classification",
         "sequence_evidence",
@@ -2030,6 +2119,7 @@ def test_evidence_detail_v2_long_format_has_one_row_per_component() -> None:
         "domain_complementarity",
         "negative_hit_strength",
         "string_cooccurrence",
+        "string_neighborhood",
     }
     for detail_row in detail_rows:
         assert set(detail_row) == set(INTERACTION_EVIDENCE_DETAIL_V2_COLUMNS)
