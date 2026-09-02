@@ -98,6 +98,8 @@ interaction_scoring:
     negative_weak_hit: false
   max_candidates_per_query: 200
   include_sequences_in_excel: false
+  evidence_detail_sheet:
+    include_no_hit: false
   scoring_weights:
     candidate_priority: 30
     gene_neighborhood: 25

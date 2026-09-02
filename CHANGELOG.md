@@ -2,6 +2,37 @@
 
 ProteinHunter_v5 の変更履歴です。
 
+## 未リリース: Interaction_Evidence_Detail シート(スコア内訳の監査用出力)
+
+`interaction_priority_score` がどのエビデンスカテゴリ・コンポーネントに
+支えられているかを、既存のInteraction系シートを変更せずに追加のシートで
+確認できるようにする対応。
+
+### Added
+
+- `analysis/interaction_scoring.py`: 新規シート `Interaction_Evidence_Detail`
+  を追加。`scoring_model: v2_evidence_based` では
+  `ScoreBreakdown.components`(`analysis/scoring_engine.py` で既に保持されて
+  いた各 `EvidenceComponent` の raw_value/normalized_value/weight/status/
+  explanation)を1コンポーネント1行のロング形式で展開。`legacy_additive`
+  では既存の5つの内訳スコア(`candidate_priority_score` 等)と
+  `interaction_score_reasons` を1ペア1行のワイド形式でそのまま射影する
+  (新規計算なし)。対象範囲は既存Interaction系シートに掲載される候補
+  (上位N件切り詰め後)と同一。
+- `config.py`: `InteractionScoringConfig.evidence_detail_sheet`
+  (`InteractionEvidenceDetailConfig.include_no_hit`, デフォルト `false`)を
+  追加。`no_hit`バケツは件数が最も多く、v2ではスコアがタイになりやすいため
+  既定で詳細シートから除外し、必要な場合のみ `include_no_hit: true` で
+  含められるようにした。
+- `output/excel.py`: `_interaction_dataframes` に
+  `Interaction_Evidence_Detail` の書き込みを追加(詳細行が0件の実行では
+  シート自体を作らない)。既存シートの列・内容は無変更。
+- `tests/test_interaction_scoring.py`, `tests/test_excel_output.py`,
+  `tests/test_config_validation.py`: v2のロング形式(1ペア=6コンポーネント)、
+  legacyのワイド形式、`no_hit`既定除外、`include_no_hit: true`時の挙動、
+  複数バケツ混在時のスコープ一致、既存シートへの非破壊性、config検証の
+  テストを追加。
+
 ## 未リリース: sequence_evidence (BLAST hit強度のスコアリング反映)
 
 統合設計書3章・9章の指摘「非常に強いBLAST hitと弱いBLAST hitが、同じpositive hit

@@ -15,8 +15,10 @@ from openpyxl.worksheet.worksheet import Worksheet
 from core.exceptions import ExcelOutputError
 from core.models import BlastHit, ProteinRecord
 from analysis.interaction_scoring import (
+    INTERACTION_EVIDENCE_DETAIL_SHEET,
     INTERACTION_NEIGHBORHOOD_SHEET,
     INTERACTION_QUERY_COLUMNS,
+    interaction_evidence_detail_columns,
     interaction_index_rows,
     interaction_neighborhood_columns,
     interaction_pair_columns,
@@ -361,6 +363,16 @@ def _interaction_dataframes(
     for sheet_name, rows in interaction_result.source_rows.items():
         sheets[sheet_name] = pd.DataFrame(rows, columns=pair_columns)
 
+    evidence_detail_rows = getattr(interaction_result, "evidence_detail_rows", [])
+    if evidence_detail_rows:
+        evidence_detail_scoring_model = getattr(
+            interaction_result, "evidence_detail_scoring_model", "legacy_additive"
+        )
+        sheets[INTERACTION_EVIDENCE_DETAIL_SHEET] = pd.DataFrame(
+            evidence_detail_rows,
+            columns=interaction_evidence_detail_columns(evidence_detail_scoring_model),
+        )
+
     neighborhood_rows = getattr(interaction_result, "neighborhood_rows", [])
     if neighborhood_rows:
         sheets[INTERACTION_NEIGHBORHOOD_SHEET] = pd.DataFrame(
@@ -394,6 +406,7 @@ def _format_worksheet(
         "positive_sources_hit",
         "positive_sources_missing",
         "negative_exclusion_reason",
+        "explanation",
         "Selection rule",
         "Biological interpretation",
         "Recommended use",

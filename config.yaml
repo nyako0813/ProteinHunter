@@ -162,6 +162,14 @@ interaction_scoring:
   max_candidates_per_query: 200
   include_sequences_in_excel: false
 
+  # Scope of the optional Interaction_Evidence_Detail sheet (component-level
+  # breakdown, scoring_model: v2_evidence_based; a per-pair wide projection
+  # of existing columns for legacy_additive). no_hit is excluded by default
+  # because it is usually the largest bucket and, for v2, its ranks/scores
+  # are heavily tied.
+  evidence_detail_sheet:
+    include_no_hit: false
+
   scoring_weights:
     candidate_priority: 30
     gene_neighborhood: 25

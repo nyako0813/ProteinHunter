@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import math
 from pathlib import Path
 import re
@@ -71,6 +71,12 @@ class InteractionScoringResult:
     source_rows: dict[str, list[dict[str, Any]]]
     neighborhood_rows: list[dict[str, Any]]
     warnings: list[str]
+    # Component-level (v2) or per-pair (legacy) breakdown rows for the
+    # optional Interaction_Evidence_Detail sheet. Empty unless
+    # interaction_scoring.evidence_detail_sheet actually produced rows for
+    # at least one enabled candidate source.
+    evidence_detail_rows: list[dict[str, Any]] = field(default_factory=list)
+    evidence_detail_scoring_model: str = "legacy_additive"
 
 
 CANDIDATE_SOURCE_MAP: dict[str, tuple[str, str, str]] = {
@@ -165,6 +171,14 @@ INTERACTION_SHEET_DESCRIPTIONS: dict[str, tuple[str, str, str]] = {
         "summarizes same-contig candidate neighborhoods using GFF coordinates",
         "review local genomic context around interaction queries",
     ),
+    "Interaction_Evidence_Detail": (
+        "evidence breakdown behind interaction_priority_score for the same pairs "
+        "already shown in the Interaction_* sheets (scoring_model: "
+        "v2_evidence_based -> one row per evidence component; legacy_additive "
+        "-> one row per pair, same columns as the main sheets)",
+        "shows exactly which evidence category/component drove a high or low score",
+        "audit why a specific candidate ranked where it did before trusting the score",
+    ),
 }
 
 INTERACTION_QUERY_COLUMNS: tuple[str, ...] = (
@@ -219,6 +233,56 @@ INTERACTION_PAIR_COLUMNS: tuple[str, ...] = (
 )
 
 SEQUENCE_COLUMNS: tuple[str, ...] = ("query_sequence", "candidate_sequence")
+
+INTERACTION_EVIDENCE_DETAIL_SHEET = "Interaction_Evidence_Detail"
+
+#: Long format: one row per (query, candidate, category, component). Only
+#: produced for scoring_model: v2_evidence_based.
+INTERACTION_EVIDENCE_DETAIL_V2_COLUMNS: tuple[str, ...] = (
+    "query_id",
+    "query_protein_id",
+    "query_old_locus_tag",
+    "candidate_protein_id",
+    "candidate_old_locus_tag",
+    "candidate_source",
+    "candidate_rank",
+    "category",
+    "component_name",
+    "status",
+    "raw_value",
+    "normalized_value",
+    "weight",
+    "category_cap",
+    "is_negative",
+    "explanation",
+)
+
+#: Wide format: one row per (query, candidate), projecting the same
+#: breakdown columns already present on scoring_model: legacy_additive rows
+#: in the main Interaction_* sheets (see INTERACTION_PAIR_COLUMNS above).
+INTERACTION_EVIDENCE_DETAIL_LEGACY_COLUMNS: tuple[str, ...] = (
+    "query_id",
+    "query_protein_id",
+    "query_old_locus_tag",
+    "candidate_protein_id",
+    "candidate_old_locus_tag",
+    "candidate_source",
+    "candidate_rank",
+    "candidate_priority_score",
+    "same_gene_neighborhood_score",
+    "co_occurrence_score",
+    "domain_complementarity_score",
+    "alphafold_readiness_score",
+    "interaction_score_reasons",
+)
+
+
+def interaction_evidence_detail_columns(scoring_model: str) -> tuple[str, ...]:
+    """Return Interaction_Evidence_Detail columns for the given scoring model."""
+    if scoring_model == V2_SCORING_MODEL:
+        return INTERACTION_EVIDENCE_DETAIL_V2_COLUMNS
+    return INTERACTION_EVIDENCE_DETAIL_LEGACY_COLUMNS
+
 
 INTERACTION_NEIGHBORHOOD_SHEET = "Interaction_Neighborhood"
 
@@ -340,8 +404,11 @@ def run_interaction_scoring(config: Any, blast_classification: Any) -> Interacti
     ]
     query_rows = [_query_row(query) for query in resolved_queries]
     source_rows: dict[str, list[dict[str, Any]]] = {}
+    evidence_detail_rows: list[dict[str, Any]] = []
 
     scoring_model = getattr(scoring_config, "scoring_model", "legacy_additive")
+    evidence_detail_config = getattr(scoring_config, "evidence_detail_sheet", None)
+    include_no_hit_detail = bool(getattr(evidence_detail_config, "include_no_hit", False))
     engine_config: ScoringEngineConfig | None = None
     ruleset: FunctionalComplementarityRuleset | None = None
     pih_bundle: PihEvidenceBundle | None = None
@@ -371,8 +438,10 @@ def run_interaction_scoring(config: Any, blast_classification: Any) -> Interacti
             warnings.append(f"interaction candidate source has no records: {source_key}")
             continue
 
+        collect_evidence_detail = source_key != "no_hit" or include_no_hit_detail
+
         if scoring_model == V2_SCORING_MODEL:
-            rows = _rank_source_candidates_v2(
+            rows, detail_rows = _rank_source_candidates_v2(
                 resolved_queries=resolved_queries,
                 candidate_records=candidate_records,
                 candidate_source=source_label,
@@ -381,17 +450,20 @@ def run_interaction_scoring(config: Any, blast_classification: Any) -> Interacti
                 engine_config=engine_config,
                 ruleset=ruleset,
                 pih_bundle=pih_bundle,
+                collect_evidence_detail=collect_evidence_detail,
             )
         else:
-            rows = _rank_source_candidates(
+            rows, detail_rows = _rank_source_candidates(
                 resolved_queries=resolved_queries,
                 candidate_records=candidate_records,
                 candidate_source=source_label,
                 scoring_config=scoring_config,
                 feature_map=feature_map,
+                collect_evidence_detail=collect_evidence_detail,
             )
         if rows:
             source_rows[sheet_name] = rows
+            evidence_detail_rows.extend(detail_rows)
         else:
             warnings.append(f"interaction candidate source produced no pairs: {source_key}")
 
@@ -406,6 +478,8 @@ def run_interaction_scoring(config: Any, blast_classification: Any) -> Interacti
         source_rows=source_rows,
         neighborhood_rows=neighborhood_rows,
         warnings=warnings,
+        evidence_detail_rows=evidence_detail_rows,
+        evidence_detail_scoring_model=scoring_model,
     )
 
 
@@ -567,8 +641,16 @@ def _query_row(query: dict[str, Any]) -> dict[str, Any]:
     return {key: query[key] for key in ("query_id", "input_protein_id", "input_old_locus_tag", "resolved_protein_id", "resolved_old_locus_tag", "sequence_length", "resolution_status", "description", "notes")}
 
 
-def _rank_source_candidates(resolved_queries: list[dict[str, Any]], candidate_records: dict[str, ProteinRecord], candidate_source: str, scoring_config: Any, feature_map: dict[str, GffFeatureLocation]) -> list[dict[str, Any]]:
+def _rank_source_candidates(
+    resolved_queries: list[dict[str, Any]],
+    candidate_records: dict[str, ProteinRecord],
+    candidate_source: str,
+    scoring_config: Any,
+    feature_map: dict[str, GffFeatureLocation],
+    collect_evidence_detail: bool = False,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     all_rows: list[dict[str, Any]] = []
+    detail_rows: list[dict[str, Any]] = []
     for query in resolved_queries:
         if query["resolution_status"] != "resolved":
             continue
@@ -582,8 +664,29 @@ def _rank_source_candidates(resolved_queries: list[dict[str, Any]], candidate_re
         for rank, row in enumerate(query_rows[: scoring_config.max_candidates_per_query], start=1):
             row["candidate_rank"] = rank
             all_rows.append(row)
+            if collect_evidence_detail:
+                detail_rows.append(_evidence_detail_row_legacy(row))
     all_rows.sort(key=lambda row: (str(row["query_id"]), int(row["candidate_rank"]), str(row["candidate_protein_id"])))
-    return all_rows
+    return all_rows, detail_rows
+
+
+def _evidence_detail_row_legacy(row: dict[str, Any]) -> dict[str, Any]:
+    """Project one legacy_additive pair row onto Interaction_Evidence_Detail columns."""
+    return {
+        "query_id": row["query_id"],
+        "query_protein_id": row["query_protein_id"],
+        "query_old_locus_tag": row["query_old_locus_tag"],
+        "candidate_protein_id": row["candidate_protein_id"],
+        "candidate_old_locus_tag": row["candidate_old_locus_tag"],
+        "candidate_source": row["candidate_source"],
+        "candidate_rank": row["candidate_rank"],
+        "candidate_priority_score": row["candidate_priority_score"],
+        "same_gene_neighborhood_score": row["same_gene_neighborhood_score"],
+        "co_occurrence_score": row["co_occurrence_score"],
+        "domain_complementarity_score": row["domain_complementarity_score"],
+        "alphafold_readiness_score": row["alphafold_readiness_score"],
+        "interaction_score_reasons": row["interaction_score_reasons"],
+    }
 
 
 def _score_pair(query: dict[str, Any], candidate: ProteinRecord, candidate_source: str, scoring_config: Any, feature_map: dict[str, GffFeatureLocation]) -> dict[str, Any]:
@@ -652,9 +755,11 @@ def _rank_source_candidates_v2(
     engine_config: ScoringEngineConfig,
     ruleset: FunctionalComplementarityRuleset,
     pih_bundle: PihEvidenceBundle | None = None,
-) -> list[dict[str, Any]]:
+    collect_evidence_detail: bool = False,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Evidence-based (scoring model v2) counterpart of _rank_source_candidates."""
     all_rows: list[dict[str, Any]] = []
+    detail_rows: list[dict[str, Any]] = []
     for query in resolved_queries:
         if query["resolution_status"] != "resolved":
             continue
@@ -674,16 +779,49 @@ def _rank_source_candidates_v2(
             tie_precision=engine_config.tie_precision,
         )
         row_by_id = {candidate_id: row for candidate_id, row, _breakdown in pairs}
+        breakdown_by_id = {candidate_id: breakdown for candidate_id, _row, breakdown in pairs}
         for ranked_item in ranked[: scoring_config.max_candidates_per_query]:
             row = row_by_id[ranked_item.candidate_id]
             row["candidate_rank"] = ranked_item.rank if ranked_item.rank is not None else 0
             row["distance_independent_rank"] = row["candidate_rank"]
             all_rows.append(row)
+            if collect_evidence_detail:
+                breakdown = breakdown_by_id[ranked_item.candidate_id]
+                detail_rows.extend(_evidence_detail_rows_v2(row, breakdown, engine_config))
 
     all_rows.sort(
         key=lambda row: (str(row["query_id"]), int(row["candidate_rank"] or 0), str(row["candidate_protein_id"]))
     )
-    return all_rows
+    return all_rows, detail_rows
+
+
+def _evidence_detail_rows_v2(
+    row: dict[str, Any], breakdown: ScoreBreakdown, engine_config: ScoringEngineConfig
+) -> list[dict[str, Any]]:
+    """Expand one v2 pair's ScoreBreakdown into one Interaction_Evidence_Detail row per component."""
+    detail_rows: list[dict[str, Any]] = []
+    for component in breakdown.components:
+        detail_rows.append(
+            {
+                "query_id": row["query_id"],
+                "query_protein_id": row["query_protein_id"],
+                "query_old_locus_tag": row["query_old_locus_tag"],
+                "candidate_protein_id": row["candidate_protein_id"],
+                "candidate_old_locus_tag": row["candidate_old_locus_tag"],
+                "candidate_source": row["candidate_source"],
+                "candidate_rank": row["candidate_rank"],
+                "category": component.category,
+                "component_name": component.name,
+                "status": component.status.value,
+                "raw_value": component.raw_value,
+                "normalized_value": component.normalized_value,
+                "weight": component.weight,
+                "category_cap": engine_config.category_caps.get(component.category),
+                "is_negative": component.is_negative,
+                "explanation": component.explanation,
+            }
+        )
+    return detail_rows
 
 
 def _score_pair_v2(

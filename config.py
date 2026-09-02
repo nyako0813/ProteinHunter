@@ -7,7 +7,7 @@ Author: OpenAI + nyako
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 import multiprocessing
 import yaml
@@ -162,6 +162,20 @@ class InteractionNeighborhoodConfig:
 
 
 @dataclass(frozen=True)
+class InteractionEvidenceDetailConfig:
+    """Scope for the optional Interaction_Evidence_Detail sheet.
+
+    ``no_hit`` is excluded by default: it is typically the largest candidate
+    source and, for scoring model v2, its per-pair ranks/scores are heavily
+    tied (most no_hit candidates share one saturated score), so a
+    component-level breakdown for it adds volume without much analytical
+    value. Set ``include_no_hit: true`` to include it anyway.
+    """
+
+    include_no_hit: bool = False
+
+
+@dataclass(frozen=True)
 class InteractionScoringConfig:
     enabled: bool
     query_proteins: tuple[InteractionQueryConfig, ...]
@@ -182,6 +196,9 @@ class InteractionScoringConfig:
     # imported; this is a plain-file bridge. See
     # analysis/pih_evidence_bridge.py.
     pih_evidence_bundle: Path | None = None
+    evidence_detail_sheet: InteractionEvidenceDetailConfig = field(
+        default_factory=InteractionEvidenceDetailConfig
+    )
 
 
 VALID_INTERACTION_SCORING_MODELS: tuple[str, ...] = ("legacy_additive", "v2_evidence_based")
@@ -300,6 +317,10 @@ INTERACTION_NEIGHBORHOOD_DEFAULT = InteractionNeighborhoodConfig(
     max_rows_per_query=200,
 )
 
+INTERACTION_EVIDENCE_DETAIL_DEFAULT = InteractionEvidenceDetailConfig(
+    include_no_hit=False,
+)
+
 INTERACTION_SCORING_DEFAULT = InteractionScoringConfig(
     enabled=False,
     query_proteins=(),
@@ -310,6 +331,7 @@ INTERACTION_SCORING_DEFAULT = InteractionScoringConfig(
     scoring_weights=INTERACTION_SCORING_WEIGHTS_DEFAULT,
     alphafold=INTERACTION_ALPHAFOLD_DEFAULT,
     neighborhood=INTERACTION_NEIGHBORHOOD_DEFAULT,
+    evidence_detail_sheet=INTERACTION_EVIDENCE_DETAIL_DEFAULT,
 )
 
 
@@ -325,6 +347,7 @@ def _default_interaction_scoring() -> InteractionScoringConfig:
         scoring_weights=INTERACTION_SCORING_WEIGHTS_DEFAULT,
         alphafold=INTERACTION_ALPHAFOLD_DEFAULT,
         neighborhood=INTERACTION_NEIGHBORHOOD_DEFAULT,
+        evidence_detail_sheet=INTERACTION_EVIDENCE_DETAIL_DEFAULT,
     )
 
 
@@ -892,6 +915,22 @@ def _validate_interaction_scoring_section(raw: dict[object, object]) -> None:
             "must be a string path."
         )
 
+    evidence_detail_sheet = section.get("evidence_detail_sheet", {})
+    if evidence_detail_sheet is None:
+        evidence_detail_sheet = {}
+    if not isinstance(evidence_detail_sheet, dict):
+        raise ConfigError(
+            "config.yaml value 'interaction_scoring.evidence_detail_sheet' "
+            "must be a mapping."
+        )
+    include_no_hit = evidence_detail_sheet.get("include_no_hit", False)
+    if not isinstance(include_no_hit, bool):
+        raise ConfigError(
+            "config.yaml value "
+            "'interaction_scoring.evidence_detail_sheet.include_no_hit' "
+            "must be true or false."
+        )
+
 
 def _load_interaction_scoring(raw_scoring: object) -> InteractionScoringConfig:
     """Load optional lightweight interaction scoring settings."""
@@ -993,6 +1032,18 @@ def _load_interaction_scoring(raw_scoring: object) -> InteractionScoringConfig:
         ),
     )
 
+    raw_evidence_detail_sheet = raw_scoring.get("evidence_detail_sheet", {})
+    if not isinstance(raw_evidence_detail_sheet, dict):
+        raw_evidence_detail_sheet = {}
+    evidence_detail_sheet = InteractionEvidenceDetailConfig(
+        include_no_hit=bool(
+            raw_evidence_detail_sheet.get(
+                "include_no_hit",
+                INTERACTION_EVIDENCE_DETAIL_DEFAULT.include_no_hit,
+            )
+        ),
+    )
+
     return InteractionScoringConfig(
         enabled=bool(raw_scoring.get("enabled", False)),
         query_proteins=tuple(query_proteins),
@@ -1011,6 +1062,7 @@ def _load_interaction_scoring(raw_scoring: object) -> InteractionScoringConfig:
             raw_scoring.get("functional_complementarity_ruleset")
         ),
         pih_evidence_bundle=_optional_path(raw_scoring.get("pih_evidence_bundle")),
+        evidence_detail_sheet=evidence_detail_sheet,
     )
 
 

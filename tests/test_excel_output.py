@@ -10,7 +10,12 @@ from openpyxl import load_workbook
 
 from core.exceptions import ExcelOutputError
 from core.models import BlastHit, CandidateScore, DomainHit, ProteinRecord
-from analysis.interaction_scoring import InteractionScoringResult, interaction_pair_columns
+from analysis.interaction_scoring import (
+    INTERACTION_EVIDENCE_DETAIL_LEGACY_COLUMNS,
+    INTERACTION_EVIDENCE_DETAIL_V2_COLUMNS,
+    InteractionScoringResult,
+    interaction_pair_columns,
+)
 from output.excel import (
     EXCEL_COLUMNS,
     INDEX_ROWS,
@@ -624,3 +629,165 @@ def test_index_hyperlinks_point_to_existing_sheets(tmp_path: Path) -> None:
     assert "Interaction_Neighborhood" in sheet_names
     assert workbook["Interaction_Neighborhood"]["A1"].hyperlink.target == "#'Index'!A1"
     assert "Interaction_Positive_all_sources" not in sheet_names
+
+
+def _minimal_pair_row(candidate_protein_id: str = "candidate_1") -> dict:
+    """A minimal but complete Interaction_Candidates-shaped row for Excel tests."""
+    return {
+        "query_id": "query_1",
+        "query_protein_id": "query_1",
+        "query_old_locus_tag": "",
+        "candidate_rank": 1,
+        "candidate_protein_id": candidate_protein_id,
+        "candidate_old_locus_tag": "",
+        "candidate_source": "Candidates",
+        "candidate_description": "candidate",
+        "interaction_priority_score": 42.0,
+        "interaction_score_reasons": "candidate source: Candidates",
+        "candidate_priority_score": 30.0,
+        "same_gene_neighborhood_score": 0.0,
+        "distance_bp": None,
+        "co_occurrence_score": 0.0,
+        "domain_complementarity_score": 0.0,
+        "alphafold_readiness_score": 10.0,
+        "pair_total_length": 20,
+        "alphafold_recommended": True,
+    }
+
+
+def test_classification_workbook_writes_v2_evidence_detail_sheet(tmp_path: Path) -> None:
+    """Interaction_Evidence_Detail should hold one row per component for v2 runs."""
+    output_path = tmp_path / "reports" / "evidence_detail_v2.xlsx"
+    interaction_result = InteractionScoringResult(
+        query_rows=[],
+        source_rows={"Interaction_Candidates": [_minimal_pair_row()]},
+        neighborhood_rows=[],
+        warnings=[],
+        evidence_detail_rows=[
+            {
+                "query_id": "query_1",
+                "query_protein_id": "query_1",
+                "query_old_locus_tag": "",
+                "candidate_protein_id": "candidate_1",
+                "candidate_old_locus_tag": "",
+                "candidate_source": "Candidates",
+                "candidate_rank": 1,
+                "category": "source_classification",
+                "component_name": "source_classification",
+                "status": "AVAILABLE",
+                "raw_value": "Candidates",
+                "normalized_value": 1.0,
+                "weight": 1.0,
+                "category_cap": 30.0,
+                "is_negative": False,
+                "explanation": "candidate source: Candidates",
+            },
+            {
+                "query_id": "query_1",
+                "query_protein_id": "query_1",
+                "query_old_locus_tag": "",
+                "candidate_protein_id": "candidate_1",
+                "candidate_old_locus_tag": "",
+                "candidate_source": "Candidates",
+                "candidate_rank": 1,
+                "category": "genomic_context",
+                "component_name": "genomic_context",
+                "status": "MISSING",
+                "raw_value": None,
+                "normalized_value": None,
+                "weight": 0.0,
+                "category_cap": None,
+                "is_negative": False,
+                "explanation": "no GFF coordinates",
+            },
+        ],
+        evidence_detail_scoring_model="v2_evidence_based",
+    )
+
+    result = write_classification_workbook(
+        candidates={},
+        output_path=output_path,
+        interaction_result=interaction_result,
+    )
+
+    workbook = load_workbook(result)
+    assert "Interaction_Evidence_Detail" in workbook.sheetnames
+    # Existing sheets are unaffected by adding the detail sheet.
+    assert workbook["Interaction_Candidates"].max_row == 3  # back-link + header + 1 row
+
+    detail = pd.read_excel(result, sheet_name="Interaction_Evidence_Detail", header=1)
+    assert list(detail.columns) == list(INTERACTION_EVIDENCE_DETAIL_V2_COLUMNS)
+    assert len(detail) == 2
+    assert set(detail["component_name"]) == {"source_classification", "genomic_context"}
+    source_row = detail[detail["component_name"] == "source_classification"].iloc[0]
+    assert source_row["status"] == "AVAILABLE"
+    assert source_row["category_cap"] == 30.0
+
+    index_values = [cell.value for cell in workbook["Index"]["A"]]
+    assert "Interaction_Evidence_Detail" in index_values
+    assert workbook["Interaction_Evidence_Detail"]["A1"].hyperlink.target == "#'Index'!A1"
+
+
+def test_classification_workbook_writes_legacy_evidence_detail_sheet(tmp_path: Path) -> None:
+    """Interaction_Evidence_Detail should be a wide, one-row-per-pair projection for legacy runs."""
+    output_path = tmp_path / "reports" / "evidence_detail_legacy.xlsx"
+    interaction_result = InteractionScoringResult(
+        query_rows=[],
+        source_rows={"Interaction_Candidates": [_minimal_pair_row()]},
+        neighborhood_rows=[],
+        warnings=[],
+        evidence_detail_rows=[
+            {
+                "query_id": "query_1",
+                "query_protein_id": "query_1",
+                "query_old_locus_tag": "",
+                "candidate_protein_id": "candidate_1",
+                "candidate_old_locus_tag": "",
+                "candidate_source": "Candidates",
+                "candidate_rank": 1,
+                "candidate_priority_score": 30.0,
+                "same_gene_neighborhood_score": 0.0,
+                "co_occurrence_score": 0.0,
+                "domain_complementarity_score": 0.0,
+                "alphafold_readiness_score": 10.0,
+                "interaction_score_reasons": "candidate source: Candidates",
+            }
+        ],
+        evidence_detail_scoring_model="legacy_additive",
+    )
+
+    result = write_classification_workbook(
+        candidates={},
+        output_path=output_path,
+        interaction_result=interaction_result,
+    )
+
+    workbook = load_workbook(result)
+    assert "Interaction_Evidence_Detail" in workbook.sheetnames
+    detail = pd.read_excel(result, sheet_name="Interaction_Evidence_Detail", header=1)
+    assert list(detail.columns) == list(INTERACTION_EVIDENCE_DETAIL_LEGACY_COLUMNS)
+    assert len(detail) == 1
+    assert detail.iloc[0]["candidate_priority_score"] == 30.0
+
+
+def test_classification_workbook_omits_evidence_detail_sheet_when_empty(tmp_path: Path) -> None:
+    """No Interaction_Evidence_Detail sheet should be written when there are no detail rows."""
+    output_path = tmp_path / "reports" / "evidence_detail_empty.xlsx"
+    interaction_result = InteractionScoringResult(
+        query_rows=[],
+        source_rows={"Interaction_Candidates": [_minimal_pair_row()]},
+        neighborhood_rows=[],
+        warnings=[],
+    )
+
+    result = write_classification_workbook(
+        candidates={},
+        output_path=output_path,
+        interaction_result=interaction_result,
+    )
+
+    workbook = load_workbook(result)
+    assert "Interaction_Evidence_Detail" not in workbook.sheetnames
+    assert "Interaction_Evidence_Detail" not in [cell.value for cell in workbook["Index"]["A"]]
+    # Existing sheets are still written normally.
+    assert "Interaction_Candidates" in workbook.sheetnames
