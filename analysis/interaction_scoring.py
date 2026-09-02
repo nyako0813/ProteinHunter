@@ -11,8 +11,9 @@ from typing import Any
 from annotation.gff import GffFeatureLocation, load_gff_feature_map
 from core.evidence import EvidenceComponent, EvidenceStatus, linear_normalize
 from core.fasta import read_fasta_as_components
-from core.models import ProteinRecord
+from core.models import CandidateScore, ProteinRecord
 from analysis.candidates import get_best_hit
+from analysis.scoring import build_candidate_score
 from analysis.functional_complementarity_rules import (
     FunctionalComplementarityRuleset,
     load_functional_complementarity_ruleset,
@@ -483,6 +484,47 @@ def run_interaction_scoring(config: Any, blast_classification: Any) -> Interacti
     )
 
 
+def _interaction_scoring_target_records(
+    scoring_config: Any, blast_classification: Any
+) -> dict[str, ProteinRecord]:
+    """Return the de-duplicated union of every record interaction_scoring touches.
+
+    Shared target-set resolution for both CDD annotation scope
+    (``resolve_cdd_annotation_targets``) and protein_hunter_score scope
+    (``resolve_protein_hunter_scores``): both need "every record reachable
+    through an enabled ``candidate_sources`` bucket, plus every resolved
+    query record." Returns an empty dict when ``scoring_config.enabled`` is
+    false.
+    """
+    if not scoring_config.enabled:
+        return {}
+
+    targets: dict[str, ProteinRecord] = {}
+
+    for source_key, enabled in scoring_config.candidate_sources.items():
+        if not enabled:
+            continue
+        source_info = CANDIDATE_SOURCE_MAP.get(source_key)
+        if source_info is None:
+            continue
+        _source_label, attr_name, _sheet_name = source_info
+        candidate_records = getattr(blast_classification, attr_name, None)
+        if not candidate_records:
+            continue
+        for protein_id, record in candidate_records.items():
+            targets.setdefault(protein_id, record)
+
+    discarded_warnings: list[str] = []
+    queries = _load_query_specs(scoring_config, discarded_warnings)
+    for index, query in enumerate(queries, start=1):
+        resolved = _resolve_query(query, index, blast_classification.all_records)
+        record = resolved.get("record")
+        if record is not None:
+            targets.setdefault(record.protein_id, record)
+
+    return targets
+
+
 def resolve_cdd_annotation_targets(
     config: Any, blast_classification: Any
 ) -> dict[str, ProteinRecord]:
@@ -511,34 +553,37 @@ def resolve_cdd_annotation_targets(
     merge this into ``positive_only_records`` itself, which is always
     CDD-annotated regardless of interaction_scoring.
     """
+    return _interaction_scoring_target_records(config.interaction_scoring, blast_classification)
+
+
+def resolve_protein_hunter_scores(
+    config: Any, blast_classification: Any
+) -> dict[str, CandidateScore]:
+    """Return protein_hunter_score for every record interaction_scoring touches.
+
+    ``analysis/scoring.py::score_records`` (the "Candidate scoring" pipeline
+    step) only ever scores ``positive_only_records`` ("Candidates"), so any
+    interaction_scoring candidate source beyond that bucket -- Candidates_relaxed,
+    No_hit, etc. -- previously had no protein_hunter_score at all (Excel showed
+    a misleading ``total_score`` of 0, indistinguishable from "scored, and
+    scored zero"). This reuses the same target-set logic as
+    ``resolve_cdd_annotation_targets`` (see the design-spec section 22
+    protein_hunter_score/interaction_score split) and scores every one of
+    them with the exact same query-independent formula
+    (``analysis/scoring.py::build_candidate_score``, unmodified).
+
+    Deliberately does not mutate ``ProteinRecord.score``: those ProteinRecord
+    objects are shared with the plain classification sheets (Candidates_relaxed,
+    No_hit, ...), which must keep showing exactly what they showed before --
+    only interaction_scoring's own reference columns should reflect this
+    wider scope. Returns an empty dict when ``interaction_scoring.enabled``
+    is false.
+    """
     scoring_config = config.interaction_scoring
-    if not scoring_config.enabled:
-        return {}
-
-    targets: dict[str, ProteinRecord] = {}
-
-    for source_key, enabled in scoring_config.candidate_sources.items():
-        if not enabled:
-            continue
-        source_info = CANDIDATE_SOURCE_MAP.get(source_key)
-        if source_info is None:
-            continue
-        _source_label, attr_name, _sheet_name = source_info
-        candidate_records = getattr(blast_classification, attr_name, None)
-        if not candidate_records:
-            continue
-        for protein_id, record in candidate_records.items():
-            targets.setdefault(protein_id, record)
-
-    discarded_warnings: list[str] = []
-    queries = _load_query_specs(scoring_config, discarded_warnings)
-    for index, query in enumerate(queries, start=1):
-        resolved = _resolve_query(query, index, blast_classification.all_records)
-        record = resolved.get("record")
-        if record is not None:
-            targets.setdefault(record.protein_id, record)
-
-    return targets
+    targets = _interaction_scoring_target_records(scoring_config, blast_classification)
+    return {
+        protein_id: build_candidate_score(record) for protein_id, record in targets.items()
+    }
 
 
 def interaction_neighborhood_columns() -> tuple[str, ...]:

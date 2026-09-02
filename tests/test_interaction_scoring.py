@@ -22,8 +22,10 @@ from analysis.interaction_scoring import (
     INTERACTION_EVIDENCE_DETAIL_V2_COLUMNS,
     interaction_pair_columns,
     resolve_cdd_annotation_targets,
+    resolve_protein_hunter_scores,
     run_interaction_scoring,
 )
+from analysis.scoring import build_candidate_score
 
 
 def interaction_config(
@@ -239,6 +241,75 @@ def test_resolve_cdd_annotation_targets_deduplicates_query_already_in_a_bucket()
     targets = resolve_cdd_annotation_targets(cfg, cls)
 
     assert set(targets) == {"shared_protein"}
+
+
+# ---------------------------------------------------------------------------
+# resolve_protein_hunter_scores tests (M1: protein_hunter_score scope extension)
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_protein_hunter_scores_empty_when_disabled() -> None:
+    """Disabled interaction_scoring must not compute any protein_hunter_score."""
+    cfg = interaction_config(enabled=False)
+    cls = build_classification()
+
+    assert resolve_protein_hunter_scores(cfg, cls) == {}
+
+
+def test_resolve_protein_hunter_scores_covers_non_candidates_buckets() -> None:
+    """Candidates_relaxed/No_hit records (never scored by the Candidate scoring
+    step, which only ever touches positive_only_records) must get a score too."""
+    relaxed_only = record("relaxed_only")
+    no_hit_only = record("no_hit_only")
+    cls = build_classification(
+        all_records={"relaxed_only": relaxed_only, "no_hit_only": no_hit_only},
+        candidates_relaxed_records={"relaxed_only": relaxed_only},
+        no_hit_records={"no_hit_only": no_hit_only},
+    )
+    sources = all_sources_disabled()
+    sources["candidates_relaxed"] = True
+    sources["no_hit"] = True
+    cfg = interaction_config(enabled=True, candidate_sources=sources)
+
+    scores = resolve_protein_hunter_scores(cfg, cls)
+
+    assert set(scores) == {"relaxed_only", "no_hit_only"}
+    assert scores["relaxed_only"].protein_id == "relaxed_only"
+
+
+def test_resolve_protein_hunter_scores_matches_build_candidate_score() -> None:
+    """The computed score must match build_candidate_score's own formula exactly."""
+    candidate_a = record("candidate_a", positive_sources_hit=["A"])
+    cls = build_classification(
+        all_records={"candidate_a": candidate_a},
+        positive_only_records={"candidate_a": candidate_a},
+    )
+    sources = all_sources_disabled()
+    sources["candidates"] = True
+    cfg = interaction_config(enabled=True, candidate_sources=sources)
+
+    scores = resolve_protein_hunter_scores(cfg, cls)
+
+    expected = build_candidate_score(candidate_a)
+    assert scores["candidate_a"].total_score == expected.total_score
+    assert scores["candidate_a"].components == expected.components
+
+
+def test_resolve_protein_hunter_scores_does_not_mutate_shared_records() -> None:
+    """Scoring here must not leak into ProteinRecord.score on shared objects --
+    Candidates_relaxed/No_hit classification sheets must stay unaffected."""
+    relaxed_only = record("relaxed_only")
+    cls = build_classification(
+        all_records={"relaxed_only": relaxed_only},
+        candidates_relaxed_records={"relaxed_only": relaxed_only},
+    )
+    sources = all_sources_disabled()
+    sources["candidates_relaxed"] = True
+    cfg = interaction_config(enabled=True, candidate_sources=sources)
+
+    resolve_protein_hunter_scores(cfg, cls)
+
+    assert relaxed_only.score is None
 
 
 def test_interaction_scoring_disabled_returns_none() -> None:

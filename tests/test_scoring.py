@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
-from analysis.scoring import get_sorted_records, score_record, score_records
+from analysis.scoring import (
+    build_candidate_score,
+    get_sorted_records,
+    score_record,
+    score_records,
+)
 from core.models import BlastHit, DomainHit, ProteinRecord
 
 
@@ -174,3 +179,44 @@ def test_get_sorted_records_sorts_by_total_score() -> None:
         "middle",
         "high",
     ]
+
+
+def test_build_candidate_score_does_not_mutate_record() -> None:
+    """build_candidate_score must compute a score without touching record.score."""
+    record = ProteinRecord(
+        protein_id="protein_1",
+        positive_hits=[make_hit()],
+        domains=[make_domain()],
+    )
+
+    score = build_candidate_score(record)
+
+    assert record.score is None
+    assert score.protein_id == "protein_1"
+    assert score.components["positive_hit"] == 5.0
+    assert score.components["domain_hit"] == 4.0
+    assert score.components["no_negative_hit"] == 5.0
+    assert score.total_score == 14.0
+
+
+def test_build_candidate_score_matches_score_record() -> None:
+    """build_candidate_score and score_record must produce the same score."""
+    record_a = ProteinRecord(
+        protein_id="protein_1",
+        positive_hits=[make_hit()],
+        negative_hits=[make_hit(subject_id="negative")],
+        uniprot_accession="P12345",
+    )
+    record_b = ProteinRecord(
+        protein_id="protein_1",
+        positive_hits=[make_hit()],
+        negative_hits=[make_hit(subject_id="negative")],
+        uniprot_accession="P12345",
+    )
+
+    standalone_score = build_candidate_score(record_a)
+    score_record(record_b)
+
+    assert record_a.score is None
+    assert standalone_score.total_score == record_b.score.total_score
+    assert standalone_score.components == record_b.score.components
