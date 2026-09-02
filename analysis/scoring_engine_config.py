@@ -95,6 +95,14 @@ class ScoringEngineConfig:
 #: because a category with no available evidence contributes nothing and
 #: is excluded from the score denominator. Values must match
 #: analysis.pih_evidence_bridge.BRIDGED_PIH_CATEGORY_CAPS.
+#:
+#: "external_ppi_evidence" (Phase 6a, analysis/string_ppi_bridge.py) is a
+#: PROVISIONAL cap awaiting AlphaFold3 calibration data -- 15.0 was picked
+#: as a mid-sized budget (between pih_evolutionary's 10 and
+#: pih_direct_interaction's 20), not derived from any fit. Same
+#: "present but inactive unless configured" behavior as the pih_* caps:
+#: interaction_scoring.string_ppi_ncbi_taxon_id must be set for this
+#: category to ever have available evidence.
 DEFAULT_CATEGORY_CAPS: dict[str, float] = {
     "source_classification": 30.0,
     "genomic_context": 25.0,
@@ -102,6 +110,7 @@ DEFAULT_CATEGORY_CAPS: dict[str, float] = {
     "pih_cellular_compatibility": 5.0,
     "pih_evolutionary": 10.0,
     "pih_direct_interaction": 20.0,
+    "external_ppi_evidence": 15.0,
 }
 
 DEFAULT_SCORING_ENGINE_CONFIG = ScoringEngineConfig(

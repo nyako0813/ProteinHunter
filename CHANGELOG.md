@@ -2,6 +2,70 @@
 
 ProteinHunter_v5 の変更履歴です。
 
+## 未リリース: STRING PPI証拠の統合(Phase 6a)
+
+外部知識ベース(STRING)由来の証拠を`interaction_score`に追加する対応。
+実装前にSTRING API/一括ダウンロードファイル/公開GEOデータを実際に調査し、
+その結果を`claude/phase6_external_evidence_design.md`に記録した上で
+段階実装(M1〜M5)した。詳細は同ドキュメント参照。
+
+### Added
+
+- `analysis/string_ppi_bridge.py`: STRINGの種別一括ダウンロードファイル
+  (`protein.links.detailed`/`protein.info`)を取得・ローカルキャッシュし、
+  クエリ単位で`core/cache.py::JsonCache`(名前空間`string_ppi`)に結果を
+  保存するブリッジを新設。未キャッシュの生物種向けライブAPIフォールバック
+  (`interaction_partners`、`caller_identity`はアプリ名、呼び出し間隔1秒)
+  も実装。ネットワーク障害時は例外を投げず空の証拠として扱う(PIH bridge
+  と同じ「外部証拠は失敗してもローカル実行を止めない」方針)。
+- `analysis/interaction_scoring.py`:
+  - v2: 新カテゴリ`external_ppi_evidence`(暫定cap 15点)と
+    `string_cooccurrence`コンポーネント(STRINGの`cooccurrence`チャンネル)。
+    `string_neighborhood`(`neighborhood`チャンネル)は既存の
+    `genomic_context`カテゴリのcapを共有する第2コンポーネントとして追加。
+    いずれも`interaction_score`に算入(`INTERACTION_SCORE_COMPONENT_NAMES`
+    に追加)。
+  - legacy: 単一の`string_ppi_score`(cooccurrence+neighborhoodの平均、
+    新設`scoring_weights.external_ppi`で正規化)を`interaction_priority_score`
+    と`interaction_score`双方に算入。STRING未設定時は既存runの結果を一切
+    変えないよう、分母への算入もSTRING有効時のみに限定。
+- `config.py`: `interaction_scoring.string_ppi_ncbi_taxon_id`(既定unset=
+  無効)。**種レベルのNCBI taxidではなく、STRING独自の株レベルtaxidが
+  必要**(この生物種の場合、種レベル2214ではなく株レベル188937)。
+- `analysis/scoring_engine_config.py` + `config/scoring_engine.example.yaml`:
+  `DEFAULT_CATEGORY_CAPS`に`external_ppi_evidence: 15.0`(暫定値)を追加。
+- MISSING(STRINGがそのタンパク質のデータを一切持たない)と
+  evaluated-zero(両者ともSTRING既知だがこのペアの行が一括ファイルに
+  存在しない→計算済みでスコア0とみなす)を区別。
+- `output/excel.py`: IndexシートにSTRINGの列説明とCC BY 4.0クレジット表記
+  を追加。
+- 実データ検証(M_acetivorans、MA_4115、v2_evidence_based、taxid 188937):
+  実際にSTRING一括ファイルをダウンロード・パースし、AlphaFold3校正20件
+  (Interaction系シート掲載分)全てがSTRINGに既知(MISSING無し)である
+  ことを確認。うち16件(No_hitバケツの4件はEvidence_Detail既定除外のため
+  未確認)でSTRING証拠は概ねゼロだったが、4件(MA_1978/MA_1447/MA_0545/
+  MA_0164)では非ゼロのSTRING証拠により`interaction_score`が0から
+  3.9〜11.75へ上昇。当初の焦点だったMA_0050/MA_0238はSTRING証拠も
+  ゼロのままで`interaction_score=0`を維持(悪化なし、想定通り)。
+  STRINGを有効化すると、たとえ証拠がゼロでも「評価済みカテゴリ」として
+  分母(total_cap)に算入されるため、`interaction_priority_score`は
+  STRING既知の全候補でわずかに変動する(例: MA_0050は38.786→32.322)。
+  これは設計通りの挙動であり、STRINGを有効化する際の既知の影響として
+  記録しておく。
+- テスト34件追加(`tests/test_string_ppi_bridge.py`新設、
+  `tests/test_interaction_scoring.py`, `tests/test_config_validation.py`,
+  `tests/test_exceptions.py`, `tests/test_excel_output.py`,
+  `tests/test_scoring_engine_config.py`)。
+
+### Notes
+
+- 当初計画していた「STRINGのfusion evidenceチャンネルでRosetta Stone法を
+  代替する」方針は撤回。実データ調査でこの生物種のfusion証拠が0%だった
+  ため(`claude/phase6_external_evidence_design.md`参照)。機能がよく
+  分かった別のクエリを扱う際に改めて検討する。
+- 公開共発現データ(GEO、M. acetivorans C2A株、最大82サンプル)は
+  Phase 6bとして別途対応予定。今回は未実装。
+
 ## 未リリース: protein_hunter_score / interaction_score の分離(design spec 22章)
 
 `Interaction_Evidence_Detail`シート(直前の変更)を使ったAlphaFold3校正データ

@@ -146,6 +146,10 @@ class InteractionScoringWeightsConfig:
     co_occurrence: float
     domain_complementarity: float
     alphafold_readiness: float
+    # legacy_additive counterpart of v2's external_ppi_evidence category
+    # cap (Phase 6a M4, analysis/scoring_engine_config.py::DEFAULT_CATEGORY_CAPS).
+    # Same provisional value (15.0), not derived from a fit.
+    external_ppi: float = 15.0
 
 
 @dataclass(frozen=True)
@@ -208,6 +212,17 @@ class InteractionScoringConfig:
     # their original values and meaning either way -- only candidate_rank
     # and row order change.
     ranking_metric: str = "interaction_priority_score"
+    # NCBI taxonomy id for STRING (string-db.org) PPI evidence
+    # (scoring_model: v2_evidence_based only; Phase 6a, see
+    # claude/phase6_external_evidence_design.md). Must be STRING's own
+    # taxid for the exact strain, which is not always the species-level
+    # NCBI taxid -- e.g. M. acetivorans's species taxid 2214 returns
+    # nothing from STRING; the strain-level taxid 188937 ("... C2A") is
+    # what actually has data. Leave unset (None) to disable STRING
+    # evidence entirely -- every pair is then MISSING for the
+    # external_ppi_evidence category and genomic_context's
+    # string_neighborhood component.
+    string_ppi_ncbi_taxon_id: int | None = None
 
 
 VALID_INTERACTION_SCORING_MODELS: tuple[str, ...] = ("legacy_additive", "v2_evidence_based")
@@ -842,6 +857,7 @@ def _validate_interaction_scoring_section(raw: dict[object, object]) -> None:
         "co_occurrence",
         "domain_complementarity",
         "alphafold_readiness",
+        "external_ppi",
     ):
         if key not in scoring_weights:
             continue
@@ -954,6 +970,13 @@ def _validate_interaction_scoring_section(raw: dict[object, object]) -> None:
             f"one of {VALID_INTERACTION_RANKING_METRICS}, got {ranking_metric!r}."
         )
 
+    string_ppi_ncbi_taxon_id = section.get("string_ppi_ncbi_taxon_id")
+    if string_ppi_ncbi_taxon_id is not None and not _is_positive_int(string_ppi_ncbi_taxon_id):
+        raise ConfigError(
+            "config.yaml value 'interaction_scoring.string_ppi_ncbi_taxon_id' "
+            "must be a positive integer or left unset."
+        )
+
 
 def _load_interaction_scoring(raw_scoring: object) -> InteractionScoringConfig:
     """Load optional lightweight interaction scoring settings."""
@@ -1014,6 +1037,12 @@ def _load_interaction_scoring(raw_scoring: object) -> InteractionScoringConfig:
             raw_weights.get(
                 "alphafold_readiness",
                 INTERACTION_SCORING_WEIGHTS_DEFAULT.alphafold_readiness,
+            )
+        ),
+        external_ppi=float(
+            raw_weights.get(
+                "external_ppi",
+                INTERACTION_SCORING_WEIGHTS_DEFAULT.external_ppi,
             )
         ),
     )
@@ -1088,6 +1117,11 @@ def _load_interaction_scoring(raw_scoring: object) -> InteractionScoringConfig:
         evidence_detail_sheet=evidence_detail_sheet,
         ranking_metric=str(
             raw_scoring.get("ranking_metric", "interaction_priority_score")
+        ),
+        string_ppi_ncbi_taxon_id=(
+            int(raw_scoring["string_ppi_ncbi_taxon_id"])
+            if raw_scoring.get("string_ppi_ncbi_taxon_id") is not None
+            else None
         ),
     )
 

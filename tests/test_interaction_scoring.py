@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import gzip
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 from config import (
     INTERACTION_ALPHAFOLD_DEFAULT,
@@ -27,6 +30,7 @@ from analysis.interaction_scoring import (
     run_interaction_scoring,
 )
 from analysis.scoring import build_candidate_score
+from analysis.string_ppi_bridge import STRING_VERSION
 
 
 def interaction_config(
@@ -44,10 +48,11 @@ def interaction_config(
     functional_complementarity_ruleset: Path | None = None,
     pih_evidence_bundle: Path | None = None,
     evidence_detail_sheet: InteractionEvidenceDetailConfig = INTERACTION_EVIDENCE_DETAIL_DEFAULT,
+    cache_dir: Path | None = None,
 ) -> SimpleNamespace:
     """Build a minimal app config for interaction scoring tests."""
     return SimpleNamespace(
-        paths=SimpleNamespace(gff_file=gff_file),
+        paths=SimpleNamespace(gff_file=gff_file, cache_dir=cache_dir),
         interaction_scoring=InteractionScoringConfig(
             enabled=enabled,
             query_proteins=query_proteins,
@@ -571,6 +576,74 @@ def test_legacy_mode_leaves_interaction_evidence_tier_blank() -> None:
     assert row.get("interaction_evidence_tier") is None
 
 
+def test_legacy_string_ppi_score_feeds_both_scores(tmp_path: Path) -> None:
+    """legacy_additive's string_ppi_score (Phase 6a M4) contributes to both
+    interaction_priority_score and interaction_score once STRING is configured."""
+    records = {
+        "query": record("query", old_locus_tag="MA_0001", description="", positive_sources_hit=[]),
+        "candidate": record(
+            "candidate", old_locus_tag="MA_0002", description="", positive_sources_hit=[]
+        ),
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+    _seed_string_files(tmp_path, 188937, ["188937.MA_0001 188937.MA_0002 0 0 600 0 0 0 0 600"])
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+        cache_dir=tmp_path,
+    )
+    cfg.interaction_scoring = replace(cfg.interaction_scoring, string_ppi_ncbi_taxon_id=188937)
+
+    result = run_interaction_scoring(cfg, classification(records))
+
+    assert result is not None
+    row = result.source_rows["Interaction_Candidates"][0]
+    # cooccurrence=600, neighborhood=0 (not seeded) -> average 0.3, scaled
+    # by the default external_ppi weight (15) -> 4.5.
+    assert row["string_ppi_score"] == pytest.approx(4.5)
+    assert row["interaction_priority_score"] == pytest.approx(
+        row["candidate_priority_score"]
+        + row["same_gene_neighborhood_score"]
+        + row["co_occurrence_score"]
+        + row["domain_complementarity_score"]
+        + row["alphafold_readiness_score"]
+        + row["string_ppi_score"]
+    )
+    # No GFF neighborhood, no domain match -> string_ppi_score (4.5) is the
+    # entire interaction_score numerator, over (25 + 15 + 15) = 55 points
+    # (gene_neighborhood + domain_complementarity + external_ppi, all
+    # active once STRING is configured).
+    assert row["interaction_score"] == pytest.approx(4.5 / 55.0 * 100, abs=0.01)
+
+
+def test_legacy_string_ppi_score_absent_when_taxon_id_unset() -> None:
+    """Without string_ppi_ncbi_taxon_id, string_ppi_score must be 0 and the
+    interaction_score denominator must NOT include external_ppi -- otherwise
+    every existing legacy_additive run would silently change once this
+    field exists at all."""
+    records = {
+        "query": record("query", description="radical SAM protein", positive_sources_hit=["A"]),
+        "candidate": record(
+            "candidate", description="iron-sulfur carrier protein", positive_sources_hit=["A"]
+        ),
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+    )
+
+    result = run_interaction_scoring(cfg, classification(records))
+
+    assert result is not None
+    row = result.source_rows["Interaction_Candidates"][0]
+    assert row["string_ppi_score"] == 0.0
+    # Same formula as before Phase 6a M4: (0 + 15) / (25 + 15) * 100.
+    assert row["interaction_score"] == pytest.approx((0.0 + 15.0) / 40.0 * 100, abs=0.01)
+
+
 # ---------------------------------------------------------------------------
 # ranking_metric (M5): candidate_rank/row order can be driven by
 # interaction_score instead of interaction_priority_score
@@ -742,6 +815,254 @@ def test_ranking_metric_interaction_score_flips_order_legacy(tmp_path: Path) -> 
         assert (
             default_rows[candidate_id]["interaction_score"] == reranked_rows[candidate_id]["interaction_score"]
         )
+
+
+# ---------------------------------------------------------------------------
+# STRING PPI evidence: external_ppi_evidence / string_cooccurrence (Phase 6a M2)
+# ---------------------------------------------------------------------------
+
+
+def _write_gzip(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with gzip.open(path, "wt", encoding="utf-8") as handle:
+        handle.write(content)
+
+
+def _seed_string_files(cache_dir: Path, taxon_id: int, links_rows: list[str]) -> None:
+    """Write minimal local STRING bulk files, as if already downloaded once."""
+    string_dir = cache_dir / "string_ppi_network"
+    header = (
+        "protein1 protein2 neighborhood fusion cooccurence coexpression "
+        "experimental database textmining combined_score\n"
+    )
+    _write_gzip(
+        string_dir / f"{taxon_id}.protein.links.detailed.v{STRING_VERSION}.txt.gz",
+        header + "\n".join(links_rows) + "\n",
+    )
+    known_tags = {
+        tag
+        for row in links_rows
+        for tag in (row.split(" ")[0].split(".", 1)[1], row.split(" ")[1].split(".", 1)[1])
+    }
+    info_rows = "\n".join(f"{taxon_id}.{tag}\t{tag}\t100\tsome protein" for tag in known_tags)
+    _write_gzip(
+        string_dir / f"{taxon_id}.protein.info.v{STRING_VERSION}.txt.gz",
+        "#string_protein_id\tpreferred_name\tprotein_size\tannotation\n" + info_rows + "\n",
+    )
+
+
+def test_string_evidence_not_run_when_taxon_id_unset(tmp_path: Path) -> None:
+    """Without string_ppi_ncbi_taxon_id, string_cooccurrence must be NOT_RUN, not MISSING."""
+    records = {
+        "query": record("query", old_locus_tag="MA_0001", positive_sources_hit=["A"]),
+        "candidate": record("candidate", old_locus_tag="MA_0002", positive_sources_hit=["A"]),
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+        scoring_model="v2_evidence_based",
+        evidence_detail_sheet=INTERACTION_EVIDENCE_DETAIL_DEFAULT,
+    )
+
+    result = run_interaction_scoring(cfg, classification(records))
+
+    assert result is not None
+    detail = next(
+        r
+        for r in result.evidence_detail_rows
+        if r["candidate_protein_id"] == "candidate" and r["component_name"] == "string_cooccurrence"
+    )
+    assert detail["status"] == "NOT_RUN"
+
+
+def test_string_evidence_missing_for_unmapped_protein(tmp_path: Path) -> None:
+    """A candidate with no old_locus_tag can never be found in STRING -- MISSING."""
+    records = {
+        "query": record("query", old_locus_tag="MA_0001", positive_sources_hit=["A"]),
+        "candidate": record("candidate", old_locus_tag="", positive_sources_hit=["A"]),
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+    _seed_string_files(tmp_path, 188937, [f"188937.MA_0001 188937.MA_9999 0 0 500 0 0 0 0 500"])
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+        scoring_model="v2_evidence_based",
+        cache_dir=tmp_path,
+    )
+    cfg.interaction_scoring = replace(cfg.interaction_scoring, string_ppi_ncbi_taxon_id=188937)
+
+    result = run_interaction_scoring(cfg, classification(records))
+
+    assert result is not None
+    detail = next(
+        r
+        for r in result.evidence_detail_rows
+        if r["candidate_protein_id"] == "candidate" and r["component_name"] == "string_cooccurrence"
+    )
+    assert detail["status"] == "MISSING"
+
+
+def test_string_cooccurrence_available_and_feeds_interaction_score(tmp_path: Path) -> None:
+    """A real STRING match should be AVAILABLE and count toward both scores."""
+    records = {
+        "query": record("query", old_locus_tag="MA_0001", description="", positive_sources_hit=["A"]),
+        "candidate": record(
+            "candidate", old_locus_tag="MA_0002", description="", positive_sources_hit=["A"]
+        ),
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+    _seed_string_files(tmp_path, 188937, ["188937.MA_0001 188937.MA_0002 0 0 800 0 0 0 0 800"])
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+        scoring_model="v2_evidence_based",
+        cache_dir=tmp_path,
+    )
+    cfg.interaction_scoring = replace(cfg.interaction_scoring, string_ppi_ncbi_taxon_id=188937)
+
+    result = run_interaction_scoring(cfg, classification(records))
+
+    assert result is not None
+    row = result.source_rows["Interaction_Candidates"][0]
+    detail = next(
+        r
+        for r in result.evidence_detail_rows
+        if r["candidate_protein_id"] == "candidate" and r["component_name"] == "string_cooccurrence"
+    )
+    assert detail["status"] == "AVAILABLE"
+    assert detail["normalized_value"] == pytest.approx(0.8)
+    assert detail["raw_value"] == pytest.approx(800.0)
+    assert detail["category"] == "external_ppi_evidence"
+    assert detail["category_cap"] == 15.0
+
+    # domain_complementarity is MISSING (empty description both sides), so
+    # functional_annotation stays inactive. genomic_context has no GFF
+    # evidence of its own, but string_neighborhood (same seeded row,
+    # neighborhood=0) makes the category active at zero -- so the total
+    # cap is external_ppi_evidence(15) + genomic_context(25) = 40, with
+    # only the string_cooccurrence contribution (0.8*15=12) as raw score.
+    assert row["interaction_score"] == pytest.approx(12.0 / 40.0 * 100, abs=0.01)
+    assert row["interaction_score"] > 0
+
+
+def test_string_evidence_reuses_cache_across_runs(tmp_path: Path) -> None:
+    """A second run for the same query/species must not need to rescan the bulk file."""
+    records = {
+        "query": record("query", old_locus_tag="MA_0001", positive_sources_hit=["A"]),
+        "candidate": record("candidate", old_locus_tag="MA_0002", positive_sources_hit=["A"]),
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+    _seed_string_files(tmp_path, 188937, ["188937.MA_0001 188937.MA_0002 0 0 800 0 0 0 0 800"])
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+        scoring_model="v2_evidence_based",
+        cache_dir=tmp_path,
+    )
+    cfg.interaction_scoring = replace(cfg.interaction_scoring, string_ppi_ncbi_taxon_id=188937)
+
+    run_interaction_scoring(cfg, classification(records))
+
+    # Remove the (potentially huge) links file -- the second run must still work from cache.
+    string_dir = tmp_path / "string_ppi_network"
+    (string_dir / f"188937.protein.links.detailed.v{STRING_VERSION}.txt.gz").unlink()
+
+    result = run_interaction_scoring(cfg, classification(records))
+
+    assert result is not None
+    row = result.source_rows["Interaction_Candidates"][0]
+    assert row["interaction_score"] > 0
+
+
+# ---------------------------------------------------------------------------
+# string_neighborhood: shares genomic_context's category (Phase 6a M3)
+# ---------------------------------------------------------------------------
+
+
+def test_string_neighborhood_shares_genomic_context_category(tmp_path: Path) -> None:
+    """string_neighborhood must appear under genomic_context and combine with the GFF-based component."""
+    gff_file = tmp_path / "genome.gff"
+    gff_file.write_text(
+        "##gff-version 3\n"
+        "contig1\tRefSeq\tgene\t100\t400\t.\t+\t.\tID=query\n"
+        "contig1\tRefSeq\tgene\t500\t800\t.\t+\t.\tID=candidate\n",
+        encoding="utf-8",
+    )
+    records = {
+        "query": record("query", old_locus_tag="MA_0001", description="", positive_sources_hit=[]),
+        "candidate": record(
+            "candidate", old_locus_tag="MA_0002", description="", positive_sources_hit=[]
+        ),
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+    _seed_string_files(tmp_path, 188937, ["188937.MA_0001 188937.MA_0002 850 0 0 0 0 0 0 850"])
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+        scoring_model="v2_evidence_based",
+        gff_file=gff_file,
+        cache_dir=tmp_path,
+    )
+    cfg.interaction_scoring = replace(cfg.interaction_scoring, string_ppi_ncbi_taxon_id=188937)
+
+    result = run_interaction_scoring(cfg, classification(records))
+
+    assert result is not None
+    detail_rows = {
+        r["component_name"]: r
+        for r in result.evidence_detail_rows
+        if r["candidate_protein_id"] == "candidate"
+    }
+    string_neighborhood = detail_rows["string_neighborhood"]
+    assert string_neighborhood["status"] == "AVAILABLE"
+    assert string_neighborhood["category"] == "genomic_context"
+    assert string_neighborhood["normalized_value"] == pytest.approx(0.85)
+    assert string_neighborhood["raw_value"] == pytest.approx(850.0)
+    # Shares its cap with the pipeline's own GFF-based genomic_context
+    # component -- same cap value on both rows.
+    assert detail_rows["genomic_context"]["category_cap"] == string_neighborhood["category_cap"]
+
+    row = result.source_rows["Interaction_Candidates"][0]
+    # genomic_context: GFF's own component (close proximity, normalized
+    # 1.0) averaged with string_neighborhood (0.85) -> (1.0 + 0.85) / 2 *
+    # 25 = 23.125 raw. The same seeded STRING row also makes
+    # string_cooccurrence AVAILABLE at 0 (cooccurrence=0 in the fixture),
+    # which activates external_ppi_evidence's 15-point cap at zero raw.
+    # total_cap = 15 (external_ppi_evidence) + 25 (genomic_context) = 40;
+    # raw = 0 + 23.125 = 23.125.
+    assert row["interaction_score"] == pytest.approx(23.125 / 40.0 * 100, abs=0.01)
+
+
+def test_string_neighborhood_not_run_when_taxon_id_unset() -> None:
+    """Without string_ppi_ncbi_taxon_id, string_neighborhood must be NOT_RUN, matching string_cooccurrence."""
+    records = {
+        "query": record("query", old_locus_tag="MA_0001", positive_sources_hit=["A"]),
+        "candidate": record("candidate", old_locus_tag="MA_0002", positive_sources_hit=["A"]),
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+        scoring_model="v2_evidence_based",
+    )
+
+    result = run_interaction_scoring(cfg, classification(records))
+
+    assert result is not None
+    detail = next(
+        r
+        for r in result.evidence_detail_rows
+        if r["candidate_protein_id"] == "candidate" and r["component_name"] == "string_neighborhood"
+    )
+    assert detail["status"] == "NOT_RUN"
+    assert detail["category"] == "genomic_context"
 
 
 def test_interaction_scoring_disabled_returns_none() -> None:
@@ -1854,9 +2175,10 @@ def test_evidence_detail_v2_long_format_has_one_row_per_component() -> None:
         r for r in result.evidence_detail_rows if r["candidate_protein_id"] == "candidate"
     ]
     # source_classification, sequence_evidence, genomic_context, co_occurrence,
-    # domain_complementarity, negative_hit_strength -- always exactly six,
-    # whether AVAILABLE or not (see _build_evidence_components_v2).
-    assert len(detail_rows) == 6
+    # domain_complementarity, negative_hit_strength, string_cooccurrence,
+    # string_neighborhood -- always exactly eight, whether AVAILABLE or not
+    # (see _build_evidence_components_v2).
+    assert len(detail_rows) == 8
     assert {r["component_name"] for r in detail_rows} == {
         "source_classification",
         "sequence_evidence",
@@ -1864,6 +2186,8 @@ def test_evidence_detail_v2_long_format_has_one_row_per_component() -> None:
         "co_occurrence",
         "domain_complementarity",
         "negative_hit_strength",
+        "string_cooccurrence",
+        "string_neighborhood",
     }
     for detail_row in detail_rows:
         assert set(detail_row) == set(INTERACTION_EVIDENCE_DETAIL_V2_COLUMNS)

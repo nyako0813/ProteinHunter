@@ -107,6 +107,7 @@ interaction_scoring:
     co_occurrence: 20
     domain_complementarity: 15
     alphafold_readiness: 10
+    external_ppi: 15
   alphafold:
     enabled: false
     max_pair_total_length: 2500

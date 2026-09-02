@@ -9,6 +9,7 @@ import re
 from typing import Any
 
 from annotation.gff import GffFeatureLocation, load_gff_feature_map
+from core.cache import JsonCache
 from core.evidence import EvidenceComponent, EvidenceStatus, linear_normalize
 from core.fasta import read_fasta_as_components
 from core.models import CandidateScore, ProteinRecord
@@ -31,6 +32,7 @@ from analysis.scoring_engine_config import (
     SequenceEvidenceConfig,
     load_scoring_engine_config,
 )
+from analysis.string_ppi_bridge import StringPpiBundle, load_string_ppi_bundle
 
 V2_SCORING_MODEL = "v2_evidence_based"
 
@@ -55,6 +57,15 @@ V2_COMPONENT_WEIGHTS: dict[str, float] = {
     # biological rule, only routes an existing v5 signal through the
     # auditable evidence model.
     "negative_hit_strength": 30.0,
+    # Sole occupant of the external_ppi_evidence category today (Phase 6a);
+    # its weight only needs to be > 0, same as genomic_context above.
+    # string_neighborhood (Phase 6a M3) shares genomic_context's weight/cap
+    # instead of adding a second external_ppi_evidence component.
+    "string_cooccurrence": 1.0,
+    # Shares genomic_context's category cap (equal weight to
+    # genomic_context itself, the same "average the two components evenly"
+    # pattern source_classification+sequence_evidence already use).
+    "string_neighborhood": 1.0,
 }
 
 _NEGATIVE_HIT_STRENGTH_VALUES: dict[str, float] = {
@@ -222,6 +233,10 @@ INTERACTION_PAIR_COLUMNS: tuple[str, ...] = (
     "co_occurrence_score",
     "domain_complementarity_score",
     "alphafold_readiness_score",
+    # legacy_additive only (Phase 6a M4; blank/NaN for scoring_model:
+    # v2_evidence_based, which exposes string_cooccurrence/string_neighborhood
+    # as separate Interaction_Evidence_Detail rows instead of one blended score)
+    "string_ppi_score",
     "pair_total_length",
     "alphafold_recommended",
     # scoring model v2 only (blank/NaN for scoring_model: legacy_additive)
@@ -292,6 +307,7 @@ INTERACTION_EVIDENCE_DETAIL_LEGACY_COLUMNS: tuple[str, ...] = (
     "co_occurrence_score",
     "domain_complementarity_score",
     "alphafold_readiness_score",
+    "string_ppi_score",
     "interaction_score_reasons",
 )
 
@@ -431,6 +447,7 @@ def run_interaction_scoring(config: Any, blast_classification: Any) -> Interacti
     engine_config: ScoringEngineConfig | None = None
     ruleset: FunctionalComplementarityRuleset | None = None
     pih_bundle: PihEvidenceBundle | None = None
+    string_ppi_bundle: StringPpiBundle | None = None
     if scoring_model == V2_SCORING_MODEL:
         engine_config = load_scoring_engine_config(
             getattr(scoring_config, "scoring_engine_config", None)
@@ -442,6 +459,19 @@ def run_interaction_scoring(config: Any, blast_classification: Any) -> Interacti
         if pih_bundle_path is not None:
             pih_bundle = load_pih_evidence_bundle(pih_bundle_path)
             warnings.extend(pih_bundle.warnings)
+
+    # STRING PPI evidence (Phase 6a) is available to both scoring models --
+    # v2's external_ppi_evidence/genomic_context components (M2/M3) and
+    # legacy_additive's string_ppi_score (M4) both read the same bundle.
+    string_ppi_taxon_id = getattr(scoring_config, "string_ppi_ncbi_taxon_id", None)
+    if string_ppi_taxon_id is not None:
+        string_ppi_bundle = load_string_ppi_bundle(
+            string_ppi_taxon_id,
+            [query["resolved_old_locus_tag"] for query in resolved_queries],
+            JsonCache(config.paths.cache_dir),
+            config.paths.cache_dir,
+        )
+        warnings.extend(string_ppi_bundle.warnings)
 
     protein_hunter_scores = resolve_protein_hunter_scores(config, blast_classification)
 
@@ -471,6 +501,7 @@ def run_interaction_scoring(config: Any, blast_classification: Any) -> Interacti
                 engine_config=engine_config,
                 ruleset=ruleset,
                 pih_bundle=pih_bundle,
+                string_ppi_bundle=string_ppi_bundle,
                 collect_evidence_detail=collect_evidence_detail,
             )
         else:
@@ -480,6 +511,7 @@ def run_interaction_scoring(config: Any, blast_classification: Any) -> Interacti
                 candidate_source=source_label,
                 scoring_config=scoring_config,
                 feature_map=feature_map,
+                string_ppi_bundle=string_ppi_bundle,
                 collect_evidence_detail=collect_evidence_detail,
             )
         if rows:
@@ -736,6 +768,7 @@ def _rank_source_candidates(
     candidate_source: str,
     scoring_config: Any,
     feature_map: dict[str, GffFeatureLocation],
+    string_ppi_bundle: StringPpiBundle | None = None,
     collect_evidence_detail: bool = False,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     all_rows: list[dict[str, Any]] = []
@@ -753,7 +786,12 @@ def _rank_source_candidates(
         for candidate in candidate_records.values():
             if _is_self_pair(query, candidate):
                 continue
-            query_rows.append(_score_pair(query, candidate, candidate_source, scoring_config, feature_map))
+            query_rows.append(
+                _score_pair(
+                    query, candidate, candidate_source, scoring_config, feature_map,
+                    string_ppi_bundle=string_ppi_bundle,
+                )
+            )
         _assign_distance_independent_ranks(query_rows)
         query_rows.sort(key=lambda row: (-float(row[sort_field]), not bool(row["alphafold_recommended"]), str(row["candidate_protein_id"])))
         for rank, row in enumerate(query_rows[: scoring_config.max_candidates_per_query], start=1):
@@ -780,11 +818,19 @@ def _evidence_detail_row_legacy(row: dict[str, Any]) -> dict[str, Any]:
         "co_occurrence_score": row["co_occurrence_score"],
         "domain_complementarity_score": row["domain_complementarity_score"],
         "alphafold_readiness_score": row["alphafold_readiness_score"],
+        "string_ppi_score": row["string_ppi_score"],
         "interaction_score_reasons": row["interaction_score_reasons"],
     }
 
 
-def _score_pair(query: dict[str, Any], candidate: ProteinRecord, candidate_source: str, scoring_config: Any, feature_map: dict[str, GffFeatureLocation]) -> dict[str, Any]:
+def _score_pair(
+    query: dict[str, Any],
+    candidate: ProteinRecord,
+    candidate_source: str,
+    scoring_config: Any,
+    feature_map: dict[str, GffFeatureLocation],
+    string_ppi_bundle: StringPpiBundle | None = None,
+) -> dict[str, Any]:
     weights = scoring_config.scoring_weights
     reasons: list[str] = [f"candidate source: {candidate_source}"]
     candidate_priority_score = _candidate_priority_score(candidate_source, weights.candidate_priority)
@@ -795,6 +841,7 @@ def _score_pair(query: dict[str, Any], candidate: ProteinRecord, candidate_sourc
     reasons.append("similar source pattern" if co_occurrence_score else "no source pattern evidence")
 
     domain_complementarity_score = _domain_complementarity_score(query, candidate, weights.domain_complementarity, reasons)
+    string_ppi_score = _legacy_string_ppi_score(query, candidate, weights.external_ppi, string_ppi_bundle, reasons)
     alphafold_readiness_score, pair_total_length, alphafold_recommended = _alphafold_readiness(query, candidate, scoring_config)
     reasons.append("compatible for manual AlphaFold" if alphafold_recommended else "missing sequence or length too large for manual AlphaFold")
 
@@ -812,9 +859,13 @@ def _score_pair(query: dict[str, Any], candidate: ProteinRecord, candidate_sourc
     if priority_group in {"distant_cooccurrence_candidate", "distant_domain_candidate"}:
         reasons.append("distant candidate retained by co-occurrence/domain evidence")
 
-    total_score = candidate_priority_score + neighborhood["same_gene_neighborhood_score"] + co_occurrence_score + domain_complementarity_score + alphafold_readiness_score
+    total_score = candidate_priority_score + neighborhood["same_gene_neighborhood_score"] + co_occurrence_score + domain_complementarity_score + alphafold_readiness_score + string_ppi_score
     interaction_score = _legacy_interaction_score(
-        neighborhood["same_gene_neighborhood_score"], domain_complementarity_score, weights
+        neighborhood["same_gene_neighborhood_score"],
+        domain_complementarity_score,
+        string_ppi_score,
+        string_ppi_bundle is not None,
+        weights,
     )
     row = {
         "query_id": query["query_id"],
@@ -835,6 +886,7 @@ def _score_pair(query: dict[str, Any], candidate: ProteinRecord, candidate_sourc
         "co_occurrence_score": round(co_occurrence_score, 3),
         "domain_complementarity_score": round(domain_complementarity_score, 3),
         "alphafold_readiness_score": round(alphafold_readiness_score, 3),
+        "string_ppi_score": round(string_ppi_score, 3),
         "pair_total_length": pair_total_length,
         "alphafold_recommended": alphafold_recommended,
         "interaction_score": interaction_score,
@@ -850,24 +902,38 @@ def _score_pair(query: dict[str, Any], candidate: ProteinRecord, candidate_sourc
 
 
 def _legacy_interaction_score(
-    same_gene_neighborhood_score: float, domain_complementarity_score: float, weights: Any
+    same_gene_neighborhood_score: float,
+    domain_complementarity_score: float,
+    string_ppi_score: float,
+    string_ppi_active: bool,
+    weights: Any,
 ) -> float | None:
     """legacy_additive counterpart of interaction_score: query-specific evidence only.
 
     Same INTERACTION_SCORE_COMPONENT_NAMES scope as v2 (genomic_context +
-    domain_complementarity, co_occurrence excluded) re-normalized to 0-100
-    against the configured weight budget for those two components. Unlike
-    v2, legacy_additive has no MISSING/AVAILABLE evidence-status concept --
-    every legacy sub-score is always a plain number (0 when there is no
-    evidence, never None) -- so this can only ever be a numeric 0-100
-    value, not the "no evidence at all" None that v2's interaction_score
-    can report. Returns None only when gene_neighborhood/domain_complementarity
-    both carry zero weight in scoring_weights (nothing to normalize against).
+    domain_complementarity + external_ppi_evidence, co_occurrence
+    excluded) re-normalized to 0-100 against the configured weight budget
+    for those components. Unlike v2, legacy_additive has no
+    MISSING/AVAILABLE evidence-status concept -- every legacy sub-score is
+    always a plain number (0 when there is no evidence, never None) -- so
+    this can only ever be a numeric 0-100 value, not the "no evidence at
+    all" None that v2's interaction_score can report. Returns None only
+    when every active component carries zero weight in scoring_weights
+    (nothing to normalize against).
+
+    ``weights.external_ppi`` is only added to the denominator when
+    ``string_ppi_active`` is true (STRING was actually configured for this
+    run) -- otherwise every run that does not use STRING would see its
+    interaction_score silently diluted by a weight budget that never has
+    anything to contribute to the numerator either, changing pre-Phase-6a
+    results for runs that never opted into STRING at all.
     """
     max_points = weights.gene_neighborhood + weights.domain_complementarity
+    if string_ppi_active:
+        max_points += weights.external_ppi
     if max_points <= 0:
         return None
-    raw = same_gene_neighborhood_score + domain_complementarity_score
+    raw = same_gene_neighborhood_score + domain_complementarity_score + string_ppi_score
     return round(raw / max_points * 100, 3)
 
 
@@ -880,6 +946,7 @@ def _rank_source_candidates_v2(
     engine_config: ScoringEngineConfig,
     ruleset: FunctionalComplementarityRuleset,
     pih_bundle: PihEvidenceBundle | None = None,
+    string_ppi_bundle: StringPpiBundle | None = None,
     collect_evidence_detail: bool = False,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Evidence-based (scoring model v2) counterpart of _rank_source_candidates."""
@@ -898,6 +965,7 @@ def _rank_source_candidates_v2(
             row, breakdown, interaction_breakdown = _score_pair_v2(
                 query, candidate, candidate_source, scoring_config, feature_map, engine_config, ruleset,
                 pih_bundle=pih_bundle,
+                string_ppi_bundle=string_ppi_bundle,
             )
             pairs.append((candidate.protein_id, row, breakdown, interaction_breakdown))
 
@@ -981,7 +1049,17 @@ def _evidence_detail_rows_v2(
 #: sum. PIH-bridged categories are intentionally left out of this first cut
 #: (all pih_* categories are query-specific in principle, but the scope for
 #: this phase was fixed to genomic_context + domain_complementarity only).
-INTERACTION_SCORE_COMPONENT_NAMES: frozenset[str] = frozenset({"genomic_context", "domain_complementarity"})
+#:
+#: Phase 6a adds "string_cooccurrence" (STRING's own, far more rigorous
+#: cross-species phylogenetic-profiling cooccurrence method -- judged on
+#: its own merits, not excluded just because this project's own
+#: co_occurrence proxy was) and "string_neighborhood" (shares
+#: genomic_context's category/cap as a second component, but is filtered
+#: by component *name* here, same as every other entry, so it needs its
+#: own listing even though its category name is already present).
+INTERACTION_SCORE_COMPONENT_NAMES: frozenset[str] = frozenset(
+    {"genomic_context", "domain_complementarity", "string_cooccurrence", "string_neighborhood"}
+)
 
 
 def _interaction_only_breakdown(
@@ -1007,6 +1085,7 @@ def _score_pair_v2(
     engine_config: ScoringEngineConfig,
     ruleset: FunctionalComplementarityRuleset,
     pih_bundle: PihEvidenceBundle | None = None,
+    string_ppi_bundle: StringPpiBundle | None = None,
 ) -> tuple[dict[str, Any], ScoreBreakdown, ScoreBreakdown]:
     """Score one query/candidate pair with the evidence-based engine.
 
@@ -1018,7 +1097,8 @@ def _score_pair_v2(
     ``_rank_source_candidates_v2``).
     """
     components, location_info = _build_evidence_components_v2(
-        query, candidate, candidate_source, feature_map, ruleset, engine_config, pih_bundle=pih_bundle
+        query, candidate, candidate_source, feature_map, ruleset, engine_config, pih_bundle=pih_bundle,
+        string_ppi_bundle=string_ppi_bundle,
     )
     breakdown = score_candidate(components, engine_config)
     interaction_breakdown = _interaction_only_breakdown(components, engine_config)
@@ -1103,6 +1183,7 @@ def _build_evidence_components_v2(
     ruleset: FunctionalComplementarityRuleset,
     engine_config: ScoringEngineConfig,
     pih_bundle: PihEvidenceBundle | None = None,
+    string_ppi_bundle: StringPpiBundle | None = None,
 ) -> tuple[list[EvidenceComponent], dict[str, Any]]:
     """Build the evidence components for one pair, reusing v5's raw signals."""
     components: list[EvidenceComponent] = []
@@ -1163,6 +1244,32 @@ def _build_evidence_components_v2(
         components.append(
             EvidenceComponent.unavailable(
                 "genomic_context", "genomic_context", geo_status, source="gff", explanation=geo_reason
+            )
+        )
+
+    string_neighborhood_status, string_neighborhood_value, string_neighborhood_reason = (
+        _string_neighborhood_status_and_value(query, candidate, string_ppi_bundle)
+    )
+    if string_neighborhood_status is EvidenceStatus.AVAILABLE:
+        components.append(
+            EvidenceComponent.available(
+                "string_neighborhood",
+                "genomic_context",
+                string_neighborhood_value,
+                V2_COMPONENT_WEIGHTS["string_neighborhood"],
+                raw_value=string_neighborhood_value * 1000 if string_neighborhood_value is not None else None,
+                source="string_db",
+                explanation=string_neighborhood_reason,
+            )
+        )
+    else:
+        components.append(
+            EvidenceComponent.unavailable(
+                "string_neighborhood",
+                "genomic_context",
+                string_neighborhood_status,
+                source="string_db",
+                explanation=string_neighborhood_reason,
             )
         )
 
@@ -1230,6 +1337,32 @@ def _build_evidence_components_v2(
                 neg_status,
                 source="ortholog_filter",
                 explanation=neg_reason,
+            )
+        )
+
+    string_cooccurrence_status, string_cooccurrence_value, string_cooccurrence_reason = (
+        _string_cooccurrence_status_and_value(query, candidate, string_ppi_bundle)
+    )
+    if string_cooccurrence_status is EvidenceStatus.AVAILABLE:
+        components.append(
+            EvidenceComponent.available(
+                "string_cooccurrence",
+                "external_ppi_evidence",
+                string_cooccurrence_value,
+                V2_COMPONENT_WEIGHTS["string_cooccurrence"],
+                raw_value=string_cooccurrence_value * 1000 if string_cooccurrence_value is not None else None,
+                source="string_db",
+                explanation=string_cooccurrence_reason,
+            )
+        )
+    else:
+        components.append(
+            EvidenceComponent.unavailable(
+                "string_cooccurrence",
+                "external_ppi_evidence",
+                string_cooccurrence_status,
+                source="string_db",
+                explanation=string_cooccurrence_reason,
             )
         )
 
@@ -1345,6 +1478,66 @@ def _negative_hit_status_and_value(candidate: ProteinRecord) -> tuple[EvidenceSt
     if value is None:
         return EvidenceStatus.NOT_APPLICABLE, None, "no negative BLAST hit"
     return EvidenceStatus.AVAILABLE, value, f"negative BLAST hit strength: {strength}"
+
+
+def _string_cooccurrence_status_and_value(
+    query: dict[str, Any], candidate: ProteinRecord, string_ppi_bundle: StringPpiBundle | None
+) -> tuple[EvidenceStatus, float | None, str]:
+    """STRING (string-db.org) cooccurrence-channel evidence for this pair.
+
+    NOT_RUN when interaction_scoring.string_ppi_ncbi_taxon_id is unset
+    (the bridge was never loaded for this run). MISSING when either
+    protein's old_locus_tag is unresolvable or unknown to STRING for this
+    species. Otherwise AVAILABLE, even when the score is exactly zero --
+    see StringPpiBundle.lookup and claude/phase6_external_evidence_design.md
+    decision 5 for why a pair absent from STRING's data is treated as
+    "evaluated, no signal" rather than MISSING once both proteins are
+    known to STRING.
+    """
+    if string_ppi_bundle is None:
+        return EvidenceStatus.NOT_RUN, None, "STRING PPI evidence is disabled in configuration"
+
+    query_tag = query["resolved_old_locus_tag"]
+    candidate_tag = candidate.old_locus_tag or ""
+    scores = string_ppi_bundle.lookup(query_tag, candidate_tag)
+    if scores is None:
+        return EvidenceStatus.MISSING, None, "not found in STRING for this species"
+
+    normalized = scores.cooccurrence / 1000.0
+    return (
+        EvidenceStatus.AVAILABLE,
+        normalized,
+        f"STRING cooccurrence score: {scores.cooccurrence}/1000",
+    )
+
+
+def _string_neighborhood_status_and_value(
+    query: dict[str, Any], candidate: ProteinRecord, string_ppi_bundle: StringPpiBundle | None
+) -> tuple[EvidenceStatus, float | None, str]:
+    """STRING (string-db.org) neighborhood-channel evidence for this pair.
+
+    Shares the genomic_context category with the pipeline's own GFF-based
+    gene-distance component (see V2_COMPONENT_WEIGHTS["string_neighborhood"]):
+    a conceptually related but methodologically different signal
+    (cross-species conserved gene order, vs. this genome's own bp
+    distance), not a duplicate of it. Same NOT_RUN/MISSING/AVAILABLE rules
+    as _string_cooccurrence_status_and_value.
+    """
+    if string_ppi_bundle is None:
+        return EvidenceStatus.NOT_RUN, None, "STRING PPI evidence is disabled in configuration"
+
+    query_tag = query["resolved_old_locus_tag"]
+    candidate_tag = candidate.old_locus_tag or ""
+    scores = string_ppi_bundle.lookup(query_tag, candidate_tag)
+    if scores is None:
+        return EvidenceStatus.MISSING, None, "not found in STRING for this species"
+
+    normalized = scores.neighborhood / 1000.0
+    return (
+        EvidenceStatus.AVAILABLE,
+        normalized,
+        f"STRING neighborhood score: {scores.neighborhood}/1000",
+    )
 
 
 def _gene_neighborhood_v2(
@@ -1709,6 +1902,39 @@ def _domain_complementarity_score(query: dict[str, Any], candidate: ProteinRecor
     else:
         reasons.append("no domain/description evidence")
     return 0.0
+
+
+def _legacy_string_ppi_score(
+    query: dict[str, Any],
+    candidate: ProteinRecord,
+    weight: float,
+    string_ppi_bundle: StringPpiBundle | None,
+    reasons: list[str],
+) -> float:
+    """legacy_additive counterpart of the v2 string_cooccurrence/string_neighborhood
+    components (Phase 6a M4). Averages STRING's cooccurrence and
+    neighborhood channels into a single 0-``weight`` point score --
+    simpler than v2's two-component category-cap averaging, since legacy
+    has no per-component eligibility machinery to reuse. Always 0.0 (never
+    None) when STRING evidence is unavailable, matching every other legacy
+    sub-score's "0 means no evidence, not missing" convention.
+    """
+    if string_ppi_bundle is None:
+        return 0.0
+
+    query_tag = query["resolved_old_locus_tag"]
+    candidate_tag = candidate.old_locus_tag or ""
+    scores = string_ppi_bundle.lookup(query_tag, candidate_tag)
+    if scores is None:
+        reasons.append("not found in STRING for this species")
+        return 0.0
+
+    combined = (scores.cooccurrence + scores.neighborhood) / 2.0 / 1000.0
+    reasons.append(
+        f"STRING evidence: cooccurrence={scores.cooccurrence}/1000, "
+        f"neighborhood={scores.neighborhood}/1000"
+    )
+    return combined * weight
 
 
 def _meaningful_terms(text: str) -> set[str]:

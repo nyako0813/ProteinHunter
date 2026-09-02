@@ -176,6 +176,9 @@ interaction_scoring:
     co_occurrence: 20
     domain_complementarity: 15
     alphafold_readiness: 10
+    # legacy_additive counterpart of v2's external_ppi_evidence category
+    # cap (Phase 6a M4). Only used when string_ppi_ncbi_taxon_id is set.
+    external_ppi: 15
 
   alphafold:
     enabled: false
@@ -222,6 +225,18 @@ interaction_scoring:
   # interaction_priority_score/evidence_tier/priority_group columns keep
   # their original values either way -- only candidate_rank/row order change.
   ranking_metric: interaction_priority_score
+
+  # Optional NCBI taxonomy id for STRING (string-db.org) PPI evidence
+  # (Phase 6a, used only by scoring_model: v2_evidence_based; see
+  # claude/phase6_external_evidence_design.md). Must be STRING's own taxid
+  # for the exact strain -- this is not always the species-level NCBI
+  # taxid. For this project's target (Methanosarcina acetivorans C2A,
+  # GCF_000007345.1) the species-level taxid 2214 returns nothing from
+  # STRING; the strain-level taxid 188937 is the one with data. Leave
+  # unset (the default) to disable STRING evidence entirely -- enabling it
+  # downloads a per-species bulk file (tens of MB) from string-db.org on
+  # first use.
+  # string_ppi_ncbi_taxon_id: 188937
 
 
 # ----------------------------------------------------------
