@@ -131,6 +131,7 @@ def test_missing_annotation_targets_uses_safe_defaults(tmp_path: Path) -> None:
     assert cfg.interaction_scoring.neighborhood.enabled is True
     assert cfg.interaction_scoring.neighborhood.max_distance_bp == 100000
     assert cfg.interaction_scoring.neighborhood.max_rows_per_query == 200
+    assert cfg.interaction_scoring.evidence_detail_sheet.include_no_hit is False
 
 
 def test_annotation_targets_can_enable_no_hit_pfam(tmp_path: Path) -> None:
@@ -270,6 +271,9 @@ def test_interaction_scoring_can_be_configured(tmp_path: Path) -> None:
             "max_distance_bp": 50000,
             "max_rows_per_query": 25,
         },
+        "evidence_detail_sheet": {
+            "include_no_hit": True,
+        },
     }
     config_path = write_config(tmp_path, data)
 
@@ -290,6 +294,7 @@ def test_interaction_scoring_can_be_configured(tmp_path: Path) -> None:
     assert cfg.interaction_scoring.neighborhood.enabled is False
     assert cfg.interaction_scoring.neighborhood.max_distance_bp == 50000
     assert cfg.interaction_scoring.neighborhood.max_rows_per_query == 25
+    assert cfg.interaction_scoring.evidence_detail_sheet.include_no_hit is True
 
 
 def test_invalid_interaction_candidate_source_raises_config_error(
@@ -332,6 +337,25 @@ def test_invalid_interaction_neighborhood_values_raise_config_error(tmp_path: Pa
     config_path = write_config(tmp_path, data)
 
     with pytest.raises(ConfigError, match="interaction_scoring.neighborhood.max_distance_bp"):
+        load_config(config_path, initialize=False)
+
+
+def test_invalid_interaction_evidence_detail_sheet_value_raises_config_error(
+    tmp_path: Path,
+) -> None:
+    """interaction_scoring.evidence_detail_sheet.include_no_hit must be a bool."""
+    data = valid_config_data()
+    data["interaction_scoring"] = {
+        "evidence_detail_sheet": {
+            "include_no_hit": "yes",
+        },
+    }
+    config_path = write_config(tmp_path, data)
+
+    with pytest.raises(
+        ConfigError,
+        match="interaction_scoring.evidence_detail_sheet.include_no_hit",
+    ):
         load_config(config_path, initialize=False)
 
 def test_missing_optional_gff_does_not_fail_config_validation(tmp_path: Path) -> None:

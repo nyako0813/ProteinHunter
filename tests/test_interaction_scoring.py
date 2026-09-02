@@ -8,14 +8,18 @@ from types import SimpleNamespace
 from config import (
     INTERACTION_ALPHAFOLD_DEFAULT,
     INTERACTION_CANDIDATE_SOURCE_DEFAULTS,
+    INTERACTION_EVIDENCE_DETAIL_DEFAULT,
     INTERACTION_NEIGHBORHOOD_DEFAULT,
     INTERACTION_SCORING_WEIGHTS_DEFAULT,
+    InteractionEvidenceDetailConfig,
     InteractionNeighborhoodConfig,
     InteractionQueryConfig,
     InteractionScoringConfig,
 )
 from core.models import BlastHit, DomainHit, ProteinRecord
 from analysis.interaction_scoring import (
+    INTERACTION_EVIDENCE_DETAIL_LEGACY_COLUMNS,
+    INTERACTION_EVIDENCE_DETAIL_V2_COLUMNS,
     interaction_pair_columns,
     resolve_cdd_annotation_targets,
     run_interaction_scoring,
@@ -36,6 +40,7 @@ def interaction_config(
     scoring_engine_config: Path | None = None,
     functional_complementarity_ruleset: Path | None = None,
     pih_evidence_bundle: Path | None = None,
+    evidence_detail_sheet: InteractionEvidenceDetailConfig = INTERACTION_EVIDENCE_DETAIL_DEFAULT,
 ) -> SimpleNamespace:
     """Build a minimal app config for interaction scoring tests."""
     return SimpleNamespace(
@@ -58,6 +63,7 @@ def interaction_config(
             scoring_engine_config=scoring_engine_config,
             functional_complementarity_ruleset=functional_complementarity_ruleset,
             pih_evidence_bundle=pih_evidence_bundle,
+            evidence_detail_sheet=evidence_detail_sheet,
         )
     )
 
@@ -1310,3 +1316,171 @@ def test_pih_bridge_malformed_line_is_skipped_with_warning(tmp_path: Path) -> No
     row = result.source_rows["Interaction_Candidates"][0]
     assert "pih_" not in row["interaction_score_reasons"]
     assert "no negative BLAST hit" in row["interaction_score_reasons"]
+
+
+# ---------------------------------------------------------------------------
+# Interaction_Evidence_Detail (evidence_detail_rows) tests
+# ---------------------------------------------------------------------------
+
+
+def test_evidence_detail_v2_long_format_has_one_row_per_component() -> None:
+    """v2 mode should emit one detail row per EvidenceComponent for each pair."""
+    records = {
+        "query": record("query", description="radical SAM protein", positive_sources_hit=["A"]),
+        "candidate": record(
+            "candidate", description="iron-sulfur carrier protein", positive_sources_hit=["A"]
+        ),
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+        scoring_model="v2_evidence_based",
+    )
+
+    result = run_interaction_scoring(cfg, classification(records))
+
+    assert result is not None
+    # The main sheet is unaffected by collecting evidence detail alongside it.
+    row = result.source_rows["Interaction_Candidates"][0]
+    assert row["interaction_priority_score"] == 100.0
+
+    assert result.evidence_detail_scoring_model == "v2_evidence_based"
+    detail_rows = [
+        r for r in result.evidence_detail_rows if r["candidate_protein_id"] == "candidate"
+    ]
+    # source_classification, sequence_evidence, genomic_context, co_occurrence,
+    # domain_complementarity, negative_hit_strength -- always exactly six,
+    # whether AVAILABLE or not (see _build_evidence_components_v2).
+    assert len(detail_rows) == 6
+    assert {r["component_name"] for r in detail_rows} == {
+        "source_classification",
+        "sequence_evidence",
+        "genomic_context",
+        "co_occurrence",
+        "domain_complementarity",
+        "negative_hit_strength",
+    }
+    for detail_row in detail_rows:
+        assert set(detail_row) == set(INTERACTION_EVIDENCE_DETAIL_V2_COLUMNS)
+        assert detail_row["query_protein_id"] == "query"
+        assert detail_row["candidate_rank"] == row["candidate_rank"]
+
+    source_component = next(r for r in detail_rows if r["component_name"] == "source_classification")
+    assert source_component["status"] == "AVAILABLE"
+    assert source_component["raw_value"] == "Candidates"
+    assert source_component["category"] == "source_classification"
+    assert source_component["category_cap"] == 30.0
+
+    genomic_component = next(r for r in detail_rows if r["component_name"] == "genomic_context")
+    assert genomic_component["status"] == "MISSING"  # no GFF configured in this test
+    assert genomic_component["normalized_value"] is None
+
+
+def test_evidence_detail_legacy_wide_format_has_one_row_per_pair() -> None:
+    """legacy_additive mode should emit exactly one detail row per pair, projecting existing columns."""
+    records = {
+        "query": record("query", positive_sources_hit=["A"]),
+        "candidate": record("candidate", positive_sources_hit=["A"]),
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+    )
+
+    result = run_interaction_scoring(cfg, classification(records))
+
+    assert result is not None
+    row = result.source_rows["Interaction_Candidates"][0]
+    assert result.evidence_detail_scoring_model == "legacy_additive"
+    assert len(result.evidence_detail_rows) == 1
+    detail_row = result.evidence_detail_rows[0]
+    assert set(detail_row) == set(INTERACTION_EVIDENCE_DETAIL_LEGACY_COLUMNS)
+    assert detail_row["candidate_protein_id"] == "candidate"
+    assert detail_row["candidate_rank"] == row["candidate_rank"]
+    assert detail_row["candidate_priority_score"] == row["candidate_priority_score"]
+    assert detail_row["same_gene_neighborhood_score"] == row["same_gene_neighborhood_score"]
+    assert detail_row["co_occurrence_score"] == row["co_occurrence_score"]
+    assert detail_row["domain_complementarity_score"] == row["domain_complementarity_score"]
+    assert detail_row["alphafold_readiness_score"] == row["alphafold_readiness_score"]
+    assert detail_row["interaction_score_reasons"] == row["interaction_score_reasons"]
+
+
+def test_evidence_detail_excludes_no_hit_by_default() -> None:
+    """no_hit must be excluded from evidence_detail_rows unless explicitly included."""
+    records = {
+        "query": record("query", positive_sources_hit=["A"]),
+        "candidate": record("candidate"),
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"no_hit": True},
+        scoring_model="v2_evidence_based",
+    )
+
+    result = run_interaction_scoring(cfg, classification(records))
+
+    assert result is not None
+    # The main sheet still gets its rows -- only the detail sheet is scoped down.
+    assert result.source_rows["Interaction_No_hit"]
+    assert result.evidence_detail_rows == []
+
+
+def test_evidence_detail_includes_no_hit_when_opted_in() -> None:
+    """include_no_hit: true should produce detail rows for the no_hit bucket too."""
+    records = {
+        "query": record("query", positive_sources_hit=["A"]),
+        "candidate": record("candidate"),
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"no_hit": True},
+        scoring_model="v2_evidence_based",
+        evidence_detail_sheet=InteractionEvidenceDetailConfig(include_no_hit=True),
+    )
+
+    result = run_interaction_scoring(cfg, classification(records))
+
+    assert result is not None
+    assert result.evidence_detail_rows
+    assert all(
+        r["candidate_source"] == "No_hit" for r in result.evidence_detail_rows
+    )
+
+
+def test_evidence_detail_mixed_buckets_only_no_hit_excluded() -> None:
+    """With multiple buckets enabled, only no_hit should be missing from the detail sheet."""
+    records = {
+        "query": record("query", positive_sources_hit=["A"]),
+        "candidate": record("candidate", positive_sources_hit=["A"]),
+        "relaxed": record("relaxed", positive_sources_hit=["A"]),
+        "novel": record("novel"),
+    }
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True, "candidates_relaxed": True, "no_hit": True},
+        scoring_model="v2_evidence_based",
+    )
+
+    result = run_interaction_scoring(cfg, classification(records))
+
+    assert result is not None
+    detail_sources = {r["candidate_source"] for r in result.evidence_detail_rows}
+    assert "No_hit" not in detail_sources
+    assert detail_sources <= {"Candidates", "Candidates_relaxed"}
+    # Every candidate actually present in those two main sheets must also
+    # appear in the detail sheet -- the scope must match, not just avoid crashing.
+    expected_candidates = {
+        row["candidate_protein_id"]
+        for sheet in ("Interaction_Candidates", "Interaction_Candidates_relaxed")
+        for row in result.source_rows.get(sheet, [])
+    }
+    detail_candidates = {r["candidate_protein_id"] for r in result.evidence_detail_rows}
+    assert detail_candidates == expected_candidates
