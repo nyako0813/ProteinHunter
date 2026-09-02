@@ -15,11 +15,23 @@ DEFAULT_WEIGHTS: dict[str, float] = {
 }
 
 
-def score_record(
+def build_candidate_score(
     record: ProteinRecord,
     weights: dict[str, float] | None = None,
-) -> ProteinRecord:
-    """Score one protein record in place and return it."""
+) -> CandidateScore:
+    """Compute a CandidateScore for one record without mutating the record.
+
+    This is the query-independent "is this generally a good candidate"
+    score (see docs/design spec section 22's protein_hunter_score /
+    interaction_score split): every component here depends only on
+    ``record`` itself, never on which interaction_scoring query it might be
+    paired with. ``score_record`` below is a thin, mutating wrapper kept for
+    backward compatibility with the existing Candidates-sheet scoring path;
+    callers that need a score without touching shared ProteinRecord objects
+    (e.g. analysis/interaction_scoring.py's protein_hunter_score reference
+    columns, which must not leak into unrelated classification sheets that
+    happen to share the same record instances) should call this directly.
+    """
     active_weights = DEFAULT_WEIGHTS | (weights or {})
     score = CandidateScore(protein_id=record.protein_id)
 
@@ -65,7 +77,15 @@ def score_record(
             "This protein has annotation notes that may need review.",
         )
 
-    record.score = score
+    return score
+
+
+def score_record(
+    record: ProteinRecord,
+    weights: dict[str, float] | None = None,
+) -> ProteinRecord:
+    """Score one protein record in place and return it."""
+    record.score = build_candidate_score(record, weights=weights)
     return record
 
 
@@ -94,6 +114,7 @@ def get_sorted_records(
 
 __all__: tuple[str, ...] = (
     "DEFAULT_WEIGHTS",
+    "build_candidate_score",
     "get_sorted_records",
     "score_record",
     "score_records",

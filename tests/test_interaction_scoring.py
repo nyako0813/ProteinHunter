@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -22,8 +23,10 @@ from analysis.interaction_scoring import (
     INTERACTION_EVIDENCE_DETAIL_V2_COLUMNS,
     interaction_pair_columns,
     resolve_cdd_annotation_targets,
+    resolve_protein_hunter_scores,
     run_interaction_scoring,
 )
+from analysis.scoring import build_candidate_score
 
 
 def interaction_config(
@@ -239,6 +242,506 @@ def test_resolve_cdd_annotation_targets_deduplicates_query_already_in_a_bucket()
     targets = resolve_cdd_annotation_targets(cfg, cls)
 
     assert set(targets) == {"shared_protein"}
+
+
+# ---------------------------------------------------------------------------
+# resolve_protein_hunter_scores tests (M1: protein_hunter_score scope extension)
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_protein_hunter_scores_empty_when_disabled() -> None:
+    """Disabled interaction_scoring must not compute any protein_hunter_score."""
+    cfg = interaction_config(enabled=False)
+    cls = build_classification()
+
+    assert resolve_protein_hunter_scores(cfg, cls) == {}
+
+
+def test_resolve_protein_hunter_scores_covers_non_candidates_buckets() -> None:
+    """Candidates_relaxed/No_hit records (never scored by the Candidate scoring
+    step, which only ever touches positive_only_records) must get a score too."""
+    relaxed_only = record("relaxed_only")
+    no_hit_only = record("no_hit_only")
+    cls = build_classification(
+        all_records={"relaxed_only": relaxed_only, "no_hit_only": no_hit_only},
+        candidates_relaxed_records={"relaxed_only": relaxed_only},
+        no_hit_records={"no_hit_only": no_hit_only},
+    )
+    sources = all_sources_disabled()
+    sources["candidates_relaxed"] = True
+    sources["no_hit"] = True
+    cfg = interaction_config(enabled=True, candidate_sources=sources)
+
+    scores = resolve_protein_hunter_scores(cfg, cls)
+
+    assert set(scores) == {"relaxed_only", "no_hit_only"}
+    assert scores["relaxed_only"].protein_id == "relaxed_only"
+
+
+def test_resolve_protein_hunter_scores_matches_build_candidate_score() -> None:
+    """The computed score must match build_candidate_score's own formula exactly."""
+    candidate_a = record("candidate_a", positive_sources_hit=["A"])
+    cls = build_classification(
+        all_records={"candidate_a": candidate_a},
+        positive_only_records={"candidate_a": candidate_a},
+    )
+    sources = all_sources_disabled()
+    sources["candidates"] = True
+    cfg = interaction_config(enabled=True, candidate_sources=sources)
+
+    scores = resolve_protein_hunter_scores(cfg, cls)
+
+    expected = build_candidate_score(candidate_a)
+    assert scores["candidate_a"].total_score == expected.total_score
+    assert scores["candidate_a"].components == expected.components
+
+
+def test_resolve_protein_hunter_scores_does_not_mutate_shared_records() -> None:
+    """Scoring here must not leak into ProteinRecord.score on shared objects --
+    Candidates_relaxed/No_hit classification sheets must stay unaffected."""
+    relaxed_only = record("relaxed_only")
+    cls = build_classification(
+        all_records={"relaxed_only": relaxed_only},
+        candidates_relaxed_records={"relaxed_only": relaxed_only},
+    )
+    sources = all_sources_disabled()
+    sources["candidates_relaxed"] = True
+    cfg = interaction_config(enabled=True, candidate_sources=sources)
+
+    resolve_protein_hunter_scores(cfg, cls)
+
+    assert relaxed_only.score is None
+
+
+# ---------------------------------------------------------------------------
+# protein_hunter_score reference columns (M2)
+# ---------------------------------------------------------------------------
+
+
+def test_interaction_row_carries_protein_hunter_score_reference_columns() -> None:
+    """Every Interaction_* pair row should carry the candidate's own protein_hunter_score."""
+    records = {
+        "query": record("query", positive_sources_hit=["A"]),
+        "candidate": record("candidate", positive_sources_hit=["A"]),
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+    )
+
+    result = run_interaction_scoring(cfg, classification(records))
+
+    assert result is not None
+    row = result.source_rows["Interaction_Candidates"][0]
+    expected = build_candidate_score(records["candidate"])
+    assert row["protein_hunter_score"] == expected.total_score
+    assert "no_negative_hit=" in row["protein_hunter_score_components"]
+    assert row["protein_hunter_score_reasons"]
+
+
+def test_protein_hunter_score_reference_column_covers_relaxed_bucket_too() -> None:
+    """M1's scope fix must actually reach Interaction_Candidates_relaxed rows."""
+    records = {
+        "query": record("query", positive_sources_hit=["A"]),
+        "candidate": record("candidate", positive_sources_hit=["A"]),
+        "relaxed": record("relaxed", positive_sources_hit=["A"]),
+        "novel": record("novel"),
+    }
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates_relaxed": True},
+    )
+
+    result = run_interaction_scoring(cfg, classification(records))
+
+    assert result is not None
+    rows = {r["candidate_protein_id"]: r for r in result.source_rows["Interaction_Candidates_relaxed"]}
+    # "relaxed" is not in positive_only_records, so the plain Candidate
+    # scoring pipeline step never scores it -- protein_hunter_score must
+    # still be populated here via the wider interaction_scoring scope.
+    assert rows["relaxed"]["protein_hunter_score"] is not None
+    assert rows["relaxed"]["protein_hunter_score"] == build_candidate_score(
+        records["relaxed"]
+    ).total_score
+
+
+def test_protein_hunter_score_does_not_affect_ranking_or_existing_columns() -> None:
+    """protein_hunter_score must be purely additive: rank/score/tier stay identical."""
+    records = {
+        "query": record("query", description="radical SAM protein", positive_sources_hit=["A"]),
+        "candidate": record(
+            "candidate", description="iron-sulfur carrier protein", positive_sources_hit=["A"]
+        ),
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+        scoring_model="v2_evidence_based",
+    )
+
+    result = run_interaction_scoring(cfg, classification(records))
+
+    assert result is not None
+    row = result.source_rows["Interaction_Candidates"][0]
+    # Same values as the pre-M2 behavior (test_v2_mode_scores_full_evidence_pair_near_100).
+    assert row["candidate_rank"] == 1
+    assert row["interaction_priority_score"] == 100.0
+    assert row["evidence_tier"] == "Tier2_Strong"
+    assert row["protein_hunter_score"] is not None
+
+
+# ---------------------------------------------------------------------------
+# interaction_score / interaction_evidence_tier (M3, v2_evidence_based only)
+# ---------------------------------------------------------------------------
+
+
+def test_interaction_score_uses_only_genomic_context_and_domain_complementarity() -> None:
+    """interaction_score should reuse the same fixture that scores 100 for the
+    full composite, but land far lower once source_classification/co_occurrence
+    are excluded -- domain_complementarity alone can't clear category-count
+    gates for the higher tiers even at a perfect normalized value."""
+    records = {
+        "query": record("query", description="radical SAM protein", positive_sources_hit=["A"]),
+        "candidate": record(
+            "candidate", description="iron-sulfur carrier protein", positive_sources_hit=["A"]
+        ),
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+        scoring_model="v2_evidence_based",
+    )
+
+    result = run_interaction_scoring(cfg, classification(records))
+
+    assert result is not None
+    row = result.source_rows["Interaction_Candidates"][0]
+    # Full composite (source_classification + functional_annotation, no GFF configured).
+    assert row["interaction_priority_score"] == 100.0
+    assert row["evidence_category_count"] == 2
+    # interaction_score: domain_complementarity alone (genomic_context is
+    # MISSING -- no GFF configured in this fixture), 20/20 category cap,
+    # single category -> capped below Tier1/Tier2 by category count alone.
+    assert row["interaction_score"] == 100.0
+    assert row["interaction_evidence_tier"] == "Tier3_Moderate"
+
+
+def test_interaction_score_excludes_co_occurrence_and_source_classification() -> None:
+    """A candidate whose entire interaction_priority_score comes from
+    source_classification + co_occurrence (no genomic proximity, no domain
+    match) must score 0/None on interaction_score -- this is exactly the
+    MA_0050/MA_0238 AlphaFold3-calibration false-positive pattern that
+    motivated the split."""
+    records = {
+        "query": record("query", description="", positive_sources_hit=["A"]),
+        "candidate": record("candidate", description="", positive_sources_hit=["A"]),
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+        scoring_model="v2_evidence_based",
+    )
+
+    result = run_interaction_scoring(cfg, classification(records))
+
+    assert result is not None
+    row = result.source_rows["Interaction_Candidates"][0]
+    # Full composite still scores well from source_classification + co_occurrence.
+    assert row["interaction_priority_score"] > 0
+    # No genomic_context (no GFF) and no domain_complementarity (no
+    # description text) evidence at all -- interaction_score must be
+    # ineligible, not silently zero-scored-as-if-evaluated.
+    assert row["interaction_score"] is None
+    assert row["interaction_evidence_tier"] == "Unclassified"
+
+
+def test_interaction_score_reflects_genomic_context_when_available(tmp_path: Path) -> None:
+    """genomic_context alone should drive interaction_score once GFF coordinates exist."""
+    gff_file = tmp_path / "genome.gff"
+    gff_file.write_text(
+        "##gff-version 3\n"
+        "contig1\tRefSeq\tgene\t100\t400\t.\t+\t.\tID=query\n"
+        "contig1\tRefSeq\tgene\t500\t800\t.\t+\t.\tID=candidate\n",
+        encoding="utf-8",
+    )
+    records = {
+        "query": record("query", description="", positive_sources_hit=[]),
+        "candidate": record("candidate", description="", positive_sources_hit=[]),
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+        scoring_model="v2_evidence_based",
+        gff_file=gff_file,
+    )
+
+    result = run_interaction_scoring(cfg, classification(records))
+
+    assert result is not None
+    row = result.source_rows["Interaction_Candidates"][0]
+    assert row["interaction_score"] is not None
+    assert row["interaction_score"] > 0
+    assert row["interaction_evidence_tier"] != "Unclassified"
+
+
+# ---------------------------------------------------------------------------
+# legacy_additive interaction_score (M4)
+# ---------------------------------------------------------------------------
+
+
+def test_legacy_interaction_score_matches_renormalized_formula() -> None:
+    """legacy interaction_score = (gene_neighborhood + domain_complementarity) /
+    (their configured weights) * 100 -- co_occurrence and candidate_priority excluded."""
+    records = {
+        "query": record("query", description="radical SAM protein", positive_sources_hit=["A"]),
+        "candidate": record(
+            "candidate", description="iron-sulfur carrier protein", positive_sources_hit=["A"]
+        ),
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+    )
+
+    result = run_interaction_scoring(cfg, classification(records))
+
+    assert result is not None
+    row = result.source_rows["Interaction_Candidates"][0]
+    # No GFF configured -> same_gene_neighborhood_score = 0; domain match is a
+    # full complementary-term hit -> domain_complementarity_score = weight (15).
+    assert row["same_gene_neighborhood_score"] == 0.0
+    assert row["domain_complementarity_score"] == 15.0
+    assert row["interaction_score"] == round((0.0 + 15.0) / (25.0 + 15.0) * 100, 3)
+    assert row["interaction_evidence_tier"] is None
+
+
+def test_legacy_interaction_score_excludes_co_occurrence_and_source() -> None:
+    """Same MA_0050/MA_0238-style pattern as the v2 test: a legacy row whose
+    interaction_priority_score comes entirely from candidate_priority_score +
+    co_occurrence_score must score 0 on interaction_score (unlike v2, legacy
+    has no MISSING concept, so this is a numeric 0, not None)."""
+    records = {
+        "query": record("query", description="", positive_sources_hit=["A"]),
+        "candidate": record("candidate", description="", positive_sources_hit=["A"]),
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+    )
+
+    result = run_interaction_scoring(cfg, classification(records))
+
+    assert result is not None
+    row = result.source_rows["Interaction_Candidates"][0]
+    assert row["interaction_priority_score"] > 0
+    assert row["interaction_score"] == 0.0
+
+
+def test_legacy_mode_leaves_interaction_evidence_tier_blank() -> None:
+    """legacy_additive has no per-category tiering concept -- always blank (M4)."""
+    records = {
+        "query": record("query", positive_sources_hit=["A"]),
+        "candidate": record("candidate", positive_sources_hit=["A"]),
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+    )
+
+    result = run_interaction_scoring(cfg, classification(records))
+
+    assert result is not None
+    row = result.source_rows["Interaction_Candidates"][0]
+    assert row.get("interaction_evidence_tier") is None
+
+
+# ---------------------------------------------------------------------------
+# ranking_metric (M5): candidate_rank/row order can be driven by
+# interaction_score instead of interaction_priority_score
+# ---------------------------------------------------------------------------
+
+
+def _ranking_metric_fixture_v2(tmp_path: Path) -> tuple[dict[str, ProteinRecord], SimpleNamespace, Path]:
+    """priority_only wins on the full composite; interaction_only wins on
+    query-specific evidence alone (genomic proximity vs. a generic,
+    non-matching description overlap that scores zero either way)."""
+    gff_file = tmp_path / "genome.gff"
+    gff_file.write_text(
+        "##gff-version 3\n"
+        "contig1\tRefSeq\tgene\t100\t400\t.\t+\t.\tID=query\n"
+        "contig1\tRefSeq\tgene\t500\t800\t.\t+\t.\tID=interaction_only\n",
+        encoding="utf-8",
+    )
+    records = {
+        "query": record("query", description="putative protein", positive_sources_hit=["A"]),
+        # Domain evidence is AVAILABLE-but-zero (generic overlap only), not
+        # MISSING -- keeps the interaction-only breakdown eligible (a single
+        # active category at zero) instead of hitting rank_candidates' "no
+        # formal score" sentinel, which would make ranks incomparable.
+        "priority_only": record(
+            "priority_only", description="putative membrane protein", positive_sources_hit=["A"]
+        ),
+        "interaction_only": record("interaction_only", description="", positive_sources_hit=[]),
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+    cls = build_classification(
+        all_records=records,
+        positive_only_records={
+            "priority_only": records["priority_only"],
+            "interaction_only": records["interaction_only"],
+        },
+    )
+    return records, cls, gff_file
+
+
+def test_ranking_metric_default_preserves_interaction_priority_score_order_v2(tmp_path: Path) -> None:
+    """Without ranking_metric set, v2 ranking must be unchanged from pre-Phase-5 behavior."""
+    _records, cls, gff_file = _ranking_metric_fixture_v2(tmp_path)
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+        scoring_model="v2_evidence_based",
+        gff_file=gff_file,
+    )
+
+    result = run_interaction_scoring(cfg, cls)
+
+    assert result is not None
+    rows = {r["candidate_protein_id"]: r for r in result.source_rows["Interaction_Candidates"]}
+    # source_classification + a full-Jaccard co_occurrence outrank a lone
+    # genomic_context hit once source_classification/co_occurrence are
+    # counted (the default, unchanged composite).
+    assert rows["priority_only"]["interaction_priority_score"] > rows["interaction_only"]["interaction_priority_score"]
+    assert rows["priority_only"]["candidate_rank"] < rows["interaction_only"]["candidate_rank"]
+    # ...but interaction_score already shows the reverse story, unused for
+    # ranking here.
+    assert rows["interaction_only"]["interaction_score"] > rows["priority_only"]["interaction_score"]
+
+
+def test_ranking_metric_interaction_score_flips_order_v2(tmp_path: Path) -> None:
+    """ranking_metric: interaction_score must re-rank by query-specific evidence only,
+    without changing any row's interaction_priority_score/evidence_tier/interaction_score value."""
+    _records, cls, gff_file = _ranking_metric_fixture_v2(tmp_path)
+    default_cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+        scoring_model="v2_evidence_based",
+        gff_file=gff_file,
+    )
+    interaction_ranked_cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+        scoring_model="v2_evidence_based",
+        gff_file=gff_file,
+    )
+    interaction_ranked_cfg.interaction_scoring = replace(
+        interaction_ranked_cfg.interaction_scoring, ranking_metric="interaction_score"
+    )
+
+    default_rows = {
+        r["candidate_protein_id"]: r
+        for r in run_interaction_scoring(default_cfg, cls).source_rows["Interaction_Candidates"]
+    }
+    reranked_rows = {
+        r["candidate_protein_id"]: r
+        for r in run_interaction_scoring(interaction_ranked_cfg, cls).source_rows["Interaction_Candidates"]
+    }
+
+    # interaction_only now outranks priority_only once ranking is by
+    # query-specific evidence only.
+    assert reranked_rows["interaction_only"]["candidate_rank"] < reranked_rows["priority_only"]["candidate_rank"]
+    # ...which is the opposite of the default ranking on the same data.
+    assert default_rows["priority_only"]["candidate_rank"] < default_rows["interaction_only"]["candidate_rank"]
+
+    # Every score column keeps its original value regardless of which
+    # metric is ranking -- only candidate_rank/distance_independent_rank differ.
+    for candidate_id in ("priority_only", "interaction_only"):
+        for column in ("interaction_priority_score", "evidence_tier", "interaction_score", "interaction_evidence_tier"):
+            assert default_rows[candidate_id][column] == reranked_rows[candidate_id][column]
+
+
+def _ranking_metric_fixture_legacy(tmp_path: Path) -> tuple[SimpleNamespace, Path]:
+    """priority_only wins the full composite (candidate_priority + full
+    co_occurrence); interaction_only wins interaction_score alone (moderate
+    genomic proximity, worth less than a full co_occurrence match in the
+    legacy additive sum, but the only query-specific evidence present)."""
+    gff_file = tmp_path / "genome.gff"
+    gff_file.write_text(
+        "##gff-version 3\n"
+        "contig1\tRefSeq\tgene\t100\t400\t.\t+\t.\tID=query\n"
+        "contig1\tRefSeq\tgene\t15100\t15400\t.\t+\t.\tID=interaction_only\n",
+        encoding="utf-8",
+    )
+    records = {
+        "query": record("query", positive_sources_hit=["A"]),
+        "priority_only": record("priority_only", positive_sources_hit=["A"]),
+        "interaction_only": record("interaction_only", positive_sources_hit=[]),
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+    cls = build_classification(
+        all_records=records,
+        positive_only_records={
+            "priority_only": records["priority_only"],
+            "interaction_only": records["interaction_only"],
+        },
+    )
+    return cls, gff_file
+
+
+def test_ranking_metric_interaction_score_flips_order_legacy(tmp_path: Path) -> None:
+    """Same re-ranking behavior for legacy_additive."""
+    cls, gff_file = _ranking_metric_fixture_legacy(tmp_path)
+    default_cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+        gff_file=gff_file,
+    )
+    interaction_ranked_cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+        gff_file=gff_file,
+    )
+    interaction_ranked_cfg.interaction_scoring = replace(
+        interaction_ranked_cfg.interaction_scoring, ranking_metric="interaction_score"
+    )
+
+    default_rows = {
+        r["candidate_protein_id"]: r
+        for r in run_interaction_scoring(default_cfg, cls).source_rows["Interaction_Candidates"]
+    }
+    reranked_rows = {
+        r["candidate_protein_id"]: r
+        for r in run_interaction_scoring(interaction_ranked_cfg, cls).source_rows["Interaction_Candidates"]
+    }
+
+    assert default_rows["priority_only"]["candidate_rank"] < default_rows["interaction_only"]["candidate_rank"]
+    assert reranked_rows["interaction_only"]["candidate_rank"] < reranked_rows["priority_only"]["candidate_rank"]
+    for candidate_id in ("priority_only", "interaction_only"):
+        assert (
+            default_rows[candidate_id]["interaction_priority_score"]
+            == reranked_rows[candidate_id]["interaction_priority_score"]
+        )
+        assert (
+            default_rows[candidate_id]["interaction_score"] == reranked_rows[candidate_id]["interaction_score"]
+        )
 
 
 def test_interaction_scoring_disabled_returns_none() -> None:

@@ -11,8 +11,9 @@ from typing import Any
 from annotation.gff import GffFeatureLocation, load_gff_feature_map
 from core.evidence import EvidenceComponent, EvidenceStatus, linear_normalize
 from core.fasta import read_fasta_as_components
-from core.models import ProteinRecord
+from core.models import CandidateScore, ProteinRecord
 from analysis.candidates import get_best_hit
+from analysis.scoring import build_candidate_score
 from analysis.functional_complementarity_rules import (
     FunctionalComplementarityRuleset,
     load_functional_complementarity_ruleset,
@@ -230,6 +231,24 @@ INTERACTION_PAIR_COLUMNS: tuple[str, ...] = (
     "evidence_category_count",
     "evidence_component_count",
     "available_weight_total",
+    # protein_hunter_score reference columns (M1/M2, design spec section 22):
+    # the candidate's own query-independent "is this generally a good
+    # candidate" score -- see resolve_protein_hunter_scores. Present for
+    # both scoring models; never affects interaction_priority_score,
+    # candidate_rank, or sort order.
+    "protein_hunter_score",
+    "protein_hunter_score_components",
+    "protein_hunter_score_reasons",
+    # interaction_score reference columns (M3/M4, design spec section 22):
+    # query-specific evidence only (genomic_context + domain_complementarity
+    # for v2, an equivalent re-normalized sum for legacy_additive;
+    # co_occurrence deliberately excluded, see INTERACTION_SCORE_COMPONENT_NAMES).
+    # scoring_model: v2_evidence_based only for interaction_evidence_tier --
+    # legacy_additive has no per-category tiering concept, so it stays blank.
+    # Like protein_hunter_score, purely additive: never affects
+    # interaction_priority_score, candidate_rank, or sort order.
+    "interaction_score",
+    "interaction_evidence_tier",
 )
 
 SEQUENCE_COLUMNS: tuple[str, ...] = ("query_sequence", "candidate_sequence")
@@ -424,6 +443,8 @@ def run_interaction_scoring(config: Any, blast_classification: Any) -> Interacti
             pih_bundle = load_pih_evidence_bundle(pih_bundle_path)
             warnings.extend(pih_bundle.warnings)
 
+    protein_hunter_scores = resolve_protein_hunter_scores(config, blast_classification)
+
     for source_key, enabled in scoring_config.candidate_sources.items():
         if not enabled:
             continue
@@ -462,6 +483,7 @@ def run_interaction_scoring(config: Any, blast_classification: Any) -> Interacti
                 collect_evidence_detail=collect_evidence_detail,
             )
         if rows:
+            _attach_protein_hunter_score_columns(rows, protein_hunter_scores)
             source_rows[sheet_name] = rows
             evidence_detail_rows.extend(detail_rows)
         else:
@@ -481,6 +503,47 @@ def run_interaction_scoring(config: Any, blast_classification: Any) -> Interacti
         evidence_detail_rows=evidence_detail_rows,
         evidence_detail_scoring_model=scoring_model,
     )
+
+
+def _interaction_scoring_target_records(
+    scoring_config: Any, blast_classification: Any
+) -> dict[str, ProteinRecord]:
+    """Return the de-duplicated union of every record interaction_scoring touches.
+
+    Shared target-set resolution for both CDD annotation scope
+    (``resolve_cdd_annotation_targets``) and protein_hunter_score scope
+    (``resolve_protein_hunter_scores``): both need "every record reachable
+    through an enabled ``candidate_sources`` bucket, plus every resolved
+    query record." Returns an empty dict when ``scoring_config.enabled`` is
+    false.
+    """
+    if not scoring_config.enabled:
+        return {}
+
+    targets: dict[str, ProteinRecord] = {}
+
+    for source_key, enabled in scoring_config.candidate_sources.items():
+        if not enabled:
+            continue
+        source_info = CANDIDATE_SOURCE_MAP.get(source_key)
+        if source_info is None:
+            continue
+        _source_label, attr_name, _sheet_name = source_info
+        candidate_records = getattr(blast_classification, attr_name, None)
+        if not candidate_records:
+            continue
+        for protein_id, record in candidate_records.items():
+            targets.setdefault(protein_id, record)
+
+    discarded_warnings: list[str] = []
+    queries = _load_query_specs(scoring_config, discarded_warnings)
+    for index, query in enumerate(queries, start=1):
+        resolved = _resolve_query(query, index, blast_classification.all_records)
+        record = resolved.get("record")
+        if record is not None:
+            targets.setdefault(record.protein_id, record)
+
+    return targets
 
 
 def resolve_cdd_annotation_targets(
@@ -511,34 +574,60 @@ def resolve_cdd_annotation_targets(
     merge this into ``positive_only_records`` itself, which is always
     CDD-annotated regardless of interaction_scoring.
     """
+    return _interaction_scoring_target_records(config.interaction_scoring, blast_classification)
+
+
+def resolve_protein_hunter_scores(
+    config: Any, blast_classification: Any
+) -> dict[str, CandidateScore]:
+    """Return protein_hunter_score for every record interaction_scoring touches.
+
+    ``analysis/scoring.py::score_records`` (the "Candidate scoring" pipeline
+    step) only ever scores ``positive_only_records`` ("Candidates"), so any
+    interaction_scoring candidate source beyond that bucket -- Candidates_relaxed,
+    No_hit, etc. -- previously had no protein_hunter_score at all (Excel showed
+    a misleading ``total_score`` of 0, indistinguishable from "scored, and
+    scored zero"). This reuses the same target-set logic as
+    ``resolve_cdd_annotation_targets`` (see the design-spec section 22
+    protein_hunter_score/interaction_score split) and scores every one of
+    them with the exact same query-independent formula
+    (``analysis/scoring.py::build_candidate_score``, unmodified).
+
+    Deliberately does not mutate ``ProteinRecord.score``: those ProteinRecord
+    objects are shared with the plain classification sheets (Candidates_relaxed,
+    No_hit, ...), which must keep showing exactly what they showed before --
+    only interaction_scoring's own reference columns should reflect this
+    wider scope. Returns an empty dict when ``interaction_scoring.enabled``
+    is false.
+    """
     scoring_config = config.interaction_scoring
-    if not scoring_config.enabled:
-        return {}
+    targets = _interaction_scoring_target_records(scoring_config, blast_classification)
+    return {
+        protein_id: build_candidate_score(record) for protein_id, record in targets.items()
+    }
 
-    targets: dict[str, ProteinRecord] = {}
 
-    for source_key, enabled in scoring_config.candidate_sources.items():
-        if not enabled:
+def _attach_protein_hunter_score_columns(
+    rows: list[dict[str, Any]], protein_hunter_scores: dict[str, CandidateScore]
+) -> None:
+    """Attach protein_hunter_score reference columns to each pair row in place.
+
+    Purely additive/read-only relative to everything else on the row:
+    never touches candidate_rank, interaction_priority_score, or any other
+    existing field.
+    """
+    for row in rows:
+        score = protein_hunter_scores.get(row["candidate_protein_id"])
+        if score is None:
+            row["protein_hunter_score"] = None
+            row["protein_hunter_score_components"] = ""
+            row["protein_hunter_score_reasons"] = ""
             continue
-        source_info = CANDIDATE_SOURCE_MAP.get(source_key)
-        if source_info is None:
-            continue
-        _source_label, attr_name, _sheet_name = source_info
-        candidate_records = getattr(blast_classification, attr_name, None)
-        if not candidate_records:
-            continue
-        for protein_id, record in candidate_records.items():
-            targets.setdefault(protein_id, record)
-
-    discarded_warnings: list[str] = []
-    queries = _load_query_specs(scoring_config, discarded_warnings)
-    for index, query in enumerate(queries, start=1):
-        resolved = _resolve_query(query, index, blast_classification.all_records)
-        record = resolved.get("record")
-        if record is not None:
-            targets.setdefault(record.protein_id, record)
-
-    return targets
+        row["protein_hunter_score"] = score.total_score
+        row["protein_hunter_score_components"] = "; ".join(
+            f"{name}={value}" for name, value in score.components.items()
+        )
+        row["protein_hunter_score_reasons"] = "; ".join(score.reasons)
 
 
 def interaction_neighborhood_columns() -> tuple[str, ...]:
@@ -651,6 +740,12 @@ def _rank_source_candidates(
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     all_rows: list[dict[str, Any]] = []
     detail_rows: list[dict[str, Any]] = []
+    ranking_metric = getattr(scoring_config, "ranking_metric", "interaction_priority_score")
+    # M5: legacy's interaction_score is always a plain float (never None --
+    # see _legacy_interaction_score), so ranking by it needs no special
+    # eligibility handling the way v2's rank_candidates does.
+    sort_field = "interaction_score" if ranking_metric == "interaction_score" else "interaction_priority_score"
+
     for query in resolved_queries:
         if query["resolution_status"] != "resolved":
             continue
@@ -660,7 +755,7 @@ def _rank_source_candidates(
                 continue
             query_rows.append(_score_pair(query, candidate, candidate_source, scoring_config, feature_map))
         _assign_distance_independent_ranks(query_rows)
-        query_rows.sort(key=lambda row: (-float(row["interaction_priority_score"]), not bool(row["alphafold_recommended"]), str(row["candidate_protein_id"])))
+        query_rows.sort(key=lambda row: (-float(row[sort_field]), not bool(row["alphafold_recommended"]), str(row["candidate_protein_id"])))
         for rank, row in enumerate(query_rows[: scoring_config.max_candidates_per_query], start=1):
             row["candidate_rank"] = rank
             all_rows.append(row)
@@ -718,6 +813,9 @@ def _score_pair(query: dict[str, Any], candidate: ProteinRecord, candidate_sourc
         reasons.append("distant candidate retained by co-occurrence/domain evidence")
 
     total_score = candidate_priority_score + neighborhood["same_gene_neighborhood_score"] + co_occurrence_score + domain_complementarity_score + alphafold_readiness_score
+    interaction_score = _legacy_interaction_score(
+        neighborhood["same_gene_neighborhood_score"], domain_complementarity_score, weights
+    )
     row = {
         "query_id": query["query_id"],
         "query_protein_id": query["resolved_protein_id"],
@@ -739,11 +837,38 @@ def _score_pair(query: dict[str, Any], candidate: ProteinRecord, candidate_sourc
         "alphafold_readiness_score": round(alphafold_readiness_score, 3),
         "pair_total_length": pair_total_length,
         "alphafold_recommended": alphafold_recommended,
+        "interaction_score": interaction_score,
+        # legacy_additive has no per-category tiering concept (no evidence
+        # categories/status to count) -- left blank, same as v2's own
+        # evidence_tier is left blank on legacy rows.
+        "interaction_evidence_tier": None,
     }
     if scoring_config.include_sequences_in_excel:
         row["query_sequence"] = query["sequence"]
         row["candidate_sequence"] = candidate.sequence
     return row
+
+
+def _legacy_interaction_score(
+    same_gene_neighborhood_score: float, domain_complementarity_score: float, weights: Any
+) -> float | None:
+    """legacy_additive counterpart of interaction_score: query-specific evidence only.
+
+    Same INTERACTION_SCORE_COMPONENT_NAMES scope as v2 (genomic_context +
+    domain_complementarity, co_occurrence excluded) re-normalized to 0-100
+    against the configured weight budget for those two components. Unlike
+    v2, legacy_additive has no MISSING/AVAILABLE evidence-status concept --
+    every legacy sub-score is always a plain number (0 when there is no
+    evidence, never None) -- so this can only ever be a numeric 0-100
+    value, not the "no evidence at all" None that v2's interaction_score
+    can report. Returns None only when gene_neighborhood/domain_complementarity
+    both carry zero weight in scoring_weights (nothing to normalize against).
+    """
+    max_points = weights.gene_neighborhood + weights.domain_complementarity
+    if max_points <= 0:
+        return None
+    raw = same_gene_neighborhood_score + domain_complementarity_score
+    return round(raw / max_points * 100, 3)
 
 
 def _rank_source_candidates_v2(
@@ -760,34 +885,49 @@ def _rank_source_candidates_v2(
     """Evidence-based (scoring model v2) counterpart of _rank_source_candidates."""
     all_rows: list[dict[str, Any]] = []
     detail_rows: list[dict[str, Any]] = []
+    ranking_metric = getattr(scoring_config, "ranking_metric", "interaction_priority_score")
+
     for query in resolved_queries:
         if query["resolution_status"] != "resolved":
             continue
 
-        pairs: list[tuple[str, dict[str, Any], ScoreBreakdown]] = []
+        pairs: list[tuple[str, dict[str, Any], ScoreBreakdown, ScoreBreakdown]] = []
         for candidate in candidate_records.values():
             if _is_self_pair(query, candidate):
                 continue
-            row, breakdown = _score_pair_v2(
+            row, breakdown, interaction_breakdown = _score_pair_v2(
                 query, candidate, candidate_source, scoring_config, feature_map, engine_config, ruleset,
                 pih_bundle=pih_bundle,
             )
-            pairs.append((candidate.protein_id, row, breakdown))
+            pairs.append((candidate.protein_id, row, breakdown, interaction_breakdown))
 
+        # M5: candidate_rank/row order can be driven by either the full
+        # composite breakdown (default, unchanged since Phase 5) or the
+        # query-specific-only breakdown -- interaction_priority_score,
+        # evidence_tier, and interaction_score themselves never change
+        # based on this setting, only which one ranks.
+        ranking_breakdown_by_id = {
+            candidate_id: (interaction_breakdown if ranking_metric == "interaction_score" else breakdown)
+            for candidate_id, _row, breakdown, interaction_breakdown in pairs
+        }
         ranked = rank_candidates(
-            [(candidate_id, breakdown) for candidate_id, _row, breakdown in pairs],
+            list(ranking_breakdown_by_id.items()),
             tie_precision=engine_config.tie_precision,
         )
-        row_by_id = {candidate_id: row for candidate_id, row, _breakdown in pairs}
-        breakdown_by_id = {candidate_id: breakdown for candidate_id, _row, breakdown in pairs}
+        row_by_id = {candidate_id: row for candidate_id, row, _breakdown, _interaction_breakdown in pairs}
+        breakdown_by_id = {
+            candidate_id: breakdown for candidate_id, _row, breakdown, _interaction_breakdown in pairs
+        }
         for ranked_item in ranked[: scoring_config.max_candidates_per_query]:
             row = row_by_id[ranked_item.candidate_id]
             row["candidate_rank"] = ranked_item.rank if ranked_item.rank is not None else 0
             row["distance_independent_rank"] = row["candidate_rank"]
             all_rows.append(row)
             if collect_evidence_detail:
-                breakdown = breakdown_by_id[ranked_item.candidate_id]
-                detail_rows.extend(_evidence_detail_rows_v2(row, breakdown, engine_config))
+                # Evidence_Detail always audits the full breakdown, regardless
+                # of which score is currently driving candidate_rank.
+                full_breakdown = breakdown_by_id[ranked_item.candidate_id]
+                detail_rows.extend(_evidence_detail_rows_v2(row, full_breakdown, engine_config))
 
     all_rows.sort(
         key=lambda row: (str(row["query_id"]), int(row["candidate_rank"] or 0), str(row["candidate_protein_id"]))
@@ -824,6 +964,40 @@ def _evidence_detail_rows_v2(
     return detail_rows
 
 
+#: Components that constitute query-specific "does this candidate actually
+#: interact with THIS query" evidence (design spec section 22's
+#: interaction_score). Deliberately excludes source_classification and
+#: sequence_evidence (candidate-only conservation quality, see
+#: protein_hunter_score) and negative_hit_strength (candidate-only
+#: penalty). co_occurrence is also excluded: despite technically taking the
+#: query as an input, it measures each protein's own BLAST hit pattern
+#: against the positive reference genomes independently, not any
+#: relationship between query and candidate -- and with only a handful of
+#: configured positive sources its Jaccard value is coarse-grained enough
+#: (this project's default config has exactly two, so it can only be 0.0,
+#: 0.5, or 1.0) that it behaves like a candidate-quality signal in
+#: practice. co_occurrence is still shown, unchanged, in
+#: Interaction_Evidence_Detail for audit -- it is only excluded from this
+#: sum. PIH-bridged categories are intentionally left out of this first cut
+#: (all pih_* categories are query-specific in principle, but the scope for
+#: this phase was fixed to genomic_context + domain_complementarity only).
+INTERACTION_SCORE_COMPONENT_NAMES: frozenset[str] = frozenset({"genomic_context", "domain_complementarity"})
+
+
+def _interaction_only_breakdown(
+    components: list[EvidenceComponent], engine_config: ScoringEngineConfig
+) -> ScoreBreakdown:
+    """Re-score a pair using only query-specific (interaction_score) components.
+
+    Reuses analysis/scoring_engine.py::score_candidate unmodified: feeding it
+    a filtered component list is enough to get a correctly cap-renormalized
+    0-100 score, tier, and eligibility for the restricted view -- no new
+    scoring engine code needed.
+    """
+    interaction_components = [c for c in components if c.name in INTERACTION_SCORE_COMPONENT_NAMES]
+    return score_candidate(interaction_components, engine_config)
+
+
 def _score_pair_v2(
     query: dict[str, Any],
     candidate: ProteinRecord,
@@ -833,12 +1007,21 @@ def _score_pair_v2(
     engine_config: ScoringEngineConfig,
     ruleset: FunctionalComplementarityRuleset,
     pih_bundle: PihEvidenceBundle | None = None,
-) -> tuple[dict[str, Any], ScoreBreakdown]:
-    """Score one query/candidate pair with the evidence-based engine."""
+) -> tuple[dict[str, Any], ScoreBreakdown, ScoreBreakdown]:
+    """Score one query/candidate pair with the evidence-based engine.
+
+    Returns ``(row, breakdown, interaction_breakdown)``: the full composite
+    breakdown (drives interaction_priority_score/evidence_tier, unchanged
+    since Phase 5) and the query-specific-only breakdown (drives
+    interaction_score/interaction_evidence_tier, and -- when
+    ``ranking_metric: interaction_score`` -- candidate_rank itself; see
+    ``_rank_source_candidates_v2``).
+    """
     components, location_info = _build_evidence_components_v2(
         query, candidate, candidate_source, feature_map, ruleset, engine_config, pih_bundle=pih_bundle
     )
     breakdown = score_candidate(components, engine_config)
+    interaction_breakdown = _interaction_only_breakdown(components, engine_config)
 
     alphafold_readiness_score, pair_total_length, alphafold_recommended = _alphafold_readiness(
         query, candidate, scoring_config
@@ -893,11 +1076,15 @@ def _score_pair_v2(
         "evidence_category_count": breakdown.evidence_category_count,
         "evidence_component_count": breakdown.evidence_component_count,
         "available_weight_total": round(breakdown.available_weight_total, 3),
+        "interaction_score": round(interaction_breakdown.final_score, 3)
+        if interaction_breakdown.final_score is not None
+        else None,
+        "interaction_evidence_tier": interaction_breakdown.tier,
     }
     if scoring_config.include_sequences_in_excel:
         row["query_sequence"] = query["sequence"]
         row["candidate_sequence"] = candidate.sequence
-    return row, breakdown
+    return row, breakdown, interaction_breakdown
 
 
 def _component_contribution(components: list[EvidenceComponent], name: str) -> float | None:

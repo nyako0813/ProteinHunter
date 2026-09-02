@@ -2,6 +2,60 @@
 
 ProteinHunter_v5 の変更履歴です。
 
+## 未リリース: protein_hunter_score / interaction_score の分離(design spec 22章)
+
+`Interaction_Evidence_Detail`シート(直前の変更)を使ったAlphaFold3校正データ
+監査の結果、MA_0050/MA_0238(AF3で相互作用なしと確認済み)が高スコアになる
+根本原因は、「良いProteinHunter候補である」ことと「クエリと具体的に相互作用
+する」ことが`interaction_priority_score`という1本の合成スコアに未分離のまま
+混ざっていたことだった。この2本を分離する対応(M1〜M5、段階的に実装)。
+
+### Added
+
+- `analysis/scoring.py`: `build_candidate_score`(`ProteinRecord`を変更せず
+  `CandidateScore`を計算する純粋関数)を追加。`score_record`はその薄いラッパー
+  に変更(挙動は完全に維持)。
+- `analysis/interaction_scoring.py`:
+  - `resolve_protein_hunter_scores`(M1)を追加。既存の「Candidate scoring」
+    パイプラインステップが`positive_only_records`("Candidates")にしか
+    `protein_hunter_score`を計算していなかったスコープの穴(PR #4がCDD注釈で
+    修正したのと同型の問題)を、`interaction_scoring`が触れる全候補に拡張。
+    `ProteinRecord.score`は変更しない(Candidates_relaxed/No_hit等の既存
+    分類シートに影響させないため)。
+  - `protein_hunter_score` / `protein_hunter_score_components` /
+    `protein_hunter_score_reasons` を全Interaction_*シートの各行に参照列
+    として追加(M2)。
+  - `INTERACTION_SCORE_COMPONENT_NAMES = {genomic_context, domain_complementarity}`
+    を新設し、`interaction_score` / `interaction_evidence_tier`
+    (`scoring_model: v2_evidence_based`、M3)を追加。
+    `analysis/scoring_engine.py::score_candidate`を無変更のまま、コンポーネント
+    リストをこの2つに絞って再度呼ぶだけでcap再正規化済みスコアを取得している。
+    `co_occurrence`は意図的に除外: クエリを引数に取るが実質的には各タンパク質
+    自身のpositive参照ゲノムへのBLASTヒットパターンを比較しているだけであり、
+    かつこのプロジェクトのデフォルト設定ではpositiveソースが2つしかないため
+    Jaccard値は理論上0.0/0.5/1.0の3値しか取れない(監査目的で
+    `Interaction_Evidence_Detail`には従来通り残す)。
+  - legacy_additive向けの`interaction_score`(M4): `(same_gene_neighborhood_score
+    + domain_complementarity_score) / (weights.gene_neighborhood +
+    weights.domain_complementarity) * 100`。`interaction_evidence_tier`は
+    legacyにカテゴリ数の概念がないため常に空欄。
+  - `interaction_scoring.ranking_metric`(M5、`config.py`に追加、既定値
+    `interaction_priority_score`)。`interaction_score`に設定すると
+    `candidate_rank`・行順序だけがクエリ特異的証拠のみで決まるようになり、
+    `interaction_priority_score`/`evidence_tier`/`priority_group`等の値は
+    どちらの設定でも変化しない。
+- `config.py`: `InteractionEvidenceDetailConfig`と対になる形で
+  `InteractionScoringConfig.ranking_metric`を追加(validate/load込み)。
+- 実データ検証(M_acetivorans、クエリ=MA_4115、v2_evidence_based)で、
+  AlphaFold3校正データ28件中20件(残り8件は元々どのInteraction系シートにも
+  未掲載)を確認。MA_0050/MA_0238を含む全20件が
+  `interaction_score = 0` / `interaction_evidence_tier = Tier4_Weak` に
+  統一される一方、`protein_hunter_score`は9〜14(候補としての一般的な質は
+  維持)、`interaction_priority_score`/`evidence_tier`は既存値のまま不変
+  であることを確認。設計通りの分離が実現された。
+- テスト29件追加(`tests/test_scoring.py`, `tests/test_interaction_scoring.py`,
+  `tests/test_config_validation.py`)。
+
 ## 未リリース: Interaction_Evidence_Detail シート(スコア内訳の監査用出力)
 
 `interaction_priority_score` がどのエビデンスカテゴリ・コンポーネントに
