@@ -102,6 +102,12 @@ class StringPpiAnnotationError(AnnotationError):
     default_message = "STRING PPI evidence could not be retrieved."
 
 
+class CoexpressionAnnotationError(AnnotationError):
+    """Raised when GEO coexpression evidence cannot be downloaded/parsed and no cache exists."""
+
+    default_message = "Public coexpression evidence could not be retrieved."
+
+
 class CacheError(ProteinHunterError):
     """Raised when cached data cannot be read or written."""
 
