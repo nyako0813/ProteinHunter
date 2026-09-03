@@ -59,12 +59,25 @@ Wordレポート生成(design spec Phase 6-8のStage 2)は別タスクとして�
 ### Real-data verification
 
 Tier A(8ペア)+ AlphaFold3陰性(28件、MA_4115クエリ)を用いた実データ
-検証(`.cache/geo_investigation/`、gitignore対象のため非コミット)で、
-新しい統合済み`02_Final_Score`シート上でも既存の分離傾向が保たれている
-ことを確認: `final_score`の POS-NEG 平均差 +32.89、`interaction_score`の
-同 +49.96(いずれも計算ロジック自体は本PRで無変更、シート統合後も
-数値が破綻していないことの確認)。重複排除・"Unclassified"候補ゼロ・
-カテゴリ別シートの`NOT_RUN`/空表示が設計通りであることも確認済み。
+検証(`.cache/geo_investigation/`、gitignore対象のため非コミット)。
+
+初回の検証はSTRING PPI/GEO coexpressionを無効化した設定で行われ、
+Final Score統合フェーズの検証(+17.20)と条件が一致していなかった
+(陰性側が外部エビデンスを失い分離幅が見かけ上+32.89まで拡大しただけ
+で、正例側やスコアリングロジックの変化ではない)。`git worktree`で
+Stage 1適用前のコミット(`466564a`, PR #12マージ後)をチェックアウトし、
+Final Score統合フェーズの検証と同一設定(STRING PPI・GEO coexpression
+両方有効)で再実行、Stage 1適用後のブランチとも同一設定で実行して
+36ペア全件(Tier A 8 + AF3陰性28)を`final_score`/`interaction_score`
+まで直接突合した結果、**全件が小数点以下まで完全一致**
+(POS平均42.884、NEG平均25.680 → 分離幅 **+17.20**、Final Score統合
+フェーズの数値を厳密に再現)。シート統合によるスコア値への影響は
+ゼロであることを確認。副産物として、MA_3899→MA_3898ペアが
+`Interaction_Candidates_relaxed`と`Interaction_Neg_hit`の両方に
+同一スコア(54.033)で重複出現していたこと(PR #11の重複スコアリング
+問題そのもの)も実データで直接確認し、統合ロジックが正しく
+`Candidates_relaxed`側を採用することを確認済み。重複排除・
+"Unclassified"候補ゼロも確認済み。
 
 ## 未リリース: Final Score統合(design spec §17-22・§27)
 

@@ -429,29 +429,54 @@ data. Confirmed:
   overlapping buckets in real data, not just in unit tests.
 - Zero `"Unclassified"` candidates -- every one of the 4627 real records
   resolved to exactly one of the 6 consolidated buckets.
-- Tier A (8 curated true-positive pairs) vs. AlphaFold3-negative (28
-  pairs against the MA_4115 query) separation is preserved in the new
-  consolidated sheet: `final_score` mean gap (POS-NEG) = **+32.89**,
-  `interaction_score` mean gap = **+49.96**. (These numbers are not
-  directly comparable to the Final Score integration phase's own
-  pre-existing +17.20/+27.55 figures -- this diagnostic run used a
-  different `candidate_sources`/`ranking_metric` combination and, more
-  importantly, the *point* of this check is different: confirming the
-  sheet-consolidation layer does not corrupt or duplicate already-computed
-  scores, not re-validating the scoring formula itself, which this Stage
-  1 task does not touch.)
-- `07_Evolutionary_Evidence` is empty (no PIH bundle configured in this
-  run) and `09_Interaction_Evidence` shows `status: NOT_RUN` rows for
-  `string_cooccurrence`/`coexpression_gse77738`/`coexpression_gse64349`
-  (STRING/GEO bridges not configured in this run) -- both are the
-  expected "evaluated as absent, not a bug" state the Stage 1 directive
-  explicitly allowed for.
 - `11_Raw_Audit`'s three stacked blocks (detail / query / neighborhood)
   render correctly at their computed offsets in the real (230,164-row)
   sheet.
+
+An initial pass reported a `final_score` POS-NEG gap of +32.89, and
+attributed it to a "different but not directly comparable" config than
+the Final Score integration phase's own +17.20 figure. On review this
+was under-specified: that run had `string_ppi_ncbi_taxon_id` unset and
+`geo_coexpression_enabled: false`, while the +17.20 verification had both
+enabled -- the gap widened only because AF3-negative pairs lost STRING/
+coexpression evidence (`interaction_score` collapsing toward 0), not
+because anything about the positives or the scoring logic changed. That
+is not a valid apples-to-apples check, so it was redone properly:
+
+**Matched-config, pair-by-pair comparison.** Checked out the pre-Stage-1
+commit (`466564a`, PR #12 merged) into a separate `git worktree`, and ran
+it with a config identical to the Final Score integration phase's own
+verification (STRING PPI + GEO coexpression both enabled, same 5
+queries, `negative_hit` enabled). Ran the current Stage 1 branch with the
+exact same config. For every one of the 8 Tier A pairs and 28
+AlphaFold3-negative pairs, looked up the pre-Stage-1 code's per-sheet row
+for whichever `candidate_source` bucket Stage 1's dedup logic selected,
+and compared `final_score`/`interaction_score` directly:
+
+- **36/36 pairs matched exactly** (identical to the last decimal) between
+  the pre-Stage-1 per-sheet output and the Stage-1 consolidated
+  `02_Final_Score` sheet. Recomputed gap under this matched config:
+  `final_score` POS mean 42.884, NEG mean 25.680 -> **+17.20**, exactly
+  reproducing the Final Score integration phase's own figure.
+- Confirms the Excel restructuring changed **zero** scoring values --
+  Stage 1 only reshapes already-computed rows into fewer sheets.
+- Also directly confirmed the PR #11 duplicate-scoring finding in this
+  same data: MA_3899(query)->MA_3898(candidate) appeared under *both*
+  `Interaction_Candidates_relaxed` and `Interaction_Neg_hit` in the
+  pre-Stage-1 output with an identical score (54.033) in both -- exactly
+  the kind of duplicate this consolidation is meant to resolve, and the
+  dedup logic picked `Candidates_relaxed` (the higher-priority bucket)
+  correctly.
+- `07_Evolutionary_Evidence` empty and `09_Interaction_Evidence` showing
+  `status: NOT_RUN` rows only occurred in the earlier, unmatched-config
+  run (no PIH bundle, STRING/GEO bridges off in that run) -- expected
+  "evaluated as absent, not a bug" behavior the Stage 1 directive
+  explicitly allowed for, not a defect in the matched-config run (which
+  had STRING/coexpression evidence flowing normally).
 
 Diagnostic config/output files live under `.cache/geo_investigation/`
 (gitignored, not committed), following the same
 backup/override/restore-free pattern (a separate `--config` file, so
 `config.yaml` itself was never touched) used by every prior real-data
-verification in this session.
+verification in this session. The comparison worktree was removed after
+use (`git worktree remove`).
