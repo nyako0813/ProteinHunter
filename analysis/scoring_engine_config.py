@@ -103,6 +103,15 @@ class ScoringEngineConfig:
 #: "present but inactive unless configured" behavior as the pih_* caps:
 #: interaction_scoring.string_ppi_ncbi_taxon_id must be set for this
 #: category to ever have available evidence.
+#:
+#: "coexpression_evidence" (Phase 6b, analysis/coexpression_bridge.py) is
+#: also a PROVISIONAL cap, same reasoning as external_ppi_evidence -- 12.0
+#: was picked as a modest budget, deliberately smaller than
+#: external_ppi_evidence's 15.0 since this category's own two components
+#: are individually weighted down further still (see
+#: analysis.interaction_scoring.V2_COMPONENT_WEIGHTS["coexpression_gse64349"]).
+#: Requires interaction_scoring.geo_coexpression_enabled to ever have
+#: available evidence.
 DEFAULT_CATEGORY_CAPS: dict[str, float] = {
     "source_classification": 30.0,
     "genomic_context": 25.0,
@@ -111,6 +120,7 @@ DEFAULT_CATEGORY_CAPS: dict[str, float] = {
     "pih_evolutionary": 10.0,
     "pih_direct_interaction": 20.0,
     "external_ppi_evidence": 15.0,
+    "coexpression_evidence": 12.0,
 }
 
 DEFAULT_SCORING_ENGINE_CONFIG = ScoringEngineConfig(

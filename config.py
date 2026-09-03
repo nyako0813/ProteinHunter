@@ -223,6 +223,14 @@ class InteractionScoringConfig:
     # external_ppi_evidence category and genomic_context's
     # string_neighborhood component.
     string_ppi_ncbi_taxon_id: int | None = None
+    # Public GEO coexpression evidence (scoring_model: v2_evidence_based
+    # only; Phase 6b, see claude/phase6b_coexpression_design.md). Enables
+    # both GSE77738 and GSE64349 bridges together (analysis/coexpression_bridge.py)
+    # -- the datasets/accessions themselves are not configurable, unlike
+    # STRING's taxon id, so a single on/off flag is enough. False by
+    # default: enabling it downloads two GEO supplementary files (a few MB
+    # each) on first use.
+    geo_coexpression_enabled: bool = False
 
 
 VALID_INTERACTION_SCORING_MODELS: tuple[str, ...] = ("legacy_additive", "v2_evidence_based")
@@ -977,6 +985,13 @@ def _validate_interaction_scoring_section(raw: dict[object, object]) -> None:
             "must be a positive integer or left unset."
         )
 
+    geo_coexpression_enabled = section.get("geo_coexpression_enabled", False)
+    if not isinstance(geo_coexpression_enabled, bool):
+        raise ConfigError(
+            "config.yaml value 'interaction_scoring.geo_coexpression_enabled' "
+            "must be true or false."
+        )
+
 
 def _load_interaction_scoring(raw_scoring: object) -> InteractionScoringConfig:
     """Load optional lightweight interaction scoring settings."""
@@ -1123,6 +1138,7 @@ def _load_interaction_scoring(raw_scoring: object) -> InteractionScoringConfig:
             if raw_scoring.get("string_ppi_ncbi_taxon_id") is not None
             else None
         ),
+        geo_coexpression_enabled=bool(raw_scoring.get("geo_coexpression_enabled", False)),
     )
 
 
