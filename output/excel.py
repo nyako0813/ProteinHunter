@@ -238,11 +238,14 @@ INTERACTION_SCORE_EXPLANATIONS: tuple[tuple[str, str], ...] = (
         "interaction_score",
         "Query-specific evidence only, re-normalized to 0-100: genomic_context "
         "(+ STRING's neighborhood channel) + domain_complementarity + external_ppi_evidence "
-        "(STRING's cooccurrence channel). Populated for both scoring models -- v2_evidence_based "
+        "(STRING's cooccurrence channel) + coexpression_evidence (GSE77738/GSE64349 measured "
+        "transcript coexpression). Populated for both scoring models -- v2_evidence_based "
         "computes it from EvidenceComponent categories (blank/None means no query-specific "
         "evidence was available at all, not a scored zero); legacy_additive computes an "
         "equivalent blended sum (always a number, 0 when there is no evidence, since legacy has "
-        "no 'missing vs. evaluated-zero' concept). Deliberately excludes source_classification, "
+        "no 'missing vs. evaluated-zero' concept; legacy_additive does not yet include "
+        "coexpression_evidence -- v2_evidence_based only, see "
+        "claude/phase6b_coexpression_design.md). Deliberately excludes source_classification, "
         "sequence_evidence, and co_occurrence, which mainly reflect the candidate's own "
         "conservation profile rather than evidence specific to this query pair. Reference only -- "
         "does not affect interaction_priority_score, candidate_rank, or sheet sort order.",
@@ -267,6 +270,10 @@ INTERACTION_SCORE_NOTES: tuple[str, ...] = (
     "(https://string-db.org), used under the Creative Commons Attribution 4.0 "
     "International (CC BY 4.0) license. Please credit STRING if these values are "
     "published or redistributed.",
+    "coexpression_gse77738/coexpression_gse64349 are derived from NCBI GEO datasets "
+    "GSE77738 (PMID 27852217) and GSE64349 (PMID 25691524), public NIH data with no "
+    "reuse restriction; citing these studies when the values are published or "
+    "redistributed is standard scientific courtesy, not a license requirement.",
 )
 
 

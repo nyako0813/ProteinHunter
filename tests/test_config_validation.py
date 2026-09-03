@@ -134,6 +134,7 @@ def test_missing_annotation_targets_uses_safe_defaults(tmp_path: Path) -> None:
     assert cfg.interaction_scoring.evidence_detail_sheet.include_no_hit is False
     assert cfg.interaction_scoring.ranking_metric == "interaction_priority_score"
     assert cfg.interaction_scoring.string_ppi_ncbi_taxon_id is None
+    assert cfg.interaction_scoring.geo_coexpression_enabled is False
 
 
 def test_annotation_targets_can_enable_no_hit_pfam(tmp_path: Path) -> None:
@@ -279,6 +280,7 @@ def test_interaction_scoring_can_be_configured(tmp_path: Path) -> None:
         },
         "ranking_metric": "interaction_score",
         "string_ppi_ncbi_taxon_id": 188937,
+        "geo_coexpression_enabled": True,
     }
     config_path = write_config(tmp_path, data)
 
@@ -303,6 +305,7 @@ def test_interaction_scoring_can_be_configured(tmp_path: Path) -> None:
     assert cfg.interaction_scoring.evidence_detail_sheet.include_no_hit is True
     assert cfg.interaction_scoring.ranking_metric == "interaction_score"
     assert cfg.interaction_scoring.string_ppi_ncbi_taxon_id == 188937
+    assert cfg.interaction_scoring.geo_coexpression_enabled is True
 
 
 def test_invalid_interaction_candidate_source_raises_config_error(
@@ -398,6 +401,19 @@ def test_invalid_string_ppi_ncbi_taxon_id_raises_config_error(tmp_path: Path) ->
 
     with pytest.raises(ConfigError, match="interaction_scoring.string_ppi_ncbi_taxon_id"):
         load_config(config_path, initialize=False)
+
+
+def test_invalid_geo_coexpression_enabled_raises_config_error(tmp_path: Path) -> None:
+    """interaction_scoring.geo_coexpression_enabled must be a bool."""
+    data = valid_config_data()
+    data["interaction_scoring"] = {
+        "geo_coexpression_enabled": "yes",
+    }
+    config_path = write_config(tmp_path, data)
+
+    with pytest.raises(ConfigError, match="interaction_scoring.geo_coexpression_enabled"):
+        load_config(config_path, initialize=False)
+
 
 def test_missing_optional_gff_does_not_fail_config_validation(tmp_path: Path) -> None:
     """Optional GFF path should not be required."""

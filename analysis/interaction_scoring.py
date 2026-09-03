@@ -32,6 +32,11 @@ from analysis.scoring_engine_config import (
     SequenceEvidenceConfig,
     load_scoring_engine_config,
 )
+from analysis.coexpression_bridge import (
+    CoexpressionBundle,
+    load_gse64349_coexpression_bundle,
+    load_gse77738_coexpression_bundle,
+)
 from analysis.string_ppi_bridge import StringPpiBundle, load_string_ppi_bundle
 
 V2_SCORING_MODEL = "v2_evidence_based"
@@ -66,6 +71,24 @@ V2_COMPONENT_WEIGHTS: dict[str, float] = {
     # genomic_context itself, the same "average the two components evenly"
     # pattern source_classification+sequence_evidence already use).
     "string_neighborhood": 1.0,
+    # coexpression_evidence category (Phase 6b, see
+    # claude/phase6b_coexpression_design.md). coexpression_gse77738 (M2) and
+    # coexpression_gse64349 (M3) are deliberately NOT weighted evenly, unlike
+    # string_cooccurrence/string_neighborhood above: GSE64349 has only 12
+    # samples across 4 growth conditions, and Phase 6b's investigation found
+    # this produces a badly inflated background gene-pair correlation (mean
+    # random-pair r ~0.76, vs. ~0.15-0.21 for GSE77738's larger sample).
+    # Percentile-rank normalization (see _coexpression_status_and_value)
+    # already corrects for each dataset's own background, but a small-n
+    # percentile estimate is still statistically noisier than a larger one,
+    # so coexpression_gse64349's weight is set lower as a PROVISIONAL
+    # reduction for this sample-size difference, not a claim about the
+    # underlying biology. 1/3 was picked as a simple, clearly-intentional
+    # fraction (not derived from any fit) -- revisit once real calibration
+    # data is available, same as every other provisional weight/cap in this
+    # phase.
+    "coexpression_gse77738": 1.0,
+    "coexpression_gse64349": 1.0 / 3.0,
 }
 
 _NEGATIVE_HIT_STRENGTH_VALUES: dict[str, float] = {
@@ -473,6 +496,25 @@ def run_interaction_scoring(config: Any, blast_classification: Any) -> Interacti
         )
         warnings.extend(string_ppi_bundle.warnings)
 
+    # Public GEO coexpression evidence (Phase 6b, see
+    # claude/phase6b_coexpression_design.md). Unlike STRING, this is
+    # v2_evidence_based only for now -- legacy_additive integration was
+    # explicitly deferred, same as Phase 6a's own M4 was done after (not
+    # alongside) its v2 components.
+    coexpression_gse77738_bundle: CoexpressionBundle | None = None
+    coexpression_gse64349_bundle: CoexpressionBundle | None = None
+    if scoring_model == V2_SCORING_MODEL and getattr(scoring_config, "geo_coexpression_enabled", False):
+        query_tags = [query["resolved_old_locus_tag"] for query in resolved_queries]
+        cache = JsonCache(config.paths.cache_dir)
+        coexpression_gse77738_bundle = load_gse77738_coexpression_bundle(
+            True, query_tags, cache, config.paths.cache_dir
+        )
+        warnings.extend(coexpression_gse77738_bundle.warnings)
+        coexpression_gse64349_bundle = load_gse64349_coexpression_bundle(
+            True, query_tags, cache, config.paths.cache_dir
+        )
+        warnings.extend(coexpression_gse64349_bundle.warnings)
+
     protein_hunter_scores = resolve_protein_hunter_scores(config, blast_classification)
 
     for source_key, enabled in scoring_config.candidate_sources.items():
@@ -502,6 +544,8 @@ def run_interaction_scoring(config: Any, blast_classification: Any) -> Interacti
                 ruleset=ruleset,
                 pih_bundle=pih_bundle,
                 string_ppi_bundle=string_ppi_bundle,
+                coexpression_gse77738_bundle=coexpression_gse77738_bundle,
+                coexpression_gse64349_bundle=coexpression_gse64349_bundle,
                 collect_evidence_detail=collect_evidence_detail,
             )
         else:
@@ -947,6 +991,8 @@ def _rank_source_candidates_v2(
     ruleset: FunctionalComplementarityRuleset,
     pih_bundle: PihEvidenceBundle | None = None,
     string_ppi_bundle: StringPpiBundle | None = None,
+    coexpression_gse77738_bundle: CoexpressionBundle | None = None,
+    coexpression_gse64349_bundle: CoexpressionBundle | None = None,
     collect_evidence_detail: bool = False,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Evidence-based (scoring model v2) counterpart of _rank_source_candidates."""
@@ -966,6 +1012,8 @@ def _rank_source_candidates_v2(
                 query, candidate, candidate_source, scoring_config, feature_map, engine_config, ruleset,
                 pih_bundle=pih_bundle,
                 string_ppi_bundle=string_ppi_bundle,
+                coexpression_gse77738_bundle=coexpression_gse77738_bundle,
+                coexpression_gse64349_bundle=coexpression_gse64349_bundle,
             )
             pairs.append((candidate.protein_id, row, breakdown, interaction_breakdown))
 
@@ -1057,8 +1105,19 @@ def _evidence_detail_rows_v2(
 #: genomic_context's category/cap as a second component, but is filtered
 #: by component *name* here, same as every other entry, so it needs its
 #: own listing even though its category name is already present).
+#:
+#: Phase 6b adds "coexpression_gse77738"/"coexpression_gse64349" (measured
+#: transcript coexpression between query and candidate specifically -- a
+#: pair-level signal, unlike co_occurrence above).
 INTERACTION_SCORE_COMPONENT_NAMES: frozenset[str] = frozenset(
-    {"genomic_context", "domain_complementarity", "string_cooccurrence", "string_neighborhood"}
+    {
+        "genomic_context",
+        "domain_complementarity",
+        "string_cooccurrence",
+        "string_neighborhood",
+        "coexpression_gse77738",
+        "coexpression_gse64349",
+    }
 )
 
 
@@ -1086,6 +1145,8 @@ def _score_pair_v2(
     ruleset: FunctionalComplementarityRuleset,
     pih_bundle: PihEvidenceBundle | None = None,
     string_ppi_bundle: StringPpiBundle | None = None,
+    coexpression_gse77738_bundle: CoexpressionBundle | None = None,
+    coexpression_gse64349_bundle: CoexpressionBundle | None = None,
 ) -> tuple[dict[str, Any], ScoreBreakdown, ScoreBreakdown]:
     """Score one query/candidate pair with the evidence-based engine.
 
@@ -1099,6 +1160,8 @@ def _score_pair_v2(
     components, location_info = _build_evidence_components_v2(
         query, candidate, candidate_source, feature_map, ruleset, engine_config, pih_bundle=pih_bundle,
         string_ppi_bundle=string_ppi_bundle,
+        coexpression_gse77738_bundle=coexpression_gse77738_bundle,
+        coexpression_gse64349_bundle=coexpression_gse64349_bundle,
     )
     breakdown = score_candidate(components, engine_config)
     interaction_breakdown = _interaction_only_breakdown(components, engine_config)
@@ -1184,6 +1247,8 @@ def _build_evidence_components_v2(
     engine_config: ScoringEngineConfig,
     pih_bundle: PihEvidenceBundle | None = None,
     string_ppi_bundle: StringPpiBundle | None = None,
+    coexpression_gse77738_bundle: CoexpressionBundle | None = None,
+    coexpression_gse64349_bundle: CoexpressionBundle | None = None,
 ) -> tuple[list[EvidenceComponent], dict[str, Any]]:
     """Build the evidence components for one pair, reusing v5's raw signals."""
     components: list[EvidenceComponent] = []
@@ -1366,6 +1431,64 @@ def _build_evidence_components_v2(
             )
         )
 
+    coexpr77738_status, coexpr77738_value, coexpr77738_reason = _coexpression_status_and_value(
+        query, candidate, coexpression_gse77738_bundle, "GSE77738"
+    )
+    if coexpr77738_status is EvidenceStatus.AVAILABLE:
+        coexpr77738_pair = coexpression_gse77738_bundle.lookup(
+            query["resolved_old_locus_tag"], candidate.old_locus_tag or ""
+        )
+        components.append(
+            EvidenceComponent.available(
+                "coexpression_gse77738",
+                "coexpression_evidence",
+                coexpr77738_value,
+                V2_COMPONENT_WEIGHTS["coexpression_gse77738"],
+                raw_value=coexpr77738_pair.correlation if coexpr77738_pair is not None else None,
+                source="geo_gse77738",
+                explanation=coexpr77738_reason,
+            )
+        )
+    else:
+        components.append(
+            EvidenceComponent.unavailable(
+                "coexpression_gse77738",
+                "coexpression_evidence",
+                coexpr77738_status,
+                source="geo_gse77738",
+                explanation=coexpr77738_reason,
+            )
+        )
+
+    coexpr64349_status, coexpr64349_value, coexpr64349_reason = _coexpression_status_and_value(
+        query, candidate, coexpression_gse64349_bundle, "GSE64349"
+    )
+    if coexpr64349_status is EvidenceStatus.AVAILABLE:
+        coexpr64349_pair = coexpression_gse64349_bundle.lookup(
+            query["resolved_old_locus_tag"], candidate.old_locus_tag or ""
+        )
+        components.append(
+            EvidenceComponent.available(
+                "coexpression_gse64349",
+                "coexpression_evidence",
+                coexpr64349_value,
+                V2_COMPONENT_WEIGHTS["coexpression_gse64349"],
+                raw_value=coexpr64349_pair.correlation if coexpr64349_pair is not None else None,
+                source="geo_gse64349",
+                explanation=coexpr64349_reason,
+            )
+        )
+    else:
+        components.append(
+            EvidenceComponent.unavailable(
+                "coexpression_gse64349",
+                "coexpression_evidence",
+                coexpr64349_status,
+                source="geo_gse64349",
+                explanation=coexpr64349_reason,
+            )
+        )
+
     if pih_bundle is not None:
         query_keys = [
             query["resolved_protein_id"],
@@ -1537,6 +1660,43 @@ def _string_neighborhood_status_and_value(
         EvidenceStatus.AVAILABLE,
         normalized,
         f"STRING neighborhood score: {scores.neighborhood}/1000",
+    )
+
+
+def _coexpression_status_and_value(
+    query: dict[str, Any],
+    candidate: ProteinRecord,
+    bundle: CoexpressionBundle | None,
+    dataset_label: str,
+) -> tuple[EvidenceStatus, float | None, str]:
+    """Public GEO coexpression evidence (Phase 6b) for this pair, from one dataset.
+
+    NOT_RUN when interaction_scoring.geo_coexpression_enabled is unset (the
+    bridge was never loaded). MISSING when either protein's old_locus_tag is
+    absent from this dataset's gene list, or has zero-variance expression
+    across the retained samples (correlation undefined) -- see
+    CoexpressionBundle.lookup. Otherwise AVAILABLE; ``normalized_value`` is
+    the pair's correlation expressed as a percentile rank within the query
+    gene's own background correlation distribution for this dataset, not the
+    raw correlation itself -- see claude/phase6b_coexpression_design.md for
+    why a fixed linear map of Pearson r is not used (GSE64349's small sample
+    count badly inflates its background gene-pair correlation, making a raw
+    r=0.7 mean something very different there than in GSE77738).
+    """
+    if bundle is None:
+        return EvidenceStatus.NOT_RUN, None, "GEO coexpression evidence is disabled in configuration"
+
+    query_tag = query["resolved_old_locus_tag"]
+    candidate_tag = candidate.old_locus_tag or ""
+    pair = bundle.lookup(query_tag, candidate_tag)
+    if pair is None:
+        return EvidenceStatus.MISSING, None, f"not found in {dataset_label} (n={bundle.n_samples} samples)"
+
+    return (
+        EvidenceStatus.AVAILABLE,
+        pair.percentile,
+        f"{dataset_label} coexpression: r={pair.correlation:.2f}, "
+        f"percentile={pair.percentile:.2f} (n={bundle.n_samples} samples)",
     )
 
 

@@ -7,6 +7,7 @@ from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
+import pandas as pd
 import pytest
 
 from config import (
@@ -29,6 +30,7 @@ from analysis.interaction_scoring import (
     resolve_protein_hunter_scores,
     run_interaction_scoring,
 )
+from analysis.coexpression_bridge import GSE77738_STEADY_STATE_RPKM_COLUMNS
 from analysis.scoring import build_candidate_score
 from analysis.string_ppi_bridge import STRING_VERSION
 
@@ -1063,6 +1065,287 @@ def test_string_neighborhood_not_run_when_taxon_id_unset() -> None:
     )
     assert detail["status"] == "NOT_RUN"
     assert detail["category"] == "genomic_context"
+
+
+# ---------------------------------------------------------------------------
+# coexpression_gse77738: coexpression_evidence category (Phase 6b M2)
+# ---------------------------------------------------------------------------
+
+
+def _seed_gse77738_coexpression_file(cache_dir: Path, gene_values: dict[str, list[float]]) -> None:
+    """Write a small synthetic GSE77738_ReadCounts.xls-equivalent workbook.
+
+    ``gene_values`` maps a bare gene locus ('MA0001') to one value per
+    steady-state sample column (see GSE77738_STEADY_STATE_RPKM_COLUMNS).
+    """
+    columns = sorted(GSE77738_STEADY_STATE_RPKM_COLUMNS)
+    data = {"Gene Locus": list(gene_values), "Gene Name": ["-"] * len(gene_values)}
+    for col_index, col in enumerate(columns):
+        data[col] = [values[col_index] for values in gene_values.values()]
+    df = pd.DataFrame(data)
+    path = cache_dir / "coexpression" / "GSE77738_ReadCounts.xls"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with pd.ExcelWriter(path, engine="openpyxl") as writer:
+        df.to_excel(writer, sheet_name="RPKM Normalized Read Counts", index=False)
+
+
+def test_coexpression_gse77738_not_run_when_disabled() -> None:
+    """Without geo_coexpression_enabled, coexpression_gse77738 must be NOT_RUN, not MISSING."""
+    records = {
+        "query": record("query", old_locus_tag="MA_0001", positive_sources_hit=["A"]),
+        "candidate": record("candidate", old_locus_tag="MA_0002", positive_sources_hit=["A"]),
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+        scoring_model="v2_evidence_based",
+        evidence_detail_sheet=INTERACTION_EVIDENCE_DETAIL_DEFAULT,
+    )
+
+    result = run_interaction_scoring(cfg, classification(records))
+
+    assert result is not None
+    detail = next(
+        r
+        for r in result.evidence_detail_rows
+        if r["candidate_protein_id"] == "candidate" and r["component_name"] == "coexpression_gse77738"
+    )
+    assert detail["status"] == "NOT_RUN"
+    assert detail["category"] == "coexpression_evidence"
+
+
+def test_coexpression_gse77738_missing_for_gene_absent_from_dataset(tmp_path: Path) -> None:
+    """A candidate gene never measured in GSE77738 can never be found -- MISSING."""
+    records = {
+        "query": record("query", old_locus_tag="MA_0001", positive_sources_hit=["A"]),
+        "candidate": record("candidate", old_locus_tag="MA_9999", positive_sources_hit=["A"]),
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+    _seed_gse77738_coexpression_file(
+        tmp_path,
+        {"MA0001": [10, 20, 30, 40, 50, 60, 70, 80, 90, 15, 25, 35, 45]},
+    )
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+        scoring_model="v2_evidence_based",
+        cache_dir=tmp_path,
+    )
+    cfg.interaction_scoring = replace(cfg.interaction_scoring, geo_coexpression_enabled=True)
+
+    result = run_interaction_scoring(cfg, classification(records))
+
+    assert result is not None
+    detail = next(
+        r
+        for r in result.evidence_detail_rows
+        if r["candidate_protein_id"] == "candidate" and r["component_name"] == "coexpression_gse77738"
+    )
+    assert detail["status"] == "MISSING"
+
+
+def test_coexpression_gse77738_available_and_feeds_interaction_score(tmp_path: Path) -> None:
+    """A correlated pair should be AVAILABLE, with normalized_value the percentile (not raw r)."""
+    records = {
+        "query": record("query", old_locus_tag="MA_0001", description="", positive_sources_hit=["A"]),
+        "candidate": record(
+            "candidate", old_locus_tag="MA_0002", description="", positive_sources_hit=["A"]
+        ),
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+    base = [10, 20, 30, 40, 50, 60, 70, 80, 90, 15, 25, 35, 45]
+    _seed_gse77738_coexpression_file(
+        tmp_path,
+        {
+            "MA0001": base,
+            # Moves in lockstep with MA0001 -- should rank at the top of
+            # MA_0001's own background distribution (percentile ~1.0).
+            "MA0002": [v * 2 for v in base],
+            # Moves opposite -- should rank at the bottom (percentile ~0.0).
+            "MA0003": [max(base) - v for v in base],
+        },
+    )
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+        scoring_model="v2_evidence_based",
+        cache_dir=tmp_path,
+    )
+    cfg.interaction_scoring = replace(cfg.interaction_scoring, geo_coexpression_enabled=True)
+
+    result = run_interaction_scoring(cfg, classification(records))
+
+    assert result is not None
+    detail = next(
+        r
+        for r in result.evidence_detail_rows
+        if r["candidate_protein_id"] == "candidate" and r["component_name"] == "coexpression_gse77738"
+    )
+    assert detail["status"] == "AVAILABLE"
+    assert detail["category"] == "coexpression_evidence"
+    assert detail["category_cap"] == 12.0
+    assert detail["raw_value"] == pytest.approx(1.0, abs=1e-3)  # raw Pearson r, not the percentile
+    assert detail["normalized_value"] == pytest.approx(1.0, abs=1e-6)  # percentile rank vs. MA0003
+
+    row = result.source_rows["Interaction_Candidates"][0]
+    assert row["interaction_score"] is not None
+    assert row["interaction_score"] > 0
+
+
+def test_coexpression_gse77738_reuses_cache_across_runs(tmp_path: Path) -> None:
+    """A second run for the same query must not need the source file re-parsed."""
+    records = {
+        "query": record("query", old_locus_tag="MA_0001", positive_sources_hit=["A"]),
+        "candidate": record("candidate", old_locus_tag="MA_0002", positive_sources_hit=["A"]),
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+    base = [10, 20, 30, 40, 50, 60, 70, 80, 90, 15, 25, 35, 45]
+    _seed_gse77738_coexpression_file(tmp_path, {"MA0001": base, "MA0002": [v * 2 for v in base]})
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+        scoring_model="v2_evidence_based",
+        cache_dir=tmp_path,
+    )
+    cfg.interaction_scoring = replace(cfg.interaction_scoring, geo_coexpression_enabled=True)
+
+    run_interaction_scoring(cfg, classification(records))
+    (tmp_path / "coexpression" / "GSE77738_ReadCounts.xls").unlink()
+
+    result = run_interaction_scoring(cfg, classification(records))
+
+    assert result is not None
+    detail = next(
+        r
+        for r in result.evidence_detail_rows
+        if r["candidate_protein_id"] == "candidate" and r["component_name"] == "coexpression_gse77738"
+    )
+    assert detail["status"] == "AVAILABLE"
+
+
+# ---------------------------------------------------------------------------
+# coexpression_gse64349: shares coexpression_evidence category, lower weight
+# (Phase 6b M3)
+# ---------------------------------------------------------------------------
+
+
+def _seed_gse64349_coexpression_files(cache_dir: Path, gene_values: dict[str, list[float]]) -> None:
+    """Write small synthetic TableS1 (wild-type) and TableS2 (parental+mutant) workbooks.
+
+    ``gene_values`` maps a bare gene locus to 4 values: [DMS, MMPA, MeOH
+    (TableS1's 3 wild-type samples), WWM82-parental (TableS2, kept)]. A
+    Delta-msrH column with an obviously-wrong constant value is always
+    added, to prove it never influences the result.
+    """
+    coexpr_dir = cache_dir / "coexpression"
+    coexpr_dir.mkdir(parents=True, exist_ok=True)
+
+    table1 = pd.DataFrame(
+        {
+            "Feature ID": list(gene_values),
+            "DMS - S1_R1 (single) (GE) - RPKM": [v[0] for v in gene_values.values()],
+            "MMPA - S2_R1 (single) (GE) - RPKM": [v[1] for v in gene_values.values()],
+            "MeOH - S3_R1 (single) (GE) - RPKM": [v[2] for v in gene_values.values()],
+        }
+    )
+    table1.to_excel(coexpr_dir / "GSE64349_TableS1_GEO.xlsx", index=False)
+
+    table2 = pd.DataFrame(
+        {
+            "Feature ID": list(gene_values),
+            "WWM82 (parental strain) - S4_R1 (single) (GE) - RPKM": [v[3] for v in gene_values.values()],
+            "delta-msrH - S5_R1 (single) (GE) - RPKM": [999999.0] * len(gene_values),
+        }
+    )
+    table2.to_excel(coexpr_dir / "GSE64349_TableS2_GEO.xlsx", index=False)
+
+
+def test_coexpression_gse64349_not_run_when_disabled() -> None:
+    """Without geo_coexpression_enabled, coexpression_gse64349 must be NOT_RUN, matching gse77738."""
+    records = {
+        "query": record("query", old_locus_tag="MA_0001", positive_sources_hit=["A"]),
+        "candidate": record("candidate", old_locus_tag="MA_0002", positive_sources_hit=["A"]),
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+        scoring_model="v2_evidence_based",
+        evidence_detail_sheet=INTERACTION_EVIDENCE_DETAIL_DEFAULT,
+    )
+
+    result = run_interaction_scoring(cfg, classification(records))
+
+    assert result is not None
+    detail = next(
+        r
+        for r in result.evidence_detail_rows
+        if r["candidate_protein_id"] == "candidate" and r["component_name"] == "coexpression_gse64349"
+    )
+    assert detail["status"] == "NOT_RUN"
+    assert detail["category"] == "coexpression_evidence"
+
+
+def test_coexpression_gse64349_weighted_lower_than_gse77738(tmp_path: Path) -> None:
+    """Both components share coexpression_evidence's cap, but gse64349's weight is 1/3 of gse77738's."""
+    records = {
+        "query": record("query", old_locus_tag="MA_0001", description="", positive_sources_hit=["A"]),
+        "candidate": record(
+            "candidate", old_locus_tag="MA_0002", description="", positive_sources_hit=["A"]
+        ),
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+    base77738 = [10, 20, 30, 40, 50, 60, 70, 80, 90, 15, 25, 35, 45]
+    _seed_gse77738_coexpression_file(
+        tmp_path, {"MA0001": base77738, "MA0002": [v * 2 for v in base77738]}
+    )
+    _seed_gse64349_coexpression_files(
+        tmp_path,
+        {
+            "MA0001": [10, 20, 30, 40],
+            "MA0002": [20, 40, 60, 80],
+            "MA0003": [40, 30, 20, 10],
+        },
+    )
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+        scoring_model="v2_evidence_based",
+        cache_dir=tmp_path,
+    )
+    cfg.interaction_scoring = replace(cfg.interaction_scoring, geo_coexpression_enabled=True)
+
+    result = run_interaction_scoring(cfg, classification(records))
+
+    assert result is not None
+    detail_rows = {
+        r["component_name"]: r
+        for r in result.evidence_detail_rows
+        if r["candidate_protein_id"] == "candidate"
+    }
+    gse77738 = detail_rows["coexpression_gse77738"]
+    gse64349 = detail_rows["coexpression_gse64349"]
+    assert gse77738["status"] == "AVAILABLE"
+    assert gse64349["status"] == "AVAILABLE"
+    assert gse77738["category"] == "coexpression_evidence"
+    assert gse64349["category"] == "coexpression_evidence"
+    # Both components share one cap...
+    assert gse77738["category_cap"] == gse64349["category_cap"] == 12.0
+    # ...but gse64349's weight is 1/3 of gse77738's (see
+    # V2_COMPONENT_WEIGHTS["coexpression_gse64349"]).
+    assert gse64349["weight"] == pytest.approx(gse77738["weight"] / 3.0)
+
+    # Delta-msrH's obviously-wrong constant value (999999) must never
+    # surface -- both wild-type-equivalent genes (MA0001/MA0002) still
+    # correlate near-perfectly.
+    assert gse64349["normalized_value"] == pytest.approx(1.0, abs=1e-6)
 
 
 def test_interaction_scoring_disabled_returns_none() -> None:
@@ -2176,9 +2459,10 @@ def test_evidence_detail_v2_long_format_has_one_row_per_component() -> None:
     ]
     # source_classification, sequence_evidence, genomic_context, co_occurrence,
     # domain_complementarity, negative_hit_strength, string_cooccurrence,
-    # string_neighborhood -- always exactly eight, whether AVAILABLE or not
-    # (see _build_evidence_components_v2).
-    assert len(detail_rows) == 8
+    # string_neighborhood, coexpression_gse77738, coexpression_gse64349 --
+    # always exactly ten, whether AVAILABLE or not (see
+    # _build_evidence_components_v2).
+    assert len(detail_rows) == 10
     assert {r["component_name"] for r in detail_rows} == {
         "source_classification",
         "sequence_evidence",
@@ -2188,6 +2472,8 @@ def test_evidence_detail_v2_long_format_has_one_row_per_component() -> None:
         "negative_hit_strength",
         "string_cooccurrence",
         "string_neighborhood",
+        "coexpression_gse77738",
+        "coexpression_gse64349",
     }
     for detail_row in detail_rows:
         assert set(detail_row) == set(INTERACTION_EVIDENCE_DETAIL_V2_COLUMNS)

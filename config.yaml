@@ -238,6 +238,16 @@ interaction_scoring:
   # first use.
   # string_ppi_ncbi_taxon_id: 188937
 
+  # Optional public GEO coexpression evidence (Phase 6b, used only by
+  # scoring_model: v2_evidence_based; see
+  # claude/phase6b_coexpression_design.md). Enables both the GSE77738
+  # (acetate/methanol/trimethylamine growth) and GSE64349 (methylated
+  # sulfur compounds) bridges together -- the accessions themselves are
+  # fixed to this project's target organism, not configurable. False (the
+  # default) disables both -- enabling it downloads a few MB of processed
+  # RNA-seq supplementary files from NCBI GEO on first use.
+  geo_coexpression_enabled: false
+
 
 # ----------------------------------------------------------
 # Cache
