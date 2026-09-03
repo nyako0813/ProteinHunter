@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 import yaml
 
-from config import load_config
+from config import load_config, redundant_negative_hit_sources
 from core.exceptions import ConfigError
 
 
@@ -413,6 +413,23 @@ def test_invalid_geo_coexpression_enabled_raises_config_error(tmp_path: Path) ->
 
     with pytest.raises(ConfigError, match="interaction_scoring.geo_coexpression_enabled"):
         load_config(config_path, initialize=False)
+
+
+def test_redundant_negative_hit_sources_detects_overlap() -> None:
+    """negative_hit + any of its strength sub-buckets enabled together should be flagged."""
+    assert redundant_negative_hit_sources(
+        {"negative_hit": True, "negative_strong_hit": True, "negative_medium_hit": False, "negative_weak_hit": False}
+    ) == ("negative_strong_hit",)
+    assert redundant_negative_hit_sources(
+        {"negative_hit": True, "negative_strong_hit": True, "negative_medium_hit": True, "negative_weak_hit": True}
+    ) == ("negative_strong_hit", "negative_medium_hit", "negative_weak_hit")
+
+
+def test_redundant_negative_hit_sources_empty_when_not_overlapping() -> None:
+    """No warning when negative_hit is off, or when only one bucket is on at a time."""
+    assert redundant_negative_hit_sources({"negative_hit": False, "negative_strong_hit": True}) == ()
+    assert redundant_negative_hit_sources({"negative_hit": True}) == ()
+    assert redundant_negative_hit_sources({"negative_strong_hit": True, "negative_weak_hit": True}) == ()
 
 
 def test_missing_optional_gff_does_not_fail_config_validation(tmp_path: Path) -> None:

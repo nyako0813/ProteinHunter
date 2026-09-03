@@ -335,6 +335,32 @@ INTERACTION_CANDIDATE_SOURCE_DEFAULTS: dict[str, bool] = {
     "negative_weak_hit": False,
 }
 
+#: negative_strong_hit/negative_medium_hit/negative_weak_hit are each a
+#: strict subset of negative_hit (every strong/medium/weak hit is already a
+#: negative_hit) -- enabling negative_hit together with any of these scores
+#: and reports the same candidate twice, once per bucket, under two
+#: different Interaction_* sheets with different candidate_rank values for
+#: the identical pair. Not a hard error (a user may deliberately want both
+#: views side by side), just worth a warning -- see
+#: redundant_negative_hit_sources() below and its call site in main.py.
+_NEGATIVE_HIT_SUB_BUCKETS: tuple[str, ...] = (
+    "negative_strong_hit",
+    "negative_medium_hit",
+    "negative_weak_hit",
+)
+
+
+def redundant_negative_hit_sources(candidate_sources: dict[str, bool]) -> tuple[str, ...]:
+    """Return the enabled negative_hit sub-buckets when negative_hit is also enabled.
+
+    Empty when negative_hit is off, or none of its sub-buckets are on --
+    the normal case. See claude/experimental_interactions_calibration_report.md
+    for the real-data example (MtpA-MtpC) that motivated this check.
+    """
+    if not candidate_sources.get("negative_hit", False):
+        return ()
+    return tuple(name for name in _NEGATIVE_HIT_SUB_BUCKETS if candidate_sources.get(name, False))
+
 INTERACTION_SCORING_WEIGHTS_DEFAULT = InteractionScoringWeightsConfig(
     candidate_priority=30.0,
     gene_neighborhood=25.0,

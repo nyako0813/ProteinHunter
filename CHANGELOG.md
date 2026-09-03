@@ -2,6 +2,53 @@
 
 ProteinHunter_v5 の変更履歴です。
 
+## 未リリース: 実験的相互作用データによる実データ検証と2件の修正
+
+`Methanosarcina_acetivorans_experimental_protein_interactions.xlsx`(27行、
+公開文献ベースの実験的相互作用証拠)をキュレーション・`old_locus_tag`対応付け
+した上で(`claude/experimental_interactions_curation.md`)、既存の
+AlphaFold3陰性校正データ(28件)と同一条件のパイプライン実行で直接比較する
+診断run(`claude/experimental_interactions_calibration_report.md`)を実施。
+2つの重要な発見があり、そのうち1件はコード修正、もう1件はドキュメント対応
+とした。
+
+### Fixed
+
+- v2の`interaction_score`合算対象(`INTERACTION_SCORE_COMPONENT_NAMES`)から
+  `coexpression_gse77738`を除外。実データ検証(陽性8件・陰性28件)で、
+  この指標が真の相互作用ペアよりも非相互作用ペアの方が高い値を示す逆転
+  (陽性側 平均0.480/中央値0.388 vs 陰性側 平均0.655/中央値0.732。最も低い
+  陽性値1件を除いても陽性0.548/0.416 vs 陰性のまま逆転は残る)が確認された
+  ため。データ取得・キャッシュ(`analysis/coexpression_bridge.py`)・
+  `Interaction_Evidence_Detail`シートへの表示は変更なし——スコアには使わない
+  が参考情報としては引き続き見える。`coexpression_gse64349`はこの逆転が
+  見られなかった(陽性0.848 vs 陰性0.601)ため現状維持(weight 1/3のまま)。
+  実データでの修正確認: Tier A 8ペア全件で`coexpression_gse77738`が
+  Evidence_Detailに残ることと、`interaction_score`が期待通り(除外前より
+  高い値だったペアは低下、低い値だったペアは上昇)変動することを確認。
+
+### Documented
+
+- 診断runで、HdrD1・Mcr複合体・Nifシステムなど保存性の高い経路/複合体の
+  既知相互作用パートナーが軒並み`Candidates`バケツではなく`Negative_hit`
+  (またはそのサブバケツ)に分類されることが判明。これらは古くから保存された
+  中心代謝酵素のため、陰性参照ゲノム側にも強くBLASTヒットしてしまうことが
+  原因。`candidate_sources.negative_hit`は既定で無効なため、**デフォルト
+  設定のままでは、このような保存性の高いクエリタンパク質の真の相互作用
+  パートナーが`Interaction_*`出力に一切現れない**。既定値は変更せず、
+  `config.yaml`の`negative_hit`周辺にこの挙動と対処法(有効化の検討)を
+  コメントで追記。`negative_hit`とその3つのサブバケツ(`negative_strong/
+  medium/weak_hit`)を同時に有効化すると同一候補が重複してスコア・出力
+  される(実例: MtpA-MtpCペアがInteraction_Neg_hitとInteraction_Neg_strong
+  の両方に別々の`candidate_rank`で出現)ため、その旨の注意書きも追加。
+  `config.redundant_negative_hit_sources()`(`main.py`から呼び出し)で
+  この組み合わせを検出した場合はrun時に警告ログを出力する(configエラー
+  ではなく警告のみ——意図的な併用を想定したユースケースもあり得るため)。
+- 副次的な発見として、`MA_1111`(RNAP subunit D)は現行RefSeq注釈で
+  pseudogene(フレームシフト)のため`target.faa`に配列自体が存在せず、
+  クエリにも候補にも一切使えないことを確認(前回のCHANGELOGエントリ
+  「公開共発現データの統合」に記載のGFF調査を裏付ける実行時の確認)。
+
 ## 未リリース: 公開共発現データの統合(Phase 6b)
 
 GEO公開RNA-seqデータ(GSE77738/GSE64349)由来の実測共発現証拠を

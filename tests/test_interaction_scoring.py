@@ -1147,8 +1147,15 @@ def test_coexpression_gse77738_missing_for_gene_absent_from_dataset(tmp_path: Pa
     assert detail["status"] == "MISSING"
 
 
-def test_coexpression_gse77738_available_and_feeds_interaction_score(tmp_path: Path) -> None:
-    """A correlated pair should be AVAILABLE, with normalized_value the percentile (not raw r)."""
+def test_coexpression_gse77738_available_but_excluded_from_interaction_score(tmp_path: Path) -> None:
+    """A correlated pair should be AVAILABLE (percentile, not raw r) but NOT feed interaction_score.
+
+    coexpression_gse77738 was removed from INTERACTION_SCORE_COMPONENT_NAMES
+    after a real-data check found it scored AlphaFold3-confirmed
+    non-interacting pairs higher, on average, than curated true positive
+    pairs -- see claude/experimental_interactions_calibration_report.md.
+    It is still computed, cached, and shown in Interaction_Evidence_Detail.
+    """
     records = {
         "query": record("query", old_locus_tag="MA_0001", description="", positive_sources_hit=["A"]),
         "candidate": record(
@@ -1191,9 +1198,12 @@ def test_coexpression_gse77738_available_and_feeds_interaction_score(tmp_path: P
     assert detail["raw_value"] == pytest.approx(1.0, abs=1e-3)  # raw Pearson r, not the percentile
     assert detail["normalized_value"] == pytest.approx(1.0, abs=1e-6)  # percentile rank vs. MA0003
 
+    # No other interaction_score-eligible evidence exists in this minimal
+    # fixture (no GFF, no STRING, no GSE64349) -- with coexpression_gse77738
+    # excluded, interaction_score must now be None (no query-specific
+    # evidence at all), not a score derived solely from gse77738.
     row = result.source_rows["Interaction_Candidates"][0]
-    assert row["interaction_score"] is not None
-    assert row["interaction_score"] > 0
+    assert row["interaction_score"] is None
 
 
 def test_coexpression_gse77738_reuses_cache_across_runs(tmp_path: Path) -> None:
@@ -1346,6 +1356,13 @@ def test_coexpression_gse64349_weighted_lower_than_gse77738(tmp_path: Path) -> N
     # surface -- both wild-type-equivalent genes (MA0001/MA0002) still
     # correlate near-perfectly.
     assert gse64349["normalized_value"] == pytest.approx(1.0, abs=1e-6)
+
+    # coexpression_gse64349 (unlike coexpression_gse77738, see
+    # test_coexpression_gse77738_available_but_excluded_from_interaction_score)
+    # still feeds interaction_score.
+    row = result.source_rows["Interaction_Candidates"][0]
+    assert row["interaction_score"] is not None
+    assert row["interaction_score"] > 0
 
 
 def test_interaction_scoring_disabled_returns_none() -> None:
