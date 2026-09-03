@@ -1441,14 +1441,27 @@ def test_final_score_combines_both_categories_per_30_70_split(tmp_path: Path) ->
     assert row["final_score"] == pytest.approx(expected, abs=0.05)
 
 
-def test_final_score_negative_penalty_is_independent_of_interaction_priority_score(tmp_path: Path) -> None:
-    """final_score's own negative_hit_strength read must lower it, separately from interaction_priority_score's."""
-    weak_candidate = _candidate_with_known_protein_hunter_score()
-    weak_candidate.negative_hit_strength = "strong"
-    weak_candidate.description = ""
+def test_final_score_ignores_negative_hit_strength_by_design(tmp_path: Path) -> None:
+    """final_score must NOT be lowered by negative_hit_strength, even "strong" -- tried and removed.
+
+    negative_hit_strength measures phylogenetic novelty (is this protein
+    also found in the negative reference genomes), not design spec section
+    7.7's "biological contradiction" concept -- a real-data check found
+    conflating the two collapsed true-positive/AlphaFold3-negative
+    separation, since ancient well-conserved true positives (Hdr/Mtp/Nif
+    complexes) are exactly the candidates a "strong" negative hit routes
+    into the Negative_hit bucket in the first place. See
+    _final_score_components's docstring and
+    claude/final_score_integration_investigation.md.
+    interaction_priority_score's own, separate use of negative_hit_strength
+    is intentionally untouched by this test.
+    """
+    strong_hit_candidate = _candidate_with_known_protein_hunter_score()
+    strong_hit_candidate.negative_hit_strength = "strong"
+    strong_hit_candidate.description = ""
     records = {
         "query": record("query", old_locus_tag="MA_0001", description="", positive_sources_hit=[]),
-        "candidate": weak_candidate,
+        "candidate": strong_hit_candidate,
         "relaxed": record("relaxed"),
         "novel": record("novel"),
     }
@@ -1456,6 +1469,7 @@ def test_final_score_negative_penalty_is_independent_of_interaction_priority_sco
         query_proteins=(InteractionQueryConfig("query", "", ""),),
         candidate_sources={"candidates": True},
         scoring_model="v2_evidence_based",
+        evidence_detail_sheet=INTERACTION_EVIDENCE_DETAIL_DEFAULT,
     )
 
     result = run_interaction_scoring(cfg, classification(records))
@@ -1463,14 +1477,17 @@ def test_final_score_negative_penalty_is_independent_of_interaction_priority_sco
     assert result is not None
     row = result.source_rows["Interaction_Candidates"][0]
     phs_norm100 = 14 / PROTEIN_HUNTER_SCORE_CEILING * 100
-    # A "strong" negative hit is a full-strength (value=1.0) penalty
-    # component weighted 30.0 output_scale points, same as
-    # V2_COMPONENT_WEIGHTS["negative_hit_strength"] -- capped by
-    # negative_penalty_cap (default 30.0), so it fully cancels the positive
-    # protein_hunter-alone score here (14/18*100 ~= 77.8 < 30 is false, so
-    # the penalty only partially reduces it, clamped at 0 floor).
-    assert row["final_score"] == pytest.approx(max(phs_norm100 - 30.0, 0.0), abs=0.01)
-    assert row["final_score"] < phs_norm100
+    # No penalty applied at all: final_score == protein_hunter-alone value,
+    # not reduced despite negative_hit_strength == "strong".
+    assert row["final_score"] == pytest.approx(phs_norm100, abs=0.01)
+
+    detail = next(
+        r
+        for r in result.evidence_detail_rows
+        if r["candidate_protein_id"] == "candidate" and r["component_name"] == "final_score_negative_penalty"
+    )
+    assert detail["status"] == "NOT_APPLICABLE"
+    assert detail["normalized_value"] is None
 
 
 def test_final_score_backward_compatible_with_custom_scoring_engine_config_missing_its_categories(

@@ -1,14 +1,15 @@
 # Final Score統合フェーズ:調査と設計提案・実装記録
 
-Status: **実装済み**(承認済み方式A、cap 30/70、ペナルティ独立適用)。
-design spec §17-22・§27が求める、`protein_hunter_score`と`interaction_score`
-(および`negative_hit`ペナルティ)を1つの数値へ統合する"Final Score"について、
-調査→承認→実装の記録。Phase 6/7/8(Excel/Word再設計、design spec独自番号)
-より前に着手した。実装後の実データ検証で**重要な発見**があったため、本文書末尾に
-追記した(§末尾「実装後の実データ検証」参照)——cap/weight自体は今回変更して
-いないが、承認済み設計の実際の挙動として必ず確認してほしい内容。
+Status: **実装済み・修正済み**(方式A、cap 30/70。negative_hit_strength
+ペナルティは実装後の実データ検証で問題が判明し、Final Scoreからは除外して
+NOT_APPLICABLE予約枠に変更済み)。design spec §17-22・§27が求める、
+`protein_hunter_score`と`interaction_score`を1つの数値へ統合する
+"Final Score"について、調査→承認→実装→実データ検証→設計修正→再検証、の
+記録。Phase 6/7/8(Excel/Word再設計、design spec独自番号)より前に着手した。
 
-以下、§1〜§6は実装前の調査内容(変更なし、記録として保持)。
+以下、§1〜§6は実装前の調査内容(変更なし、記録として保持)。実装後の経緯は
+文末の「実装後の実データ検証」「negative_hit_strengthペナルティの除外」
+「修正後の再検証」を参照。
 
 ## 1. 値域・スケール:最重要の発見
 
@@ -307,3 +308,46 @@ A・Cは併存できます(AのFinal Score計算自体で`interaction_score`側�
 を`interaction_priority_score`側と別に(より小さく)設定する、あるいは
 Final Scoreからはペナルティを除外する、といった選択肢が考えられますが、
 実装方針の変更はご判断を仰いでから行います。
+
+## negative_hit_strengthペナルティの除外(方針転換の決定)
+
+上記の発見を受けて、以下の方針転換が決定されました:
+
+**`negative_hit_strength`は本来、系統特異性/新規性のシグナル(「このタンパク質
+は陰性参照ゲノムにも広く存在するありふれたものか」)であり、design spec §7.7が
+定義する「Negative Evidence」(functional contradiction、incompatible
+localization、incompatible domain、phylogenetic contradiction——「このペア
+自体が相互作用として矛盾している」という反証)とは概念として別物です。**
+Tier A正例8ペア(Hdr/Mtp/Nif複合体)が軒並み`negative_hit_strength = strong`
+なのは、これらが古くから保存された中心代謝系だからであり、相互作用の妥当性とは
+無関係です。この2つの概念を混同してFinal Scoreにペナルティとして組み込んだ
+ことが、真の相互作用ペアを一律に減点する結果を招きました
+(PR #11で発見した「negative_hitバケツの盲点」と同根の問題が、スコア計算の
+場面で再発したもの)。
+
+対応: Final Scoreから`negative_hit_strength`ペナルティを完全に除外。
+`final_score_negative_penalty`コンポーネント自体は監査列の枠組みとして残すが、
+値は常に`NOT_APPLICABLE`(将来、design spec §7.7が本来意図する真の生物学的
+矛盾シグナル——機能矛盾・局在不整合など——が実装された際に使う予約枠であり、
+`negative_hit_strength`はその代用にはならない)。`interaction_priority_score`
+側の既存の`negative_hit_strength`適用は変更なし(そちらは候補全体の妥当性を
+評価するものであり、Final Scoreとは別の設計判断として妥当)。cap配分
+(protein_hunter=30/interaction=70)は今回の問題と無関係のため変更していない。
+
+## 修正後の再検証
+
+同一条件(Tier A正例8ペア・AlphaFold3陰性28件・同一パイプライン実行)で
+再検証した結果、分離幅が想定通り回復しました:
+
+| 指標 | 正例(n=8) mean/median | 陰性(n=28) mean/median | 分離幅(正例-陰性) |
+|---|---:|---:|---:|
+| `interaction_score`単独 | 39.83 / 41.22 | 12.28 / 12.59 | +27.55 |
+| `final_score`(ペナルティ適用時、修正前) | 16.05 / 13.86 | 16.00 / 17.94 | +0.05 |
+| `final_score`(ペナルティ除外後、修正後) | **42.88 / 43.86** | **25.68 / 25.23** | **+17.20** |
+
+`interaction_score`単独の分離幅+27.55に対し、`final_score`は+17.20と、
+`protein_hunter_score`混合による希釈分だけやや下がる程度に収まりました
+(実装前の簡易試算§6の30/70ブレンド予測値+16.54ともほぼ一致)。ご想定通りの
+挙動に回復したことを確認しました。生データ:
+`claude/final_score_verification_positive.csv` /
+`final_score_verification_negative.csv`(修正後の値に更新済み)。

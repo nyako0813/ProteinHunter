@@ -315,9 +315,12 @@ INTERACTION_PAIR_COLUMNS: tuple[str, ...] = (
     # protein_hunter_score and interaction_score (above) into one
     # normalized 0-100 value via two new top-level categories
     # ("protein_hunter" cap 30, "interaction" cap 70 -- see
-    # DEFAULT_CATEGORY_CAPS), plus an independently-applied
-    # negative_hit_strength penalty (see _final_score_components).
-    # Present for both scoring models, same as protein_hunter_score/
+    # DEFAULT_CATEGORY_CAPS). Deliberately does NOT apply a
+    # negative_hit_strength penalty (tried and removed -- see
+    # _final_score_components's docstring for why conflating
+    # negative_hit_strength with design spec section 7.7's "biological
+    # contradiction" concept collapsed true-positive/negative separation in
+    # a real-data check). Present for both scoring models, same as protein_hunter_score/
     # interaction_score. final_score_tier uses the same
     # tier-threshold logic as evidence_tier/interaction_evidence_tier, but
     # is its own separate classification -- never affects
@@ -779,15 +782,35 @@ def _final_score_components(
     interaction_score: already re-normalized to 0-100) -- into one pair of
     top-level categories ("protein_hunter", "interaction", see
     DEFAULT_CATEGORY_CAPS), each normalized to 0.0-1.0 against its own
-    known scale before being treated as ordinary evidence. A third,
-    independent component re-applies the negative_hit_strength penalty
-    (analysis/ortholog_filter.py via candidate.negative_hit_strength) --
-    this is a fresh read of the same record property already folded into
-    interaction_priority_score elsewhere (see
-    _negative_hit_status_and_value / _build_evidence_components_v2), not a
-    double-count of that already-penalized value: interaction_priority_score
-    itself is never an input here, only the raw protein_hunter_score/
-    interaction_score numbers and the candidate record are.
+    known scale before being treated as ordinary evidence.
+
+    A third component, "final_score_negative_penalty", is always reported
+    as NOT_APPLICABLE -- a deliberately unused reserved slot, not a bug.
+    negative_hit_strength (analysis/ortholog_filter.py) measures
+    phylogenetic novelty ("is this protein lineage-specific, or does it
+    also turn up in the negative reference genomes") -- it says nothing
+    about whether *this specific pair* is a biologically plausible
+    interaction. Design spec section 7.7's "Negative Evidence" concept
+    (functional contradiction, incompatible localization, incompatible
+    domain, phylogenetic contradiction) is a genuinely different thing: a
+    reason to doubt *this pair itself*, not a proxy for how conserved the
+    candidate protein happens to be. A real-data check found conflating
+    the two here caused every one of 8 curated true-positive pairs (all
+    ancient, well-conserved complexes: Hdr, Mtp, Nif) to take the full
+    penalty -- since being well-conserved is *exactly* the criterion that
+    routes a candidate into the Negative_hit bucket in the first place --
+    collapsing Final Score's separation between true positives and
+    AlphaFold3-confirmed negatives from a mean gap of +27.55 (interaction_score
+    alone) to +0.05. See
+    claude/final_score_integration_investigation.md's "実装後の実データ検証"
+    and its correction for the full analysis. This slot is kept, unused,
+    for a future real negative-evidence signal (section 7.7's actual
+    concept, once implemented) -- negative_hit_strength is not a
+    substitute for it and must not be wired back in here.
+    interaction_priority_score's own, separate use of negative_hit_strength
+    (_negative_hit_status_and_value / _build_evidence_components_v2) is
+    unaffected -- that is a different score, evaluating candidate
+    plausibility overall, not Final Score.
     """
     components: list[EvidenceComponent] = []
 
@@ -842,33 +865,26 @@ def _final_score_components(
             )
         )
 
-    if candidate is None:
-        neg_status, neg_value, neg_reason = EvidenceStatus.MISSING, None, "candidate record not found"
-    else:
-        neg_status, neg_value, neg_reason = _negative_hit_status_and_value(candidate)
-    if neg_status is EvidenceStatus.AVAILABLE:
-        components.append(
-            EvidenceComponent.available(
-                "final_score_negative_penalty",
-                "source_reliability",
-                neg_value,
-                V2_COMPONENT_WEIGHTS["negative_hit_strength"],
-                raw_value=candidate.negative_hit_strength if candidate is not None else None,
-                is_negative=True,
-                source="ortholog_filter",
-                explanation=neg_reason,
-            )
+    # Reserved, deliberately unused: see this function's docstring for why
+    # negative_hit_strength is not wired in here (real-data check found it
+    # measures phylogenetic novelty, not the design spec section 7.7
+    # "biological contradiction" concept Final Score's own negative
+    # evidence slot is meant for). Always NOT_APPLICABLE -- never
+    # AVAILABLE, never contributes a penalty -- until a real
+    # negative-evidence signal exists to put here.
+    components.append(
+        EvidenceComponent.unavailable(
+            "final_score_negative_penalty",
+            "source_reliability",
+            EvidenceStatus.NOT_APPLICABLE,
+            source="reserved",
+            explanation=(
+                "reserved for a future biological-contradiction signal "
+                "(design spec section 7.7) -- negative_hit_strength was "
+                "tried and removed, see this function's docstring"
+            ),
         )
-    else:
-        components.append(
-            EvidenceComponent.unavailable(
-                "final_score_negative_penalty",
-                "source_reliability",
-                neg_status,
-                source="ortholog_filter",
-                explanation=neg_reason,
-            )
-        )
+    )
 
     return components
 
