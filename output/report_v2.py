@@ -287,7 +287,48 @@ def build_no_query_final_score_rows(
     return rows
 
 
+def build_workbook_sheets(config: Any, blast_classification: Any, interaction_result: Any | None) -> dict[str, Any]:
+    """Orchestrate every row list the 12-sheet workbook needs, in one place.
+
+    The only entry point ``output/excel.py``'s writer calls into this
+    module with -- everything else here is a smaller building block this
+    function composes. ``config``/``blast_classification``/
+    ``interaction_result`` are exactly the values already available at
+    main.py's existing write_classification_workbook call site.
+    """
+    from analysis.interaction_scoring import resolve_protein_hunter_scores
+    from analysis.scoring_engine_config import load_scoring_engine_config
+
+    overview_rows = build_base_overview_rows(blast_classification)
+
+    scoring_config = getattr(config, "interaction_scoring", None)
+    if scoring_config is not None and getattr(scoring_config, "enabled", False):
+        protein_hunter_scores = resolve_protein_hunter_scores(config, blast_classification)
+        apply_wider_protein_hunter_scores(overview_rows, protein_hunter_scores)
+
+    engine_config = load_scoring_engine_config(getattr(scoring_config, "scoring_engine_config", None))
+
+    has_interaction_rows = bool(interaction_result is not None and interaction_result.source_rows)
+    if has_interaction_rows:
+        final_score_rows = consolidate_interaction_rows(interaction_result.source_rows)
+        rerank_final_score_rows(final_score_rows)
+    else:
+        final_score_rows = build_no_query_final_score_rows(overview_rows, engine_config)
+
+    return {
+        "overview_rows": overview_rows,
+        "final_score_rows": final_score_rows,
+        "evidence_detail_rows": list(getattr(interaction_result, "evidence_detail_rows", None) or []),
+        "evidence_detail_scoring_model": getattr(
+            interaction_result, "evidence_detail_scoring_model", "legacy_additive"
+        ),
+        "query_rows": list(getattr(interaction_result, "query_rows", None) or []),
+        "neighborhood_rows": list(getattr(interaction_result, "neighborhood_rows", None) or []),
+    }
+
+
 __all__: tuple[str, ...] = (
+    "build_workbook_sheets",
     "CANDIDATE_SOURCE_DEDUP_ORDER",
     "apply_wider_protein_hunter_scores",
     "build_base_overview_rows",

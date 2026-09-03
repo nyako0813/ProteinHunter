@@ -6,12 +6,20 @@ from types import SimpleNamespace
 
 import pytest
 
+from config import (
+    INTERACTION_ALPHAFOLD_DEFAULT,
+    INTERACTION_EVIDENCE_DETAIL_DEFAULT,
+    INTERACTION_NEIGHBORHOOD_DEFAULT,
+    INTERACTION_SCORING_WEIGHTS_DEFAULT,
+    InteractionScoringConfig,
+)
 from core.models import ProteinRecord
 from analysis.scoring_engine_config import load_scoring_engine_config
 from output.report_v2 import (
     apply_wider_protein_hunter_scores,
     build_base_overview_rows,
     build_no_query_final_score_rows,
+    build_workbook_sheets,
     candidate_source_for_protein,
     consolidate_interaction_rows,
     normalize_candidate_source,
@@ -208,6 +216,65 @@ def test_apply_wider_protein_hunter_scores_leaves_unmatched_rows_untouched() -> 
 # ---------------------------------------------------------------------------
 # build_no_query_final_score_rows
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# build_workbook_sheets
+# ---------------------------------------------------------------------------
+
+
+def test_build_workbook_sheets_falls_back_when_interaction_scoring_disabled() -> None:
+    p1 = record("p1")
+    p1.score = SimpleNamespace(total_score=9, components={}, reasons=[])
+    bc = blast_classification(all_records={"p1": p1}, positive_only_records={"p1": p1})
+    config = SimpleNamespace(interaction_scoring=SimpleNamespace(enabled=False, scoring_engine_config=None))
+
+    sheets = build_workbook_sheets(config, bc, None)
+
+    assert len(sheets["overview_rows"]) == 1
+    assert len(sheets["final_score_rows"]) == 1
+    assert sheets["final_score_rows"][0]["candidate_protein_id"] == "p1"
+    assert sheets["evidence_detail_rows"] == []
+    assert sheets["query_rows"] == []
+    assert sheets["neighborhood_rows"] == []
+
+
+def test_build_workbook_sheets_uses_consolidated_interaction_rows_when_available() -> None:
+    p1 = record("p1")
+    bc = blast_classification(all_records={"p1": p1}, positive_only_records={"p1": p1})
+    config = SimpleNamespace(
+        interaction_scoring=InteractionScoringConfig(
+            enabled=True,
+            query_proteins=(),
+            query_fasta=None,
+            candidate_sources={"candidates": True},
+            max_candidates_per_query=200,
+            include_sequences_in_excel=False,
+            scoring_weights=INTERACTION_SCORING_WEIGHTS_DEFAULT,
+            alphafold=INTERACTION_ALPHAFOLD_DEFAULT,
+            neighborhood=INTERACTION_NEIGHBORHOOD_DEFAULT,
+            scoring_model="legacy_additive",
+            scoring_engine_config=None,
+            functional_complementarity_ruleset=None,
+            pih_evidence_bundle=None,
+            evidence_detail_sheet=INTERACTION_EVIDENCE_DETAIL_DEFAULT,
+        )
+    )
+    interaction_result = SimpleNamespace(
+        source_rows={"Interaction_Candidates": [_pair_row("q1", "p1", "Candidates", final_score=42.0)]},
+        evidence_detail_rows=[{"category": "genomic_context"}],
+        evidence_detail_scoring_model="v2_evidence_based",
+        query_rows=[{"query_id": "q1"}],
+        neighborhood_rows=[],
+    )
+
+    sheets = build_workbook_sheets(config, bc, interaction_result)
+
+    assert len(sheets["final_score_rows"]) == 1
+    assert sheets["final_score_rows"][0]["final_score"] == 42.0
+    assert sheets["final_score_rows"][0]["candidate_rank"] == 1
+    assert sheets["evidence_detail_scoring_model"] == "v2_evidence_based"
+    assert sheets["query_rows"] == [{"query_id": "q1"}]
 
 
 def test_build_no_query_final_score_rows_uses_protein_hunter_alone() -> None:
