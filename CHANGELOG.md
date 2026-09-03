@@ -2,6 +2,69 @@
 
 ProteinHunter_v5 の変更履歴です。
 
+## 未リリース: Final Score統合(design spec §17-22・§27)
+
+`protein_hunter_score`と`interaction_score`(および`negative_hit`ペナルティ)を
+1つの数値へ統合する"Final Score"を実装。調査・設計・承認の記録は
+`claude/final_score_integration_investigation.md`参照。
+
+### Added
+
+- `analysis/interaction_scoring.py`: `analysis/scoring_engine.py`の
+  カテゴリcap方式を再利用し、`protein_hunter_score`(正規化上限18、理論値
+  固定)と`interaction_score`(0-100)をそれぞれ独立したトップレベル
+  カテゴリ(`protein_hunter`, cap 30 / `interaction`, cap 70、いずれも
+  暫定値)として扱う`final_score`を新設。`negative_hit_strength`ペナルティ
+  は`interaction_priority_score`側の既存適用とは独立した別処理として
+  再適用(同じ`record.negative_hit_strength`を参照するのみ、二重適用ではない)。
+  `interaction_score`が存在しない場合(クエリ固有証拠なし)は
+  `protein_hunter`カテゴリ単独で自動的に再正規化(`score_candidate`既存の
+  「利用可能な証拠だけで再正規化」の仕組みをそのまま利用、特別分岐なし)。
+  `final_score`・`final_score_tier`(既存`evidence_tier`と同じ閾値ロジックを
+  再利用した別列)を`Interaction_*`シートに追加。両スコアリングモデル
+  (`legacy_additive`/`v2_evidence_based`)で計算。既存の
+  `interaction_priority_score`・`Evidence_Tier`・デフォルトの
+  `ranking_metric`は無変更。
+- `interaction_scoring.ranking_metric`に`final_score`を追加(既定は
+  `interaction_priority_score`のまま変更なし)。既知の制約:
+  `protein_hunter_score`は各クエリの候補が既に(別の指標で)ランキング・
+  `max_candidates_per_query`件へ切り詰められた後にしか分からないため、
+  `final_score`による再ランキングは切り詰め後の候補集合の中でのみ行われる
+  (`interaction_priority_score`/`interaction_score`は切り詰め前から利用可能
+  なため、この制約を受けない)。
+- 後方互換性: Final Score統合以前に作成されたカスタム
+  `scoring_engine_config.yaml`(`protein_hunter`/`interaction`の
+  cap未定義)を使っていても、`ConfigError`にならず、モジュール既定の
+  暫定cap(30/70)にフォールバックする(`_final_score_engine_config`)。
+- `Interaction_Evidence_Detail`シート(v2のみ)に、Final Scoreの3成分
+  (`protein_hunter_score`, `interaction_score`,
+  `final_score_negative_penalty`)のraw/normalized/contribution内訳を
+  追加(design spec §22・§24が求める追跡可能性)。
+- テスト7件追加(`tests/test_interaction_scoring.py`: Final Scoreの
+  基本計算・フォールバック・ペナルティ独立性・後方互換性・
+  legacy_additive対応・`ranking_metric: final_score`の再ランキング、
+  `tests/test_config_validation.py`: `final_score`が有効な
+  `ranking_metric`値として受理されることの確認)。
+
+### 実データ検証:重要な発見
+
+Tier A正例8ペア・AlphaFold3陰性28件で`interaction_score`単独と
+`final_score`を比較したところ、**`interaction_score`単独では強い分離
+(正例-陰性の差 +27.55)があったのに対し、`final_score`ではこの分離が
+ほぼ完全に消失(+0.05)**しました。原因は`protein_hunter_score`の希釈効果
+ではなく、`negative_hit_strength`ペナルティの独立適用でした——Tier A正例
+8ペア全件が`Negative_hit`バケツ由来(＝分類基準自体が
+`negative_hit_strength = strong`)であるため、正例側が例外なくペナルティを
+フルに受ける一方、AlphaFold3陰性側は`Candidates`/`Candidates_relaxed`
+由来でペナルティを受けないケースも多く含まれ、結果として保存性の高い
+真の相互作用パートナーがより重く罰せられる逆効果が生じています。
+cap/weight自体は承認済みの値(30/70、既存ペナルティ実装を参考にした値)
+のまま変更していません。判断が必要な点として報告し、実装方針の変更は
+指示を待ちます。詳細は
+`claude/final_score_integration_investigation.md`の「実装後の実データ検証」
+節、生データは`claude/final_score_verification_positive.csv` /
+`final_score_verification_negative.csv`参照。
+
 ## 未リリース: 実験的相互作用データによる実データ検証と2件の修正
 
 `Methanosarcina_acetivorans_experimental_protein_interactions.xlsx`(27行、
