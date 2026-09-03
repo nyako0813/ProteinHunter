@@ -584,41 +584,18 @@ def main(argv: Sequence[str] | None = None) -> None:
         with logger.section("Excel output"):
             with logger.timer("Write Excel output"):
                 excel_path = write_classification_workbook(
-                    candidates=records,
+                    config=config,
+                    blast_classification=blast_classification,
                     output_path=config.paths.output_excel,
-                    negative_unmatched=(
-                        blast_classification.negative_unmatched_records
-                    ),
-                    no_hit=blast_classification.no_hit_records,
-                    negative_hit=blast_classification.negative_hit_records,
-                    positive_all_sources=(
-                        blast_classification.positive_all_sources_records
-                    ),
-                    positive_source_summary=blast_classification.all_records,
-                    candidates_relaxed=(
-                        blast_classification.candidates_relaxed_records
-                    ),
-                    negative_strong_hit=(
-                        blast_classification.negative_strong_hit_records
-                    ),
-                    negative_medium_hit=(
-                        blast_classification.negative_medium_hit_records
-                    ),
-                    negative_weak_hit=(
-                        blast_classification.negative_weak_hit_records
-                    ),
                     interaction_result=interaction_result,
-                    include_interaction_sequences=(
-                        config.interaction_scoring.include_sequences_in_excel
-                    ),
                 )
 
             logger.info(f"Final annotated candidate count: {len(records)}")
             logger.info(
-                "Excel sheets written: Index, Candidates, Candidates_relaxed, "
-                "Positive_all_sources, Positive_source_summary, Negative_unmatched, "
-                "No_hit, Negative_hit, Negative_strong_hit, Negative_medium_hit, "
-                "Negative_weak_hit"
+                "Excel sheets written: 01_Index, 02_Final_Score, 03_Candidate_Overview, "
+                "04_Score_Breakdown, 05_Sequence_Evidence, 06_Functional_Domain_Evidence, "
+                "07_Evolutionary_Evidence, 08_Genomic_Context, 09_Interaction_Evidence, "
+                "10_Negative_Evidence, 11_Raw_Audit, 12_Reserved"
             )
             logger.info(f"Excel file written to: {excel_path}")
 
