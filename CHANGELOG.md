@@ -2,6 +2,87 @@
 
 ProteinHunter_v5 の変更履歴です。
 
+## 未リリース: 公開共発現データの統合(Phase 6b)
+
+GEO公開RNA-seqデータ(GSE77738/GSE64349)由来の実測共発現証拠を
+`interaction_score`に追加する対応。実装前に両データセットの補助ファイルを
+実際にダウンロード・検証し、その結果を`claude/phase6b_coexpression_design.md`
+に記録した上で段階実装(M1〜M3、M4は見送り、M5)した。詳細は同ドキュメント
+参照。
+
+### Added
+
+- `analysis/coexpression_bridge.py`: GSE77738/GSE64349の加工済み補助ファイル
+  (XLS/XLSX)をダウンロード・ローカルキャッシュし、クエリ遺伝子ごとに
+  他の全既知遺伝子とのPearson相関 + そのクエリ自身の背景相関分布内での
+  パーセンタイル順位を計算、`core/cache.py::JsonCache`
+  (名前空間`coexpression_gse77738`/`coexpression_gse64349`)にクエリ単位で
+  キャッシュするブリッジを新設。
+  - GSE77738は61サンプルのうちアクチノマイシンD処理によるRNA分解タイム
+    コースの時系列点を除外し、真に独立な定常状態サンプル13個のみを使用。
+  - GSE64349はΔmsrH変異株サブセット(TableS2の一部)を除外し、TableS2の
+    「WWM82(親株)」サブセットは追加の野生株レプリカとして採用(TableS1の
+    9サンプル+3サンプル=12サンプル)。
+  - 遺伝子ID(`MA0001`形式)は`old_locus_tag`(`MA_0001`形式)への単純な
+    アンダースコア挿入で変換可能。GSE64349の遺伝子シンボル表記(`cdc6_1`等)
+    はGSE77738自身のGene Name列から構築したルックアップテーブルで解決。
+- `analysis/interaction_scoring.py`: v2に新カテゴリ`coexpression_evidence`
+  (暫定cap 12点)、`coexpression_gse77738`と`coexpression_gse64349`の
+  2コンポーネント(STRINGの`string_cooccurrence`/`string_neighborhood`と
+  同様、カテゴリcapを共有する別コンポーネントとして追加、プールしない)。
+  GSE64349はサンプル数が少なく(12サンプル・4条件)、パーセンタイル正規化
+  後もなお統計的信頼性が低いため、weightをGSE77738の1/3に暫定的に低減
+  (`V2_COMPONENT_WEIGHTS["coexpression_gse64349"]`)。いずれも
+  `interaction_score`に算入(`INTERACTION_SCORE_COMPONENT_NAMES`に追加)。
+  legacy_additiveへの適用は今回見送り(Phase 6aのM4と同様、別対応)。
+- `config.py`: `interaction_scoring.geo_coexpression_enabled`(既定false=
+  無効)。STRINGのtaxidと異なり、データセット自体は固定のためon/offのみ。
+- 正規化方式: 固定的な線形マッピングではなく、クエリ遺伝子ごとの背景相関
+  分布に対するパーセンタイル順位を採用。実データ調査でGSE64349単独では
+  ランダム遺伝子ペアの背景相関平均が0.76という深刻なインフレを起こす
+  (GSE77738は0.15〜0.21)ことが判明したため。
+- MISSING(遺伝子がデータセット自体に存在しない、または分散ゼロで相関が
+  定義できない)とAVAILABLE(存在すれば相関が弱くても評価済みとして扱う)
+  の区別は、Phase 6aのSTRING証拠と同じ既存パターンをそのまま踏襲(新しい
+  ステータスは追加していない)。
+- `output/excel.py`: Indexシートに`coexpression_gse77738`/
+  `coexpression_gse64349`の列説明と、GEOの利用条件(NIH公的データベース、
+  ライセンスによる強制はないが元論文PMID 27852217/25691524のクレジットを
+  慣例として記載)を追加。
+- 実データ検証(M_acetivorans、MA_4115、v2_evidence_based、実際の
+  Candidatesバケツ148件、taxid 188937のSTRING証拠と実際に相互比較):
+  - GSE77738/GSE64349とも実際にダウンロード・パースし、148件中それぞれ
+    142件/144件がAVAILABLE(coverage 96%/97%)であることを確認。
+  - MA_4115とその遺伝子近傍(MA_4114/4116/4117、STRINGでも上位パートナー)
+    の相関を、STRING証拠(Phase 6aで既に取得済み)とは完全に独立な実測
+    発現データで計算し直したところ、3件ともGSE77738パーセンタイル
+    0.93〜0.98、GSE64349パーセンタイル0.16(MA_4114のみ弱い)〜0.99と、
+    STRINGのneighborhood/cooccurrence証拠(MA_4114: 606/531、MA_4116:
+    849/0、MA_4117: 696/0)を独立なデータソースから裏付ける結果を得た。
+  - 実際の148件Candidatesバケツの中でGSE77738パーセンタイル上位10件は、
+    いずれもSTRINGのneighborhood/cooccurrenceが共にゼロ(STRINGが何の
+    関連も検出していない候補)であり、共発現証拠がSTRINGと重複しない
+    独立シグナルを提供していることを確認。
+  - 一方、AlphaFold3校正28件中「確信度の高い陰性」25件(AF3で直接相互作用
+    なしと確認済み)のGSE77738パーセンタイルは中央値0.767・平均0.654
+    (GSE64349も同水準)と、判定なし(0.5)を上回る水準にとどまり、一部
+    (MA_1447: 0.98、MA_4116: 0.98など)はむしろ非常に高いパーセンタイル
+    を示した。共発現(転写共制御)は物理的相互作用を保証しないという
+    生物学的に予想通りの限界であり、この証拠区分のcap/weightを暫定的に
+    抑えめに設定した判断(coexpression_evidence cap 12点、GSE64349は
+    さらに1/3)の妥当性を裏付ける結果として記録する。
+- テスト追加(`tests/test_coexpression_bridge.py`新設、
+  `tests/test_interaction_scoring.py`, `tests/test_config_validation.py`)。
+
+### Notes
+
+- `claude/phase6b_coexpression_design.md`に記載の通り、GSE66445
+  (代謝改変株)は今回も除外。GSE64349のΔmsrH変異株サブセットも同じ理由で
+  除外。
+- GEOの正式な利用条件ページはプログラムからの確認がNCBI側のreCAPTCHAで
+  ブロックされたため未検証。STRINGのようなライセンスによる強制表示義務は
+  無いという一般的理解のもと、元論文PMIDのクレジット表記のみ対応。
+
 ## 未リリース: STRING PPI証拠の統合(Phase 6a)
 
 外部知識ベース(STRING)由来の証拠を`interaction_score`に追加する対応。

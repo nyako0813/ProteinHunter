@@ -357,6 +357,69 @@ No reason to do this earlier than v2 for coexpression either.
 - Exact GEO license wording (blocked by bot-check; flagged above for manual
   verification before shipping).
 
+## Status update: implemented (M1-M3, M5; M4 skipped)
+
+The design questions above were resolved and implemented as follows (see
+CHANGELOG.md's Phase 6b entry for the full list): new `coexpression_evidence`
+category (provisional cap 12.0); two separate components
+(`coexpression_gse77738`, `coexpression_gse64349`) sharing that cap, not
+pooled; `coexpression_gse64349` weighted at 1/3 of `coexpression_gse77738`
+(provisional, documented in code); percentile-rank normalization against
+each query gene's own background distribution; MISSING/AVAILABLE follows
+the existing STRING pattern with no new status; caching mirrors
+`analysis/string_ppi_bridge.py` exactly (raw files as plain files,
+per-query results in `JsonCache`); `legacy_additive` integration deferred,
+same as Phase 6a's own M4 timing. GSE77738 uses only the 13 sample columns
+confirmed not to be part of its actinomycin-D decay chase (9 explicit
+0-min + 4 no-timepoint-annotation samples); GSE64349 pools TableS1's 9
+wild-type samples with TableS2's 3 "WWM82 (parental strain)" samples,
+excluding its 3 Delta-msrH mutant samples.
+
+### M5 real-data validation
+
+Run against the actual project's real 148-protein Candidates bucket (same
+bucket Phase 6a's own STRING investigation used) with query MA_4115, real
+downloaded GSE77738/GSE64349 files, and a real freshly-downloaded STRING
+bulk file (taxid 188937) for direct cross-comparison:
+
+- Coverage: 142/148 (96%) AVAILABLE for GSE77738, 144/148 (97%) for
+  GSE64349 -- consistent with the ID-mapping investigation above.
+- **Independent corroboration of STRING**: MA_4115 vs. its genomic
+  neighbors, computed from measured expression data completely
+  independently of STRING's own database:
+
+  | neighbor | GSE77738 pct | GSE64349 pct | STRING neighborhood | STRING cooccurrence |
+  |---|---:|---:|---:|---:|
+  | MA_4114 | 0.94 | 0.16 | 606 | 531 |
+  | MA_4116 | 0.98 | 0.98 | 849 | 0 |
+  | MA_4117 | 0.93 | 0.99 | 696 | 0 |
+
+  All three neighbors rank in the top 2-7% of MA_4115's own background
+  distribution in GSE77738, and STRING independently scores all three as
+  strong partners via completely different methods (curated/predicted
+  database annotations vs. directly measured transcript abundance). This
+  is a genuine independent cross-validation, not circular -- Phase 6a's
+  STRING data was never used as an input to this phase's correlation
+  computation.
+- **Complementary, not redundant, signal**: among the real 148 Candidates,
+  the top 10 ranked by GSE77738 percentile all have
+  `string_neighborhood = string_cooccurrence = 0` -- STRING found no
+  relationship at all for these pairs, while coexpression evidence ranks
+  them highly. This is the intended "different, independent evidence
+  source" outcome, not overlap with what STRING already covers.
+- **Honest caveat from the AlphaFold3 calibration set**: of the 28
+  calibration entries, 25 are AF3-confirmed high-confidence negatives (no
+  direct interaction). Their GSE77738 percentile has a median of 0.77 and
+  mean of 0.65 -- well above the 0.5 "no signal" baseline -- and a few
+  (MA_1447: 0.98, MA_4116: 0.98) are very high despite being confirmed
+  non-interacting. This is an expected biological limitation of
+  coexpression data (shared transcriptional regulation/operon structure
+  does not imply direct physical interaction) rather than an
+  implementation defect, and it directly supports the decision to keep
+  this category's cap and (especially GSE64349's) weight modest and
+  provisional rather than treating a high percentile as strong standalone
+  evidence.
+
 ## Investigation artifacts
 
 Raw downloaded files and the verification script used above are under
