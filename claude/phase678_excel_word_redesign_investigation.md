@@ -359,3 +359,99 @@ you) before the sheet-count/layout work that actually needs them.
    always live in the same directory (relative hyperlink target, breaks if
    moved independently) or use some other addressing scheme? No
    existing precedent in this codebase to follow either way.
+
+## Stage 1 implementation (this session, follow-up)
+
+The user resolved open question 1 by confirming the real design spec text
+does not exist in this repo, and issued an explicit Stage 1 directive:
+consolidate the *entire* workbook (base classification sheets included,
+confirmed via `AskUserQuestion`) into exactly 12 sheets
+(`01_Index, 02_Final_Score, 03_Candidate_Overview, 04_Score_Breakdown,
+05_Sequence_Evidence, 06_Functional_Domain_Evidence,
+07_Evolutionary_Evidence, 08_Genomic_Context, 09_Interaction_Evidence,
+10_Negative_Evidence, 11_Raw_Audit, 12_Reserved`), with an explicit
+category mapping (Sequence≈source_classification+sequence_evidence,
+Domain+Functional≈functional_annotation, Genomic Context≈genomic_context+
+string_neighborhood, Interaction≈external_ppi_evidence+
+coexpression_evidence+pih_direct_interaction, Evolutionary≈
+pih_evolutionary, Cellular Compatibility≈pih_cellular_compatibility,
+Negative≈nothing yet/reserved), and permission for Evolutionary/Negative
+to stay mostly empty rather than force a fake implementation to fill them.
+
+Implemented in three milestones, tests kept green throughout:
+
+- **M1** (`analysis/interaction_scoring.py`): exposed
+  `negative_hit_strength` as a plain pair-row column (both scoring
+  models), and four new `scoring_model: v2_evidence_based`-only
+  category-level reference columns (`functional_domain_score`,
+  `evolutionary_score`, `cellular_compatibility_score`,
+  `interaction_evidence_score`) mirroring the existing
+  `candidate_priority_score`/`same_gene_neighborhood_score` pattern.
+  Discovered along the way: `score_candidate()`'s `category_scores`
+  always reports every configured category, even with zero evidence
+  (`capped_score=0.0`, `component_count=0`) -- these four new columns
+  distinguish "genuinely scored zero" from "no evidence evaluated at all"
+  by checking `component_count`, not `is None`. Also added a small public
+  wrapper, `compute_protein_hunter_only_final_score()`, for the
+  no-query-configured Final Score fallback path M2/M3 need.
+- **M2** (`output/report_v2.py`, new module): the candidate_source
+  consolidation/deduplication layer, plus `build_workbook_sheets()`, the
+  single orchestration entry point `output/excel.py`'s writer calls.
+  Dedup priority reuses the existing `CANDIDATE_PRIORITY_BASE` ordering
+  (already used internally for the `source_classification` scoring
+  component) rather than inventing a new one.
+- **M3** (`output/excel.py`, `main.py`): rewrote
+  `write_classification_workbook()` into the fixed 12-sheet writer and
+  simplified its call site. `05`-`10` are category-filtered views of the
+  existing v2 long-format `Interaction_Evidence_Detail` rows (empty for
+  `legacy_additive`, which has no category concept). `11_Raw_Audit` keeps
+  the full unfiltered detail rows plus the former `Interaction_query`/
+  `Interaction_Neighborhood` sheets as two labeled blocks stacked below,
+  so no existing information is lost within the 12-sheet budget.
+  `12_Reserved` is an intentionally empty placeholder. Found and fixed a
+  latent bug in the process: `_add_back_to_index_link` hardcoded
+  `"#'Index'!A1"`, which would have silently broken every sheet's
+  "Back to Index" link the moment the Index sheet was renamed to
+  `01_Index`.
+
+### Real-data verification
+
+Ran the real pipeline (`v2_evidence_based`, Tier A queries MA_0688/
+MA_4165/MA_3898/MA_3899 + MA_4115, `candidate_sources` including
+`negative_hit`, `ranking_metric: final_score`) against real BLAST/CDD
+data. Confirmed:
+
+- All 12 sheets write successfully; no crash across 4627 classified
+  records / 5 queries / 23,130 consolidated `02_Final_Score` rows.
+- Zero duplicate `(query_id, candidate_protein_id)` pairs in
+  `02_Final_Score` and zero duplicate `protein_id` in
+  `03_Candidate_Overview` -- the dedup logic actually collapses the
+  overlapping buckets in real data, not just in unit tests.
+- Zero `"Unclassified"` candidates -- every one of the 4627 real records
+  resolved to exactly one of the 6 consolidated buckets.
+- Tier A (8 curated true-positive pairs) vs. AlphaFold3-negative (28
+  pairs against the MA_4115 query) separation is preserved in the new
+  consolidated sheet: `final_score` mean gap (POS-NEG) = **+32.89**,
+  `interaction_score` mean gap = **+49.96**. (These numbers are not
+  directly comparable to the Final Score integration phase's own
+  pre-existing +17.20/+27.55 figures -- this diagnostic run used a
+  different `candidate_sources`/`ranking_metric` combination and, more
+  importantly, the *point* of this check is different: confirming the
+  sheet-consolidation layer does not corrupt or duplicate already-computed
+  scores, not re-validating the scoring formula itself, which this Stage
+  1 task does not touch.)
+- `07_Evolutionary_Evidence` is empty (no PIH bundle configured in this
+  run) and `09_Interaction_Evidence` shows `status: NOT_RUN` rows for
+  `string_cooccurrence`/`coexpression_gse77738`/`coexpression_gse64349`
+  (STRING/GEO bridges not configured in this run) -- both are the
+  expected "evaluated as absent, not a bug" state the Stage 1 directive
+  explicitly allowed for.
+- `11_Raw_Audit`'s three stacked blocks (detail / query / neighborhood)
+  render correctly at their computed offsets in the real (230,164-row)
+  sheet.
+
+Diagnostic config/output files live under `.cache/geo_investigation/`
+(gitignored, not committed), following the same
+backup/override/restore-free pattern (a separate `--config` file, so
+`config.yaml` itself was never touched) used by every prior real-data
+verification in this session.

@@ -2,6 +2,70 @@
 
 ProteinHunter_v5 の変更履歴です。
 
+## 未リリース: Phase 6-8 Stage 1: Excelワークブック12シート再設計
+
+design spec §25.1に準拠し、Excel出力全体を12シートへ統合。従来の
+ベース分類シート(Candidates/Candidates_relaxed/...の最大10枚)と
+`Interaction_*`バケツシート(最大11枚)を、`candidate_source`列を持つ
+統合済み行として再構成した。調査・設計・実装記録は
+`claude/phase678_excel_word_redesign_investigation.md`参照。
+Wordレポート生成(design spec Phase 6-8のStage 2)は別タスクとして後日
+着手予定——本PRには含まれない。
+
+### Added
+
+- `output/report_v2.py`(新規): `candidate_source`統合レイヤー。
+  base分類バケツ(Candidates, Candidates_relaxed, ..., Negative_hit)と
+  `Interaction_*`バケツの両方について、同じ候補が複数の有効なバケツで
+  重複して現れる場合(例: `Candidates`は`Candidates_relaxed`の部分集合、
+  PR #11で判明した`negative_hit`と`negative_strong/medium/weak_hit`の
+  重複)、固定の優先順位(`CANDIDATE_PRIORITY_BASE`を再利用: Candidates
+  > Positive_all_sources > Candidates_relaxed > No_hit >
+  Negative_unmatched > Negative_hit)で1行に重複排除する。
+  `negative_strong/medium/weak_hit`は表示上`Negative_hit`へ統合され、
+  強度は`negative_hit_strength`列(下記)に残る。
+- `analysis/interaction_scoring.py`: 全ペア行に`negative_hit_strength`列
+  を追加(両モデル、旧`Negative_strong/medium/weak_hit`専用シートの
+  代替)。`scoring_model: v2_evidence_based`限定で
+  `functional_domain_score`・`evolutionary_score`・
+  `cellular_compatibility_score`・`interaction_evidence_score`
+  (`external_ppi_evidence`+`coexpression_evidence`+
+  `pih_direct_interaction`の合計)をカテゴリ単位の参照列として追加
+  (既存の`candidate_priority_score`/`same_gene_neighborhood_score`と
+  同じパターン)。クエリなし/interaction_scoring無効時のFinal Score
+  フォールバック用に`compute_protein_hunter_only_final_score()`を新設
+  (公開関数)。いずれも既存のスコア・順位には影響しない純粋な追加。
+- `output/excel.py`: `write_classification_workbook()`を書き換え、
+  固定12シート(`01_Index, 02_Final_Score, 03_Candidate_Overview,
+  04_Score_Breakdown, 05_Sequence_Evidence,
+  06_Functional_Domain_Evidence, 07_Evolutionary_Evidence,
+  08_Genomic_Context, 09_Interaction_Evidence, 10_Negative_Evidence,
+  11_Raw_Audit, 12_Reserved`)を出力するよう変更。シグネチャを
+  `(config, blast_classification, output_path, interaction_result)`
+  へ簡素化(旧: 個別バケツ辞書を12個の引数として受け取る形式)。
+  `05_Sequence_Evidence`〜`10_Negative_Evidence`は既存の
+  `Interaction_Evidence_Detail`(v2ロングフォーマット)を
+  カテゴリでフィルタしたビュー(`scoring_model: v2_evidence_based`限定、
+  `legacy_additive`ではヘッダーのみ)。`11_Raw_Audit`は旧
+  `Interaction_Evidence_Detail`全件に加え、旧`Interaction_query`・
+  `Interaction_Neighborhood`の内容を同一シート内に積み重ねたブロックとして
+  保持し、情報を失わない。`12_Reserved`はStage 2用の意図的な空シート。
+  `Positive_source_summary`シートは廃止(`03_Candidate_Overview`が
+  同等以上の内容を含むため)。
+- 既存バグ修正: `_add_back_to_index_link`が`"Index"`シート名を
+  ハードコードしており、`01_Index`への改名で全シートの「Back to
+  Index」リンクが壊れる状態だった。修正済み。
+
+### Real-data verification
+
+Tier A(8ペア)+ AlphaFold3陰性(28件、MA_4115クエリ)を用いた実データ
+検証(`.cache/geo_investigation/`、gitignore対象のため非コミット)で、
+新しい統合済み`02_Final_Score`シート上でも既存の分離傾向が保たれている
+ことを確認: `final_score`の POS-NEG 平均差 +32.89、`interaction_score`の
+同 +49.96(いずれも計算ロジック自体は本PRで無変更、シート統合後も
+数値が破綻していないことの確認)。重複排除・"Unclassified"候補ゼロ・
+カテゴリ別シートの`NOT_RUN`/空表示が設計通りであることも確認済み。
+
 ## 未リリース: Final Score統合(design spec §17-22・§27)
 
 `protein_hunter_score`と`interaction_score`を1つの数値へ統合する
