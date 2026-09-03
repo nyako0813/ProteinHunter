@@ -207,10 +207,13 @@ class InteractionScoringConfig:
     # Interaction_* source (design spec section 22, Phase 5 M5).
     # "interaction_priority_score" (default) preserves the exact pre-Phase-5
     # ranking behavior. "interaction_score" ranks by query-specific evidence
-    # only (see analysis/interaction_scoring.py::INTERACTION_SCORE_COMPONENT_NAMES);
-    # interaction_priority_score/evidence_tier/priority_group columns keep
-    # their original values and meaning either way -- only candidate_rank
-    # and row order change.
+    # only (see analysis/interaction_scoring.py::INTERACTION_SCORE_COMPONENT_NAMES).
+    # "final_score" (design spec sections 17-22/27, see
+    # claude/final_score_integration_investigation.md) ranks by the combined
+    # protein_hunter_score+interaction_score Final Score. In every case,
+    # interaction_priority_score/evidence_tier/priority_group/final_score/
+    # final_score_tier columns keep their original values and meaning --
+    # only candidate_rank and row order change.
     ranking_metric: str = "interaction_priority_score"
     # NCBI taxonomy id for STRING (string-db.org) PPI evidence
     # (scoring_model: v2_evidence_based only; Phase 6a, see
@@ -238,6 +241,7 @@ VALID_INTERACTION_SCORING_MODELS: tuple[str, ...] = ("legacy_additive", "v2_evid
 VALID_INTERACTION_RANKING_METRICS: tuple[str, ...] = (
     "interaction_priority_score",
     "interaction_score",
+    "final_score",
 )
 
 

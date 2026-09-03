@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import math
 from pathlib import Path
 import re
@@ -10,11 +10,11 @@ from typing import Any
 
 from annotation.gff import GffFeatureLocation, load_gff_feature_map
 from core.cache import JsonCache
-from core.evidence import EvidenceComponent, EvidenceStatus, linear_normalize
+from core.evidence import EvidenceComponent, EvidenceStatus, clamp01, linear_normalize
 from core.fasta import read_fasta_as_components
 from core.models import CandidateScore, ProteinRecord
 from analysis.candidates import get_best_hit
-from analysis.scoring import build_candidate_score
+from analysis.scoring import DEFAULT_WEIGHTS, build_candidate_score
 from analysis.functional_complementarity_rules import (
     FunctionalComplementarityRuleset,
     load_functional_complementarity_ruleset,
@@ -28,6 +28,7 @@ from analysis.pih_evidence_bridge import (
 from analysis.pih_evidence_bridge import without_version as _pih_without_version
 from analysis.scoring_engine import ScoreBreakdown, rank_candidates, score_candidate
 from analysis.scoring_engine_config import (
+    DEFAULT_CATEGORY_CAPS,
     ScoringEngineConfig,
     SequenceEvidenceConfig,
     load_scoring_engine_config,
@@ -89,6 +90,15 @@ V2_COMPONENT_WEIGHTS: dict[str, float] = {
     # phase.
     "coexpression_gse77738": 1.0,
     "coexpression_gse64349": 1.0 / 3.0,
+    # Final Score (design spec sections 17-22, 27; see
+    # claude/final_score_integration_investigation.md). protein_hunter_score
+    # and interaction_score are each the sole occupant of their own
+    # top-level category (see FINAL_SCORE_CATEGORY_CAPS in
+    # analysis/scoring_engine_config.py), so their weight only needs to be
+    # > 0, same pattern as genomic_context above -- the real weighting is
+    # done by the category caps (30/70), not these values.
+    "protein_hunter_score": 1.0,
+    "interaction_score": 1.0,
 }
 
 _NEGATIVE_HIT_STRENGTH_VALUES: dict[str, float] = {
@@ -96,6 +106,19 @@ _NEGATIVE_HIT_STRENGTH_VALUES: dict[str, float] = {
     "medium": 0.5,
     "weak": 0.2,
 }
+
+#: Theoretical ceiling of protein_hunter_score (analysis/scoring.py::build_candidate_score
+#: with DEFAULT_WEIGHTS, unconfigured): sum of every *positive* component
+#: weight (annotation_warning is a penalty, not part of the ceiling).
+#: Derived from DEFAULT_WEIGHTS itself, not hardcoded, so it can never
+#: silently drift out of sync if those weights ever change. Confirmed
+#: against real data before choosing this over an empirical/percentile
+#: ceiling: real protein_hunter_score rarely reaches it (Candidates-sheet
+#: total_score clusters at 14/18, since uniprot_accession/alphafold_url are
+#: rarely populated) -- deliberately kept as the fixed theoretical value
+#: anyway, for reproducibility/auditability, per
+#: claude/final_score_integration_investigation.md's resolved open question 1.
+PROTEIN_HUNTER_SCORE_CEILING: float = sum(weight for weight in DEFAULT_WEIGHTS.values() if weight > 0)
 
 
 @dataclass(frozen=True)
@@ -287,6 +310,22 @@ INTERACTION_PAIR_COLUMNS: tuple[str, ...] = (
     # interaction_priority_score, candidate_rank, or sort order.
     "interaction_score",
     "interaction_evidence_tier",
+    # Final Score reference columns (design spec sections 17-22/27; see
+    # claude/final_score_integration_investigation.md). Combines
+    # protein_hunter_score and interaction_score (above) into one
+    # normalized 0-100 value via two new top-level categories
+    # ("protein_hunter" cap 30, "interaction" cap 70 -- see
+    # DEFAULT_CATEGORY_CAPS), plus an independently-applied
+    # negative_hit_strength penalty (see _final_score_components).
+    # Present for both scoring models, same as protein_hunter_score/
+    # interaction_score. final_score_tier uses the same
+    # tier-threshold logic as evidence_tier/interaction_evidence_tier, but
+    # is its own separate classification -- never affects
+    # interaction_priority_score, evidence_tier, candidate_rank, or the
+    # default ranking_metric sort order (opt in via
+    # interaction_scoring.ranking_metric: final_score).
+    "final_score",
+    "final_score_tier",
 )
 
 SEQUENCE_COLUMNS: tuple[str, ...] = ("query_sequence", "candidate_sequence")
@@ -467,14 +506,19 @@ def run_interaction_scoring(config: Any, blast_classification: Any) -> Interacti
     scoring_model = getattr(scoring_config, "scoring_model", "legacy_additive")
     evidence_detail_config = getattr(scoring_config, "evidence_detail_sheet", None)
     include_no_hit_detail = bool(getattr(evidence_detail_config, "include_no_hit", False))
-    engine_config: ScoringEngineConfig | None = None
     ruleset: FunctionalComplementarityRuleset | None = None
     pih_bundle: PihEvidenceBundle | None = None
     string_ppi_bundle: StringPpiBundle | None = None
+    # Loaded unconditionally (not gated to v2_evidence_based like ruleset/
+    # pih_bundle below): Final Score (design spec sections 17-22/27) reuses
+    # its category_caps/negative_penalty_cap/tiers for both scoring models,
+    # since protein_hunter_score and interaction_score -- its two inputs --
+    # both already exist for legacy_additive too. See
+    # claude/final_score_integration_investigation.md.
+    engine_config: ScoringEngineConfig = load_scoring_engine_config(
+        getattr(scoring_config, "scoring_engine_config", None)
+    )
     if scoring_model == V2_SCORING_MODEL:
-        engine_config = load_scoring_engine_config(
-            getattr(scoring_config, "scoring_engine_config", None)
-        )
         ruleset = load_functional_complementarity_ruleset(
             getattr(scoring_config, "functional_complementarity_ruleset", None)
         )
@@ -516,6 +560,11 @@ def run_interaction_scoring(config: Any, blast_classification: Any) -> Interacti
         warnings.extend(coexpression_gse64349_bundle.warnings)
 
     protein_hunter_scores = resolve_protein_hunter_scores(config, blast_classification)
+    # Same target scope as protein_hunter_scores above, but as full
+    # ProteinRecord objects -- Final Score's independent negative_hit_strength
+    # read (_final_score_components) needs the record itself, not just its
+    # already-computed CandidateScore.
+    final_score_target_records = _interaction_scoring_target_records(scoring_config, blast_classification)
 
     for source_key, enabled in scoring_config.candidate_sources.items():
         if not enabled:
@@ -560,8 +609,17 @@ def run_interaction_scoring(config: Any, blast_classification: Any) -> Interacti
             )
         if rows:
             _attach_protein_hunter_score_columns(rows, protein_hunter_scores)
+            final_score_detail_rows = _attach_final_score_columns(
+                rows,
+                final_score_target_records,
+                engine_config,
+                collect_detail=collect_evidence_detail and scoring_model == V2_SCORING_MODEL,
+            )
+            if getattr(scoring_config, "ranking_metric", "interaction_priority_score") == "final_score":
+                _rerank_by_final_score(rows)
             source_rows[sheet_name] = rows
             evidence_detail_rows.extend(detail_rows)
+            evidence_detail_rows.extend(final_score_detail_rows)
         else:
             warnings.append(f"interaction candidate source produced no pairs: {source_key}")
 
@@ -704,6 +762,292 @@ def _attach_protein_hunter_score_columns(
             f"{name}={value}" for name, value in score.components.items()
         )
         row["protein_hunter_score_reasons"] = "; ".join(score.reasons)
+
+
+def _final_score_components(
+    protein_hunter_score: float | None,
+    interaction_score: float | None,
+    candidate: ProteinRecord | None,
+) -> list[EvidenceComponent]:
+    """Build the three EvidenceComponents Final Score is made of.
+
+    Final Score (design spec sections 17-22/27; see
+    claude/final_score_integration_investigation.md) combines
+    protein_hunter_score and interaction_score -- two already-computed
+    scores on very different native scales (protein_hunter_score: raw
+    additive points, ceiling PROTEIN_HUNTER_SCORE_CEILING=18;
+    interaction_score: already re-normalized to 0-100) -- into one pair of
+    top-level categories ("protein_hunter", "interaction", see
+    DEFAULT_CATEGORY_CAPS), each normalized to 0.0-1.0 against its own
+    known scale before being treated as ordinary evidence. A third,
+    independent component re-applies the negative_hit_strength penalty
+    (analysis/ortholog_filter.py via candidate.negative_hit_strength) --
+    this is a fresh read of the same record property already folded into
+    interaction_priority_score elsewhere (see
+    _negative_hit_status_and_value / _build_evidence_components_v2), not a
+    double-count of that already-penalized value: interaction_priority_score
+    itself is never an input here, only the raw protein_hunter_score/
+    interaction_score numbers and the candidate record are.
+    """
+    components: list[EvidenceComponent] = []
+
+    if protein_hunter_score is None:
+        components.append(
+            EvidenceComponent.unavailable(
+                "protein_hunter_score",
+                "protein_hunter",
+                EvidenceStatus.MISSING,
+                source="protein_hunter_score",
+                explanation="protein_hunter_score was not computed for this candidate",
+            )
+        )
+    else:
+        normalized = clamp01(protein_hunter_score / PROTEIN_HUNTER_SCORE_CEILING)
+        components.append(
+            EvidenceComponent.available(
+                "protein_hunter_score",
+                "protein_hunter",
+                normalized,
+                V2_COMPONENT_WEIGHTS["protein_hunter_score"],
+                raw_value=protein_hunter_score,
+                source="protein_hunter_score",
+                explanation=(
+                    f"protein_hunter_score {protein_hunter_score:.3f} / "
+                    f"{PROTEIN_HUNTER_SCORE_CEILING:.0f} theoretical ceiling"
+                ),
+            )
+        )
+
+    if interaction_score is None:
+        components.append(
+            EvidenceComponent.unavailable(
+                "interaction_score",
+                "interaction",
+                EvidenceStatus.MISSING,
+                source="interaction_score",
+                explanation="no query-specific evidence was available for this pair",
+            )
+        )
+    else:
+        normalized = clamp01(interaction_score / 100.0)
+        components.append(
+            EvidenceComponent.available(
+                "interaction_score",
+                "interaction",
+                normalized,
+                V2_COMPONENT_WEIGHTS["interaction_score"],
+                raw_value=interaction_score,
+                source="interaction_score",
+                explanation=f"interaction_score {interaction_score:.3f} / 100",
+            )
+        )
+
+    if candidate is None:
+        neg_status, neg_value, neg_reason = EvidenceStatus.MISSING, None, "candidate record not found"
+    else:
+        neg_status, neg_value, neg_reason = _negative_hit_status_and_value(candidate)
+    if neg_status is EvidenceStatus.AVAILABLE:
+        components.append(
+            EvidenceComponent.available(
+                "final_score_negative_penalty",
+                "source_reliability",
+                neg_value,
+                V2_COMPONENT_WEIGHTS["negative_hit_strength"],
+                raw_value=candidate.negative_hit_strength if candidate is not None else None,
+                is_negative=True,
+                source="ortholog_filter",
+                explanation=neg_reason,
+            )
+        )
+    else:
+        components.append(
+            EvidenceComponent.unavailable(
+                "final_score_negative_penalty",
+                "source_reliability",
+                neg_status,
+                source="ortholog_filter",
+                explanation=neg_reason,
+            )
+        )
+
+    return components
+
+
+def _final_score_breakdown(
+    protein_hunter_score: float | None,
+    interaction_score: float | None,
+    candidate: ProteinRecord | None,
+    final_score_engine_config: ScoringEngineConfig,
+) -> ScoreBreakdown:
+    """Score one pair's Final Score from its already-computed sub-scores.
+
+    ``final_score_engine_config`` must already be the output of
+    ``_final_score_engine_config`` (its ``category_caps`` guaranteed to
+    contain "protein_hunter"/"interaction"), not an arbitrary
+    ``ScoringEngineConfig`` -- callers build it once per run/bucket and
+    pass it in, rather than this function reconstructing it per pair.
+    Reuses analysis/scoring_engine.py::score_candidate unmodified -- when
+    interaction_score is None (MISSING), that category simply has no
+    available evidence and score_candidate's existing "renormalize against
+    whatever's active" behavior falls back to protein_hunter_score alone,
+    with no special-casing needed here.
+    """
+    components = _final_score_components(protein_hunter_score, interaction_score, candidate)
+    return score_candidate(components, final_score_engine_config)
+
+
+def _final_score_engine_config(engine_config: ScoringEngineConfig) -> ScoringEngineConfig:
+    """Build the ScoringEngineConfig Final Score's own score_candidate call uses.
+
+    Deliberately NOT ``engine_config`` itself: an existing custom
+    ``scoring_engine_config.yaml`` written before Final Score existed would
+    have no "protein_hunter"/"interaction" entries in its own
+    ``category_caps`` (that mapping fully *replaces*, not merges with,
+    DEFAULT_CATEGORY_CAPS -- see ``load_scoring_engine_config``), which
+    would otherwise make every v2 run using a custom config hard-fail
+    (``ConfigError``, category has no configured cap) the moment Final
+    Score tries to score any pair -- unlike the optional PIH/STRING/
+    coexpression categories, Final Score's components are attached to
+    every row unconditionally, so this backward-compatibility gap is not
+    optional to close. Falls back to the module's own provisional 30/70
+    default for whichever cap the user's config doesn't define, while
+    still honoring an explicit override if a user *does* add
+    "protein_hunter"/"interaction" to their own category_caps. Every other
+    engine setting (negative_penalty_cap, tiers, output_scale,
+    tie_precision, minimum_evidence) is shared unchanged with the rest of
+    the run -- Final Score's own penalty/tier thresholds should track
+    whatever the run is already using elsewhere.
+    """
+    return replace(
+        engine_config,
+        category_caps={
+            "protein_hunter": engine_config.category_caps.get(
+                "protein_hunter", DEFAULT_CATEGORY_CAPS["protein_hunter"]
+            ),
+            "interaction": engine_config.category_caps.get(
+                "interaction", DEFAULT_CATEGORY_CAPS["interaction"]
+            ),
+        },
+    )
+
+
+def _final_score_detail_rows(
+    row: dict[str, Any], breakdown: ScoreBreakdown, engine_config: ScoringEngineConfig
+) -> list[dict[str, Any]]:
+    """Expand one pair's Final Score breakdown into Interaction_Evidence_Detail-shaped rows.
+
+    v2_evidence_based only, same as the rest of the long-format
+    Interaction_Evidence_Detail sheet -- legacy_additive's Evidence_Detail
+    is a different, wide, one-row-per-pair shape with no per-component
+    status/normalized_value/category_cap columns to extend. See
+    _attach_final_score_columns's caller for the scoring_model gate.
+    """
+    detail_rows: list[dict[str, Any]] = []
+    for component in breakdown.components:
+        detail_rows.append(
+            {
+                "query_id": row["query_id"],
+                "query_protein_id": row["query_protein_id"],
+                "query_old_locus_tag": row["query_old_locus_tag"],
+                "candidate_protein_id": row["candidate_protein_id"],
+                "candidate_old_locus_tag": row["candidate_old_locus_tag"],
+                "candidate_source": row["candidate_source"],
+                "candidate_rank": row["candidate_rank"],
+                "category": component.category,
+                "component_name": component.name,
+                "status": component.status.value,
+                "raw_value": component.raw_value,
+                "normalized_value": component.normalized_value,
+                "weight": component.weight,
+                "category_cap": engine_config.category_caps.get(component.category),
+                "is_negative": component.is_negative,
+                "explanation": component.explanation,
+            }
+        )
+    return detail_rows
+
+
+def _attach_final_score_columns(
+    rows: list[dict[str, Any]],
+    target_records: dict[str, ProteinRecord],
+    engine_config: ScoringEngineConfig,
+    collect_detail: bool,
+) -> list[dict[str, Any]]:
+    """Attach final_score/final_score_tier reference columns to each pair row in place.
+
+    Populated for both scoring models, since protein_hunter_score and
+    interaction_score (its two inputs) already are for both. Purely
+    additive/read-only relative to everything else on the row: never
+    touches candidate_rank, interaction_priority_score, evidence_tier, or
+    the default ranking_metric sort order (see
+    claude/final_score_integration_investigation.md). Returns the
+    component-level detail rows for Interaction_Evidence_Detail when
+    ``collect_detail`` is true (the caller only passes true for
+    scoring_model: v2_evidence_based).
+    """
+    final_score_engine_config = _final_score_engine_config(engine_config)
+    detail_rows: list[dict[str, Any]] = []
+    for row in rows:
+        record = target_records.get(row["candidate_protein_id"])
+        breakdown = _final_score_breakdown(
+            row.get("protein_hunter_score"), row.get("interaction_score"), record, final_score_engine_config
+        )
+        row["final_score"] = round(breakdown.final_score, 3) if breakdown.final_score is not None else None
+        row["final_score_tier"] = breakdown.tier
+        if collect_detail:
+            detail_rows.extend(_final_score_detail_rows(row, breakdown, final_score_engine_config))
+    return detail_rows
+
+
+def _rerank_by_final_score(rows: list[dict[str, Any]]) -> None:
+    """Re-sort an already-built row list by final_score and reassign candidate_rank per query.
+
+    Used only when interaction_scoring.ranking_metric == "final_score".
+    Eligible rows (final_score is not None) are ranked 1..N descending by
+    final_score (ties broken the same way as every other ranking_metric:
+    AlphaFold-recommended first, then candidate_protein_id ascending);
+    ineligible rows get candidate_rank = 0, matching the existing
+    convention for ineligible candidates elsewhere (see RankedCandidate).
+
+    KNOWN LIMITATION: protein_hunter_score (final_score's other input,
+    beyond interaction_score) is only known once _rank_source_candidates[_v2]
+    has already ranked and truncated each query's candidates to
+    max_candidates_per_query using whichever metric produced candidate_rank
+    at that point -- unlike interaction_priority_score/interaction_score,
+    which are both available *before* that truncation happens. So this
+    re-ranks *within* the already-selected top-N set, not a full
+    re-selection from every scored candidate: a candidate that would rank
+    in the true top-N by final_score, yet fell outside the top-N by
+    whichever metric produced the original truncation, will not reappear
+    here. In practice this rarely matters when max_candidates_per_query is
+    large relative to the real candidate pool. A full fix requires
+    threading protein_hunter_score into _score_pair/_score_pair_v2 so
+    ranking+truncation can use final_score directly, the same way
+    interaction_priority_score/interaction_score already do -- left for a
+    later pass; see claude/final_score_integration_investigation.md.
+    """
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        groups.setdefault(str(row["query_id"]), []).append(row)
+
+    for group in groups.values():
+        group.sort(
+            key=lambda row: (
+                row.get("final_score") is None,
+                -(row.get("final_score") or 0.0),
+                not bool(row.get("alphafold_recommended")),
+                str(row["candidate_protein_id"]),
+            )
+        )
+        rank = 0
+        for row in group:
+            if row.get("final_score") is None:
+                row["candidate_rank"] = 0
+            else:
+                rank += 1
+                row["candidate_rank"] = rank
+
+    rows.sort(key=lambda row: (str(row["query_id"]), int(row["candidate_rank"] or 0), str(row["candidate_protein_id"])))
 
 
 def interaction_neighborhood_columns() -> tuple[str, ...]:
@@ -2190,6 +2534,7 @@ __all__: tuple[str, ...] = (
     "INTERACTION_QUERY_COLUMNS",
     "INTERACTION_SHEET_DESCRIPTIONS",
     "InteractionScoringResult",
+    "PROTEIN_HUNTER_SCORE_CEILING",
     "interaction_index_rows",
     "interaction_neighborhood_columns",
     "interaction_pair_columns",

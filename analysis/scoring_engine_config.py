@@ -112,6 +112,25 @@ class ScoringEngineConfig:
 #: analysis.interaction_scoring.V2_COMPONENT_WEIGHTS["coexpression_gse64349"]).
 #: Requires interaction_scoring.geo_coexpression_enabled to ever have
 #: available evidence.
+#:
+#: "protein_hunter" and "interaction" (Final Score, design spec sections
+#: 17-22/27; see claude/final_score_integration_investigation.md) are a
+#: different kind of category from every entry above: their sole component
+#: is not a raw evidence signal but an already-computed *score*
+#: (protein_hunter_score, interaction_score respectively), each normalized
+#: against its own known scale (PROTEIN_HUNTER_SCORE_CEILING and 100) before
+#: being treated as a category here -- see
+#: analysis.interaction_scoring._final_score_components. The 30/70 split is
+#: a PROVISIONAL choice: a real-data check (8 curated Tier A positive pairs
+#: vs. the 28-entry AlphaFold3-negative calibration set) found a 30/70
+#: (protein_hunter/interaction) blend separated the two far better than a
+#: 50/50 blend, and interaction_score alone better still -- protein_hunter_score
+#: was kept at a small but nonzero weight rather than 0, since that
+#: real-data check used only 8 positive pairs with zero within-group
+#: variance on protein_hunter_score (all landed in the same BLAST bucket),
+#: too small a sample to conclude protein_hunter_score is not informative
+#: in general. Revisit once more positive-pair data is available -- same
+#: "provisional, not yet calibrated" status as every cap above.
 DEFAULT_CATEGORY_CAPS: dict[str, float] = {
     "source_classification": 30.0,
     "genomic_context": 25.0,
@@ -121,6 +140,8 @@ DEFAULT_CATEGORY_CAPS: dict[str, float] = {
     "pih_direct_interaction": 20.0,
     "external_ppi_evidence": 15.0,
     "coexpression_evidence": 12.0,
+    "protein_hunter": 30.0,
+    "interaction": 70.0,
 }
 
 DEFAULT_SCORING_ENGINE_CONFIG = ScoringEngineConfig(

@@ -252,7 +252,32 @@ INTERACTION_SCORE_EXPLANATIONS: tuple[tuple[str, str], ...] = (
         "claude/phase6b_coexpression_design.md). Deliberately excludes source_classification, "
         "sequence_evidence, and co_occurrence, which mainly reflect the candidate's own "
         "conservation profile rather than evidence specific to this query pair. Reference only -- "
-        "does not affect interaction_priority_score, candidate_rank, or sheet sort order.",
+        "does not affect interaction_priority_score, candidate_rank, or sheet sort order (unless "
+        "interaction_scoring.ranking_metric is set to 'interaction_score').",
+    ),
+    (
+        "final_score",
+        "Final Score (design spec sections 17-22/27): combines protein_hunter_score and "
+        "interaction_score into one 0-100 value via two top-level categories -- "
+        "'protein_hunter' (cap 30, protein_hunter_score normalized against its own theoretical "
+        "ceiling of 18) and 'interaction' (cap 70, interaction_score/100) -- plus an "
+        "independently-applied negative_hit_strength penalty (a second, separate read of the "
+        "same record property already folded into interaction_priority_score elsewhere, not a "
+        "double subtraction of that value). Both caps are PROVISIONAL, see "
+        "claude/final_score_integration_investigation.md for the real-data check behind the "
+        "30/70 split. When interaction_score is unavailable for a pair, Final Score falls back "
+        "to protein_hunter_score alone (re-normalized against just its own cap), the same "
+        "'renormalize against whatever evidence is available' behavior every other v2 category "
+        "already uses. Populated for both scoring models. Reference only by default -- does not "
+        "affect interaction_priority_score, evidence_tier, candidate_rank, or sheet sort order "
+        "unless interaction_scoring.ranking_metric is set to 'final_score'.",
+    ),
+    (
+        "final_score_tier",
+        "Confidence tier for final_score, using the same Tier1_VeryStrong/Tier2_Strong/"
+        "Tier3_Moderate/Tier4_Weak/Unclassified thresholds as evidence_tier/"
+        "interaction_evidence_tier, applied to final_score's own score/category-count instead. "
+        "A separate classification from evidence_tier -- never overwrites it.",
     ),
     (
         "string_ppi_score",
