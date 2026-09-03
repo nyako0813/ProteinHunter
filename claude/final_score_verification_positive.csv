@@ -1,0 +1,9 @@
+﻿query,candidate,label,protein_hunter_score,interaction_score,final_score,final_score_tier,interaction_evidence_tier
+MA_0688,MA_3733,Mer,9,6.667,19.667,Tier4_Weak,Tier4_Weak
+MA_4165,MA_4164,MtpC,9,44.184,45.929,Tier3_Moderate,Tier3_Moderate
+MA_3898,MA_3899,NifK,9,56.24,54.368,Tier2_Strong,Tier2_Strong
+MA_3899,MA_3898,NifD,9,55.761,54.033,Tier2_Strong,Tier2_Strong
+MA_3898,MA_3896,NifI1,9,41.6,44.12,Tier3_Moderate,Tier3_Moderate
+MA_3898,MA_3897,NifI2,9,37.542,41.279,Tier3_Moderate,Tier3_Moderate
+MA_3899,MA_3896,NifI1,9,40.846,43.592,Tier3_Moderate,Tier3_Moderate
+MA_3899,MA_3897,NifI2,9,35.833,40.083,Tier3_Moderate,Tier3_Moderate

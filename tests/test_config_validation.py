@@ -382,6 +382,19 @@ def test_invalid_interaction_ranking_metric_raises_config_error(tmp_path: Path) 
         load_config(config_path, initialize=False)
 
 
+def test_final_score_ranking_metric_is_accepted(tmp_path: Path) -> None:
+    """interaction_scoring.ranking_metric accepts 'final_score' (Final Score integration phase)."""
+    data = valid_config_data()
+    data["interaction_scoring"] = {
+        "ranking_metric": "final_score",
+    }
+    config_path = write_config(tmp_path, data)
+
+    cfg = load_config(config_path, initialize=False)
+
+    assert cfg.interaction_scoring.ranking_metric == "final_score"
+
+
 def test_invalid_string_ppi_ncbi_taxon_id_raises_config_error(tmp_path: Path) -> None:
     """interaction_scoring.string_ppi_ncbi_taxon_id must be a positive integer or unset."""
     data = valid_config_data()

@@ -39,6 +39,8 @@ category_caps:
   pih_direct_interaction: 20      # optional ProteinInteractionHunter bridge
   external_ppi_evidence: 15       # optional STRING PPI bridge (see interaction_scoring.string_ppi_ncbi_taxon_id); provisional cap, awaiting calibration
   coexpression_evidence: 12       # optional GEO coexpression bridge (see interaction_scoring.geo_coexpression_enabled); provisional cap, awaiting calibration
+  protein_hunter: 30              # Final Score: normalized protein_hunter_score category; provisional 30/70 split, awaiting calibration
+  interaction: 70                 # Final Score: normalized interaction_score category; provisional 30/70 split, awaiting calibration
 
 # Maximum points a negative (contradicting) evidence component can subtract
 # from the final score. Set to null for no cap.

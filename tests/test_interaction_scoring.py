@@ -25,6 +25,7 @@ from core.models import BlastHit, DomainHit, ProteinRecord
 from analysis.interaction_scoring import (
     INTERACTION_EVIDENCE_DETAIL_LEGACY_COLUMNS,
     INTERACTION_EVIDENCE_DETAIL_V2_COLUMNS,
+    PROTEIN_HUNTER_SCORE_CEILING,
     interaction_pair_columns,
     resolve_cdd_annotation_targets,
     resolve_protein_hunter_scores,
@@ -1365,6 +1366,221 @@ def test_coexpression_gse64349_weighted_lower_than_gse77738(tmp_path: Path) -> N
     assert row["interaction_score"] > 0
 
 
+# ---------------------------------------------------------------------------
+# Final Score: combines protein_hunter_score + interaction_score (Final
+# Score integration phase, design spec sections 17-22/27, see
+# claude/final_score_integration_investigation.md)
+# ---------------------------------------------------------------------------
+
+
+def _candidate_with_known_protein_hunter_score() -> ProteinRecord:
+    """A candidate whose protein_hunter_score is exactly 14/18 (positive_hit + no_negative_hit + domain_hit)."""
+    candidate = record(
+        "candidate", old_locus_tag="MA_0002", description="iron-sulfur carrier protein", positive_sources_hit=["A"]
+    )
+    candidate.positive_hits = [
+        BlastHit(
+            query_id="candidate", subject_id="ref", percent_identity=50.0,
+            alignment_length=100, evalue=1e-20, bitscore=100.0,
+        )
+    ]
+    candidate.domains = [DomainHit(source="CDD", accession="cd00001", name="test_domain", description="test")]
+    return candidate
+
+
+def test_final_score_falls_back_to_protein_hunter_alone_when_interaction_missing() -> None:
+    """No query-specific evidence at all -> final_score is protein_hunter_score's own normalized value, re-normalized to 100."""
+    records = {
+        "query": record("query", old_locus_tag="MA_0001", description="", positive_sources_hit=[]),
+        "candidate": _candidate_with_known_protein_hunter_score(),
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+    records["candidate"].description = ""  # no domain_complementarity match either
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+        scoring_model="v2_evidence_based",
+    )
+
+    result = run_interaction_scoring(cfg, classification(records))
+
+    assert result is not None
+    row = result.source_rows["Interaction_Candidates"][0]
+    assert row["protein_hunter_score"] == 14
+    assert row["interaction_score"] is None
+    # protein_hunter category alone: normalized (14/18) * its own cap (30),
+    # renormalized against total_cap == 30 (only active category) -> *100/30
+    # cancels out to just the normalized fraction * 100.
+    assert row["final_score"] == pytest.approx(14 / PROTEIN_HUNTER_SCORE_CEILING * 100, abs=0.01)
+    assert row["final_score_tier"] in {"Tier1_VeryStrong", "Tier2_Strong", "Tier3_Moderate", "Tier4_Weak"}
+
+
+def test_final_score_combines_both_categories_per_30_70_split(tmp_path: Path) -> None:
+    """With both sub-scores available, final_score == 0.3*phs_norm100 + 0.7*interaction_score (the configured 30/70 cap split)."""
+    records = {
+        "query": record("query", old_locus_tag="MA_0001", description="radical SAM protein", positive_sources_hit=["A"]),
+        "candidate": _candidate_with_known_protein_hunter_score(),
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+        scoring_model="v2_evidence_based",
+    )
+
+    result = run_interaction_scoring(cfg, classification(records))
+
+    assert result is not None
+    row = result.source_rows["Interaction_Candidates"][0]
+    assert row["protein_hunter_score"] == 14
+    assert row["interaction_score"] is not None
+    phs_norm100 = 14 / PROTEIN_HUNTER_SCORE_CEILING * 100
+    expected = 0.3 * phs_norm100 + 0.7 * row["interaction_score"]
+    assert row["final_score"] == pytest.approx(expected, abs=0.05)
+
+
+def test_final_score_ignores_negative_hit_strength_by_design(tmp_path: Path) -> None:
+    """final_score must NOT be lowered by negative_hit_strength, even "strong" -- tried and removed.
+
+    negative_hit_strength measures phylogenetic novelty (is this protein
+    also found in the negative reference genomes), not design spec section
+    7.7's "biological contradiction" concept -- a real-data check found
+    conflating the two collapsed true-positive/AlphaFold3-negative
+    separation, since ancient well-conserved true positives (Hdr/Mtp/Nif
+    complexes) are exactly the candidates a "strong" negative hit routes
+    into the Negative_hit bucket in the first place. See
+    _final_score_components's docstring and
+    claude/final_score_integration_investigation.md.
+    interaction_priority_score's own, separate use of negative_hit_strength
+    is intentionally untouched by this test.
+    """
+    strong_hit_candidate = _candidate_with_known_protein_hunter_score()
+    strong_hit_candidate.negative_hit_strength = "strong"
+    strong_hit_candidate.description = ""
+    records = {
+        "query": record("query", old_locus_tag="MA_0001", description="", positive_sources_hit=[]),
+        "candidate": strong_hit_candidate,
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+        scoring_model="v2_evidence_based",
+        evidence_detail_sheet=INTERACTION_EVIDENCE_DETAIL_DEFAULT,
+    )
+
+    result = run_interaction_scoring(cfg, classification(records))
+
+    assert result is not None
+    row = result.source_rows["Interaction_Candidates"][0]
+    phs_norm100 = 14 / PROTEIN_HUNTER_SCORE_CEILING * 100
+    # No penalty applied at all: final_score == protein_hunter-alone value,
+    # not reduced despite negative_hit_strength == "strong".
+    assert row["final_score"] == pytest.approx(phs_norm100, abs=0.01)
+
+    detail = next(
+        r
+        for r in result.evidence_detail_rows
+        if r["candidate_protein_id"] == "candidate" and r["component_name"] == "final_score_negative_penalty"
+    )
+    assert detail["status"] == "NOT_APPLICABLE"
+    assert detail["normalized_value"] is None
+
+
+def test_final_score_backward_compatible_with_custom_scoring_engine_config_missing_its_categories(
+    tmp_path: Path,
+) -> None:
+    """A pre-existing custom scoring_engine_config.yaml without protein_hunter/interaction caps must not crash."""
+    custom_config = tmp_path / "custom_engine.yaml"
+    custom_config.write_text(
+        "category_caps:\n  source_classification: 30\n  genomic_context: 25\n"
+        "  functional_annotation: 20\n",
+        encoding="utf-8",
+    )
+    records = {
+        "query": record("query", old_locus_tag="MA_0001", description="", positive_sources_hit=["A"]),
+        "candidate": _candidate_with_known_protein_hunter_score(),
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+        scoring_model="v2_evidence_based",
+        scoring_engine_config=custom_config,
+    )
+
+    result = run_interaction_scoring(cfg, classification(records))
+
+    assert result is not None
+    row = result.source_rows["Interaction_Candidates"][0]
+    # Falls back to the module's own provisional default caps (30/70)
+    # rather than raising a ConfigError.
+    assert row["final_score"] is not None
+
+
+def test_legacy_additive_also_computes_final_score() -> None:
+    """protein_hunter_score and interaction_score both exist for legacy_additive too, so final_score should as well."""
+    records = {
+        "query": record("query", old_locus_tag="MA_0001", positive_sources_hit=["A"]),
+        "candidate": _candidate_with_known_protein_hunter_score(),
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+        scoring_model="legacy_additive",
+    )
+
+    result = run_interaction_scoring(cfg, classification(records))
+
+    assert result is not None
+    row = result.source_rows["Interaction_Candidates"][0]
+    assert row["protein_hunter_score"] == 14
+    assert row["final_score"] is not None
+    assert row["final_score_tier"] is not None
+
+
+def test_ranking_metric_final_score_reorders_candidate_rank() -> None:
+    """ranking_metric: final_score should re-rank candidates by final_score, leaving other columns untouched."""
+    high_phs = _candidate_with_known_protein_hunter_score()
+    high_phs.protein_id = "high_phs"
+    high_phs.old_locus_tag = "MA_0002"
+    high_phs.description = ""
+
+    low_phs = record("low_phs", old_locus_tag="MA_0003", description="", positive_sources_hit=[])
+    # low_phs has no positive_hits/domains -> only no_negative_hit fires -> protein_hunter_score == 5.
+
+    records = {
+        "query": record("query", old_locus_tag="MA_0001", description="", positive_sources_hit=[]),
+        "candidate": low_phs,
+        "high_phs": high_phs,
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+        scoring_model="v2_evidence_based",
+    )
+    cfg.interaction_scoring = replace(cfg.interaction_scoring, ranking_metric="final_score")
+
+    classification_obj = classification(records)
+    classification_obj.positive_only_records = {"low_phs": low_phs, "high_phs": high_phs}
+
+    result = run_interaction_scoring(cfg, classification_obj)
+
+    assert result is not None
+    rows_by_id = {r["candidate_protein_id"]: r for r in result.source_rows["Interaction_Candidates"]}
+    assert rows_by_id["high_phs"]["final_score"] > rows_by_id["low_phs"]["final_score"]
+    assert rows_by_id["high_phs"]["candidate_rank"] == 1
+    assert rows_by_id["low_phs"]["candidate_rank"] == 2
+
+
 def test_interaction_scoring_disabled_returns_none() -> None:
     """Disabled interaction scoring should not create output."""
     cfg = interaction_config(enabled=False)
@@ -2477,9 +2693,11 @@ def test_evidence_detail_v2_long_format_has_one_row_per_component() -> None:
     # source_classification, sequence_evidence, genomic_context, co_occurrence,
     # domain_complementarity, negative_hit_strength, string_cooccurrence,
     # string_neighborhood, coexpression_gse77738, coexpression_gse64349 --
-    # always exactly ten, whether AVAILABLE or not (see
-    # _build_evidence_components_v2).
-    assert len(detail_rows) == 10
+    # always exactly ten from _build_evidence_components_v2, whether
+    # AVAILABLE or not -- plus three more from Final Score's own,
+    # separately-attached breakdown (protein_hunter_score, interaction_score,
+    # final_score_negative_penalty -- see _final_score_components).
+    assert len(detail_rows) == 13
     assert {r["component_name"] for r in detail_rows} == {
         "source_classification",
         "sequence_evidence",
@@ -2491,6 +2709,9 @@ def test_evidence_detail_v2_long_format_has_one_row_per_component() -> None:
         "string_neighborhood",
         "coexpression_gse77738",
         "coexpression_gse64349",
+        "protein_hunter_score",
+        "interaction_score",
+        "final_score_negative_penalty",
     }
     for detail_row in detail_rows:
         assert set(detail_row) == set(INTERACTION_EVIDENCE_DETAIL_V2_COLUMNS)

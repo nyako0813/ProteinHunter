@@ -247,8 +247,18 @@ interaction_scoring:
   # ranks by query-specific evidence only (genomic_context +
   # domain_complementarity; co_occurrence and candidate quality excluded --
   # see analysis/interaction_scoring.py::INTERACTION_SCORE_COMPONENT_NAMES).
-  # interaction_priority_score/evidence_tier/priority_group columns keep
-  # their original values either way -- only candidate_rank/row order change.
+  # "final_score" (Final Score integration phase, design spec sections
+  # 17-22/27; see claude/final_score_integration_investigation.md) ranks by
+  # the combined protein_hunter_score+interaction_score Final Score.
+  # KNOWN LIMITATION for "final_score": protein_hunter_score is only known
+  # after each query's candidates have already been ranked and truncated to
+  # max_candidates_per_query by whichever metric produced candidate_rank at
+  # that point, so this re-ranks *within* that already-selected set, not a
+  # full re-selection from every scored candidate -- see
+  # analysis/interaction_scoring.py::_rerank_by_final_score. In every case,
+  # interaction_priority_score/evidence_tier/priority_group/final_score/
+  # final_score_tier columns keep their original values either way -- only
+  # candidate_rank/row order change.
   ranking_metric: interaction_priority_score
 
   # Optional NCBI taxonomy id for STRING (string-db.org) PPI evidence
