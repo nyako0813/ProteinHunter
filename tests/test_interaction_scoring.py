@@ -1228,6 +1228,126 @@ def test_coexpression_gse77738_reuses_cache_across_runs(tmp_path: Path) -> None:
     assert detail["status"] == "AVAILABLE"
 
 
+# ---------------------------------------------------------------------------
+# coexpression_gse64349: shares coexpression_evidence category, lower weight
+# (Phase 6b M3)
+# ---------------------------------------------------------------------------
+
+
+def _seed_gse64349_coexpression_files(cache_dir: Path, gene_values: dict[str, list[float]]) -> None:
+    """Write small synthetic TableS1 (wild-type) and TableS2 (parental+mutant) workbooks.
+
+    ``gene_values`` maps a bare gene locus to 4 values: [DMS, MMPA, MeOH
+    (TableS1's 3 wild-type samples), WWM82-parental (TableS2, kept)]. A
+    Delta-msrH column with an obviously-wrong constant value is always
+    added, to prove it never influences the result.
+    """
+    coexpr_dir = cache_dir / "coexpression"
+    coexpr_dir.mkdir(parents=True, exist_ok=True)
+
+    table1 = pd.DataFrame(
+        {
+            "Feature ID": list(gene_values),
+            "DMS - S1_R1 (single) (GE) - RPKM": [v[0] for v in gene_values.values()],
+            "MMPA - S2_R1 (single) (GE) - RPKM": [v[1] for v in gene_values.values()],
+            "MeOH - S3_R1 (single) (GE) - RPKM": [v[2] for v in gene_values.values()],
+        }
+    )
+    table1.to_excel(coexpr_dir / "GSE64349_TableS1_GEO.xlsx", index=False)
+
+    table2 = pd.DataFrame(
+        {
+            "Feature ID": list(gene_values),
+            "WWM82 (parental strain) - S4_R1 (single) (GE) - RPKM": [v[3] for v in gene_values.values()],
+            "delta-msrH - S5_R1 (single) (GE) - RPKM": [999999.0] * len(gene_values),
+        }
+    )
+    table2.to_excel(coexpr_dir / "GSE64349_TableS2_GEO.xlsx", index=False)
+
+
+def test_coexpression_gse64349_not_run_when_disabled() -> None:
+    """Without geo_coexpression_enabled, coexpression_gse64349 must be NOT_RUN, matching gse77738."""
+    records = {
+        "query": record("query", old_locus_tag="MA_0001", positive_sources_hit=["A"]),
+        "candidate": record("candidate", old_locus_tag="MA_0002", positive_sources_hit=["A"]),
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+        scoring_model="v2_evidence_based",
+        evidence_detail_sheet=INTERACTION_EVIDENCE_DETAIL_DEFAULT,
+    )
+
+    result = run_interaction_scoring(cfg, classification(records))
+
+    assert result is not None
+    detail = next(
+        r
+        for r in result.evidence_detail_rows
+        if r["candidate_protein_id"] == "candidate" and r["component_name"] == "coexpression_gse64349"
+    )
+    assert detail["status"] == "NOT_RUN"
+    assert detail["category"] == "coexpression_evidence"
+
+
+def test_coexpression_gse64349_weighted_lower_than_gse77738(tmp_path: Path) -> None:
+    """Both components share coexpression_evidence's cap, but gse64349's weight is 1/3 of gse77738's."""
+    records = {
+        "query": record("query", old_locus_tag="MA_0001", description="", positive_sources_hit=["A"]),
+        "candidate": record(
+            "candidate", old_locus_tag="MA_0002", description="", positive_sources_hit=["A"]
+        ),
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+    base77738 = [10, 20, 30, 40, 50, 60, 70, 80, 90, 15, 25, 35, 45]
+    _seed_gse77738_coexpression_file(
+        tmp_path, {"MA0001": base77738, "MA0002": [v * 2 for v in base77738]}
+    )
+    _seed_gse64349_coexpression_files(
+        tmp_path,
+        {
+            "MA0001": [10, 20, 30, 40],
+            "MA0002": [20, 40, 60, 80],
+            "MA0003": [40, 30, 20, 10],
+        },
+    )
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+        scoring_model="v2_evidence_based",
+        cache_dir=tmp_path,
+    )
+    cfg.interaction_scoring = replace(cfg.interaction_scoring, geo_coexpression_enabled=True)
+
+    result = run_interaction_scoring(cfg, classification(records))
+
+    assert result is not None
+    detail_rows = {
+        r["component_name"]: r
+        for r in result.evidence_detail_rows
+        if r["candidate_protein_id"] == "candidate"
+    }
+    gse77738 = detail_rows["coexpression_gse77738"]
+    gse64349 = detail_rows["coexpression_gse64349"]
+    assert gse77738["status"] == "AVAILABLE"
+    assert gse64349["status"] == "AVAILABLE"
+    assert gse77738["category"] == "coexpression_evidence"
+    assert gse64349["category"] == "coexpression_evidence"
+    # Both components share one cap...
+    assert gse77738["category_cap"] == gse64349["category_cap"] == 12.0
+    # ...but gse64349's weight is 1/3 of gse77738's (see
+    # V2_COMPONENT_WEIGHTS["coexpression_gse64349"]).
+    assert gse64349["weight"] == pytest.approx(gse77738["weight"] / 3.0)
+
+    # Delta-msrH's obviously-wrong constant value (999999) must never
+    # surface -- both wild-type-equivalent genes (MA0001/MA0002) still
+    # correlate near-perfectly.
+    assert gse64349["normalized_value"] == pytest.approx(1.0, abs=1e-6)
+
+
 def test_interaction_scoring_disabled_returns_none() -> None:
     """Disabled interaction scoring should not create output."""
     cfg = interaction_config(enabled=False)
@@ -2339,9 +2459,10 @@ def test_evidence_detail_v2_long_format_has_one_row_per_component() -> None:
     ]
     # source_classification, sequence_evidence, genomic_context, co_occurrence,
     # domain_complementarity, negative_hit_strength, string_cooccurrence,
-    # string_neighborhood, coexpression_gse77738 -- always exactly nine,
-    # whether AVAILABLE or not (see _build_evidence_components_v2).
-    assert len(detail_rows) == 9
+    # string_neighborhood, coexpression_gse77738, coexpression_gse64349 --
+    # always exactly ten, whether AVAILABLE or not (see
+    # _build_evidence_components_v2).
+    assert len(detail_rows) == 10
     assert {r["component_name"] for r in detail_rows} == {
         "source_classification",
         "sequence_evidence",
@@ -2352,6 +2473,7 @@ def test_evidence_detail_v2_long_format_has_one_row_per_component() -> None:
         "string_cooccurrence",
         "string_neighborhood",
         "coexpression_gse77738",
+        "coexpression_gse64349",
     }
     for detail_row in detail_rows:
         assert set(detail_row) == set(INTERACTION_EVIDENCE_DETAIL_V2_COLUMNS)
