@@ -260,6 +260,15 @@ INTERACTION_PAIR_COLUMNS: tuple[str, ...] = (
     "candidate_old_locus_tag",
     "candidate_source",
     "candidate_description",
+    # Phase 6-8 sheet redesign reference column (both scoring models): the
+    # candidate's phylogenetic-novelty classification (analysis/ortholog_filter.py),
+    # exposed as a plain row column for the first time so the new
+    # candidate_source-as-column layout can show it without a dedicated
+    # Negative_strong/medium/weak_hit sheet. Never affects
+    # interaction_priority_score/candidate_rank on its own (see
+    # V2_COMPONENT_WEIGHTS["negative_hit_strength"] for its one existing,
+    # unrelated use inside interaction_priority_score/evidence_tier).
+    "negative_hit_strength",
     "same_contig",
     "query_start",
     "query_end",
@@ -329,6 +338,17 @@ INTERACTION_PAIR_COLUMNS: tuple[str, ...] = (
     # interaction_scoring.ranking_metric: final_score).
     "final_score",
     "final_score_tier",
+    # Phase 6-8 sheet redesign category-level reference columns
+    # (scoring_model: v2_evidence_based only -- blank for legacy_additive,
+    # which has no category-cap concept). Mirror candidate_priority_score/
+    # same_gene_neighborhood_score above (already the source_classification/
+    # genomic_context categories' own capped_score), extended to the
+    # remaining categories the design spec's per-category sheets need. See
+    # claude/phase678_excel_word_redesign_investigation.md's category mapping.
+    "functional_domain_score",
+    "evolutionary_score",
+    "cellular_compatibility_score",
+    "interaction_evidence_score",
 )
 
 SEQUENCE_COLUMNS: tuple[str, ...] = ("query_sequence", "candidate_sequence")
@@ -947,6 +967,29 @@ def _final_score_engine_config(engine_config: ScoringEngineConfig) -> ScoringEng
     )
 
 
+def compute_protein_hunter_only_final_score(
+    protein_hunter_score: float | None,
+    engine_config: ScoringEngineConfig,
+) -> tuple[float | None, str]:
+    """Return Final Score/tier for a candidate with no interaction_score at all.
+
+    Public entry point for output/report_v2.py's 02_Final_Score sheet: when
+    interaction_scoring is disabled (or a candidate has no resolved query),
+    the base classification sheets still need a Final Score value using the
+    exact same protein_hunter-alone fallback formula
+    _attach_final_score_columns already gives every in-run candidate whose
+    interaction_score happens to be MISSING (see _final_score_components'
+    "renormalize against whatever's active" behavior) -- this just exposes
+    that same path for candidates outside interaction_scoring's own
+    per-query rows.
+    """
+    breakdown = _final_score_breakdown(
+        protein_hunter_score, None, None, _final_score_engine_config(engine_config)
+    )
+    final_score = round(breakdown.final_score, 3) if breakdown.final_score is not None else None
+    return final_score, breakdown.tier
+
+
 def _final_score_detail_rows(
     row: dict[str, Any], breakdown: ScoreBreakdown, engine_config: ScoringEngineConfig
 ) -> list[dict[str, Any]]:
@@ -1280,6 +1323,7 @@ def _score_pair(
         "candidate_old_locus_tag": candidate.old_locus_tag or "",
         "candidate_source": candidate_source,
         "candidate_description": candidate.description,
+        "negative_hit_strength": candidate.negative_hit_strength or "none",
         **{key: value for key, value in neighborhood.items() if key != "reason"},
         "interaction_priority_score": round(total_score, 3),
         "distance_independent_score": round(distance_independent_score, 3),
@@ -1559,6 +1603,31 @@ def _score_pair_v2(
     final_score = breakdown.final_score
     genomic_context_category = breakdown.category_scores.get("genomic_context")
     source_category = breakdown.category_scores.get("source_classification")
+    functional_annotation_category = breakdown.category_scores.get("functional_annotation")
+    evolutionary_category = breakdown.category_scores.get("pih_evolutionary")
+    cellular_compatibility_category = breakdown.category_scores.get("pih_cellular_compatibility")
+    # Sum of the three categories the Phase 6-8 sheet redesign's "Interaction"
+    # column groups together (external_ppi_evidence + coexpression_evidence +
+    # pih_direct_interaction; see claude/phase678_excel_word_redesign_investigation.md's
+    # category mapping). Deliberately a raw sum of capped_score values, not a
+    # re-normalized 0-100 score -- unlike interaction_score (which shares this
+    # scope minus co_occurrence and additionally includes genomic_context/
+    # domain_complementarity), this column exists purely as a category-level
+    # reference matching Sequence/Genomic Context's own capped_score display.
+    interaction_evidence_categories = (
+        breakdown.category_scores.get("external_ppi_evidence"),
+        breakdown.category_scores.get("coexpression_evidence"),
+        breakdown.category_scores.get("pih_direct_interaction"),
+    )
+    # score_candidate() always reports every category in category_caps, even
+    # with zero evidence (capped_score=0.0, component_count=0) -- see
+    # analysis/scoring_engine.py::_score_categories's own comment. These four
+    # new reference columns distinguish "genuinely scored zero" from "no
+    # evidence was ever evaluated" (None) by checking component_count, the
+    # same distinction interaction_score already makes for its own MISSING
+    # case -- .get(...) alone is never None here since every category name
+    # below is always present in DEFAULT_CATEGORY_CAPS.
+    interaction_evidence_present = [c for c in interaction_evidence_categories if c is not None and c.component_count > 0]
 
     row: dict[str, Any] = {
         "query_id": query["query_id"],
@@ -1569,6 +1638,7 @@ def _score_pair_v2(
         "candidate_old_locus_tag": candidate.old_locus_tag or "",
         "candidate_source": candidate_source,
         "candidate_description": candidate.description,
+        "negative_hit_strength": candidate.negative_hit_strength or "none",
         **location_info,
         "same_gene_neighborhood_score": round(genomic_context_category.capped_score, 3)
         if genomic_context_category is not None
@@ -1596,6 +1666,20 @@ def _score_pair_v2(
         if interaction_breakdown.final_score is not None
         else None,
         "interaction_evidence_tier": interaction_breakdown.tier,
+        "functional_domain_score": round(functional_annotation_category.capped_score, 3)
+        if functional_annotation_category is not None and functional_annotation_category.component_count > 0
+        else None,
+        "evolutionary_score": round(evolutionary_category.capped_score, 3)
+        if evolutionary_category is not None and evolutionary_category.component_count > 0
+        else None,
+        "cellular_compatibility_score": round(cellular_compatibility_category.capped_score, 3)
+        if cellular_compatibility_category is not None and cellular_compatibility_category.component_count > 0
+        else None,
+        "interaction_evidence_score": round(
+            sum(c.capped_score for c in interaction_evidence_present), 3
+        )
+        if interaction_evidence_present
+        else None,
     }
     if scoring_config.include_sequences_in_excel:
         row["query_sequence"] = query["sequence"]
@@ -2543,7 +2627,9 @@ def _without_version(protein_id: str) -> str:
 
 
 __all__: tuple[str, ...] = (
+    "CANDIDATE_PRIORITY_BASE",
     "CANDIDATE_SOURCE_MAP",
+    "INTERACTION_EVIDENCE_DETAIL_SHEET",
     "INTERACTION_NEIGHBORHOOD_COLUMNS",
     "INTERACTION_NEIGHBORHOOD_SHEET",
     "INTERACTION_PAIR_COLUMNS",
@@ -2551,11 +2637,14 @@ __all__: tuple[str, ...] = (
     "INTERACTION_SHEET_DESCRIPTIONS",
     "InteractionScoringResult",
     "PROTEIN_HUNTER_SCORE_CEILING",
+    "compute_protein_hunter_only_final_score",
+    "interaction_evidence_detail_columns",
     "interaction_index_rows",
     "interaction_neighborhood_columns",
     "interaction_pair_columns",
     "interaction_sheet_name",
     "resolve_cdd_annotation_targets",
+    "resolve_protein_hunter_scores",
     "run_interaction_scoring",
     "source_sheet_name",
 )

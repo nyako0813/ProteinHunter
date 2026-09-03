@@ -1581,6 +1581,110 @@ def test_ranking_metric_final_score_reorders_candidate_rank() -> None:
     assert rows_by_id["low_phs"]["candidate_rank"] == 2
 
 
+def test_negative_hit_strength_exposed_as_row_column_both_models() -> None:
+    """negative_hit_strength (analysis/ortholog_filter.py) is now a plain pair-row column.
+
+    Phase 6-8 sheet redesign needs this as a column (replacing the 3
+    strength-specific sheets), for both scoring models -- neither
+    _score_pair (legacy) nor _score_pair_v2 previously exposed it.
+    """
+    candidate = record("candidate", positive_sources_hit=["A"])
+    candidate.negative_hit_strength = "medium"
+    records = {
+        "query": record("query", positive_sources_hit=["A"]),
+        "candidate": candidate,
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+    for scoring_model in ("legacy_additive", "v2_evidence_based"):
+        cfg = interaction_config(
+            query_proteins=(InteractionQueryConfig("query", "", ""),),
+            candidate_sources={"candidates": True},
+            scoring_model=scoring_model,
+        )
+        result = run_interaction_scoring(cfg, classification(records))
+        assert result is not None
+        row = result.source_rows["Interaction_Candidates"][0]
+        assert row["negative_hit_strength"] == "medium"
+
+
+def test_v2_category_reference_columns_present_and_legacy_columns_blank() -> None:
+    """functional_domain/evolutionary/cellular_compatibility/interaction_evidence_score.
+
+    v2_evidence_based only (category-cap concept doesn't exist for
+    legacy_additive) -- new Phase 6-8 reference columns mirroring
+    candidate_priority_score/same_gene_neighborhood_score, needed so the
+    12-sheet redesign's category-level columns can read them directly from
+    the existing pair rows instead of re-deriving from ScoreBreakdown.
+    """
+    records = {
+        "query": record("query", old_locus_tag="MA_0001", description="radical SAM protein", positive_sources_hit=["A"]),
+        "candidate": _candidate_with_known_protein_hunter_score(),
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+    cfg_v2 = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+        scoring_model="v2_evidence_based",
+    )
+    result_v2 = run_interaction_scoring(cfg_v2, classification(records))
+    assert result_v2 is not None
+    row_v2 = result_v2.source_rows["Interaction_Candidates"][0]
+    # functional_annotation category is active (domain_complementarity has a
+    # match: "radical SAM" query vs "iron-sulfur carrier protein" candidate).
+    assert row_v2["functional_domain_score"] is not None
+    assert row_v2["functional_domain_score"] >= 0
+    # No PIH evidence bundle configured -> evolutionary/cellular_compatibility
+    # categories have no components at all -> None (MISSING), not zero.
+    assert row_v2["evolutionary_score"] is None
+    assert row_v2["cellular_compatibility_score"] is None
+    # No STRING/coexpression bundle configured -> interaction_evidence_score
+    # (external_ppi_evidence + coexpression_evidence + pih_direct_interaction) is None.
+    assert row_v2["interaction_evidence_score"] is None
+
+    cfg_legacy = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+        scoring_model="legacy_additive",
+    )
+    result_legacy = run_interaction_scoring(cfg_legacy, classification(records))
+    assert result_legacy is not None
+    row_legacy = result_legacy.source_rows["Interaction_Candidates"][0]
+    assert row_legacy.get("functional_domain_score") is None
+    assert row_legacy.get("evolutionary_score") is None
+    assert row_legacy.get("cellular_compatibility_score") is None
+    assert row_legacy.get("interaction_evidence_score") is None
+
+
+def test_compute_protein_hunter_only_final_score_matches_in_run_fallback() -> None:
+    """The public no-query fallback wrapper must match Final Score's own MISSING-interaction_score path."""
+    from analysis.interaction_scoring import compute_protein_hunter_only_final_score
+    from analysis.scoring_engine_config import load_scoring_engine_config
+
+    records = {
+        "query": record("query", old_locus_tag="MA_0001", description="", positive_sources_hit=[]),
+        "candidate": _candidate_with_known_protein_hunter_score(),
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+    records["candidate"].description = ""
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+        scoring_model="v2_evidence_based",
+    )
+    result = run_interaction_scoring(cfg, classification(records))
+    assert result is not None
+    row = result.source_rows["Interaction_Candidates"][0]
+    assert row["interaction_score"] is None
+
+    engine_config = load_scoring_engine_config(None)
+    final_score, tier = compute_protein_hunter_only_final_score(row["protein_hunter_score"], engine_config)
+    assert final_score == pytest.approx(row["final_score"], abs=1e-6)
+    assert tier == row["final_score_tier"]
+
+
 def test_interaction_scoring_disabled_returns_none() -> None:
     """Disabled interaction scoring should not create output."""
     cfg = interaction_config(enabled=False)
