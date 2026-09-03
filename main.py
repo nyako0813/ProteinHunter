@@ -163,7 +163,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         from analysis.input_summary import format_input_summary, summarize_input_fastas
         from analysis.interaction_scoring import run_interaction_scoring
         from analysis.scoring import get_sorted_records, score_records
-        from config import load_config
+        from config import load_config, redundant_negative_hit_sources
         from core.cache import JsonCache
         from core.fasta_sources import DirectoryFastaResult, prepare_directory_fasta
         from output.excel import write_classification_workbook
@@ -275,6 +275,18 @@ def main(argv: Sequence[str] | None = None) -> None:
                 "Interaction scoring: "
                 f"{'enabled' if config.interaction_scoring.enabled else 'disabled'}"
             )
+            redundant_sources = redundant_negative_hit_sources(
+                config.interaction_scoring.candidate_sources
+            )
+            if redundant_sources:
+                logger.warning(
+                    "interaction_scoring.candidate_sources.negative_hit is enabled "
+                    f"together with {', '.join(redundant_sources)} -- these are "
+                    "subsets of negative_hit, so matching candidates will be scored "
+                    "and reported twice (once per bucket) with different "
+                    "candidate_rank values for the same pair. Usually only one of "
+                    "them should be enabled."
+                )
 
             input_summary = summarize_input_fastas(
                 target_fasta=target_fasta,

@@ -1106,16 +1106,29 @@ def _evidence_detail_rows_v2(
 #: by component *name* here, same as every other entry, so it needs its
 #: own listing even though its category name is already present).
 #:
-#: Phase 6b adds "coexpression_gse77738"/"coexpression_gse64349" (measured
-#: transcript coexpression between query and candidate specifically -- a
-#: pair-level signal, unlike co_occurrence above).
+#: Phase 6b adds "coexpression_gse64349" (measured transcript coexpression
+#: between query and candidate specifically -- a pair-level signal, unlike
+#: co_occurrence above). "coexpression_gse77738" is deliberately NOT
+#: included here: a real-data check against 8 curated experimental
+#: positive pairs (Tier A, claude/experimental_interactions_curation.md)
+#: alongside the existing 28-entry AlphaFold3-negative calibration set
+#: found this component running backwards -- AF3-confirmed *non*-interacting
+#: pairs had a *higher* mean/median coexpression_gse77738 percentile
+#: (0.655/0.732) than the true positive pairs (0.480/0.388, or 0.548/0.416
+#: with the single lowest positive value excluded, so not just an outlier
+#: artifact). coexpression_gse77738 is still computed and cached exactly as
+#: before, and still shown in Interaction_Evidence_Detail for audit -- only
+#: excluded from the interaction_score/interaction_evidence_tier sum. See
+#: claude/experimental_interactions_calibration_report.md for the full
+#: numbers. coexpression_gse64349 was checked the same way and did not show
+#: this reversal (0.848 positives vs. 0.601 negatives), so it stays in,
+#: unchanged, at its existing 1/3-of-gse77738 weight.
 INTERACTION_SCORE_COMPONENT_NAMES: frozenset[str] = frozenset(
     {
         "genomic_context",
         "domain_complementarity",
         "string_cooccurrence",
         "string_neighborhood",
-        "coexpression_gse77738",
         "coexpression_gse64349",
     }
 )

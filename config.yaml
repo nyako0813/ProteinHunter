@@ -148,6 +148,31 @@ interaction_scoring:
 
   query_fasta: ""
 
+  # negative_hit (and its three sub-buckets) are OFF by default because
+  # they are usually large and, for most queries, dominated by unrelated
+  # proteins. But a diagnostic run against curated experimental
+  # interaction data (claude/experimental_interactions_calibration_report.md)
+  # found that ancient, broadly-conserved pathway/complex proteins (e.g.
+  # heterodisulfide reductase, methyl-coenzyme M reductase and their real
+  # partners) routinely BLAST-hit this project's own negative reference
+  # genomes and get classified into Negative_hit rather than Candidates --
+  # not because they are false positives, but because conservation itself
+  # trips the negative-exclusion logic. If your query protein is part of a
+  # well-conserved pathway or complex, consider enabling negative_hit below
+  # -- with the default left as-is, that query's true interaction partners
+  # may never appear in the Interaction_* output at all.
+  #
+  # If you do enable negative_hit, do NOT also enable
+  # negative_strong_hit/negative_medium_hit/negative_weak_hit at the same
+  # time: they are subsets of negative_hit (every strong/medium/weak hit is
+  # already a negative_hit), so enabling both scores and reports the same
+  # candidate twice, once per bucket, under two different Interaction_*
+  # sheets (Interaction_Neg_hit and Interaction_Neg_strong/medium/weak)
+  # with different candidate_rank values for the same pair -- confirmed
+  # directly in the calibration report above (MtpA-MtpC appeared as both
+  # rank 106/2088 in Interaction_Neg_hit and rank 2/780 in
+  # Interaction_Neg_strong for the identical pair). Enable negative_hit
+  # alone, or one of the strength sub-buckets alone, not both.
   candidate_sources:
     candidates: true
     candidates_relaxed: true
