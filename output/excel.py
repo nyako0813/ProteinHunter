@@ -15,14 +15,12 @@ from openpyxl.worksheet.worksheet import Worksheet
 from core.exceptions import ExcelOutputError
 from core.models import BlastHit, ProteinRecord
 from analysis.interaction_scoring import (
-    INTERACTION_EVIDENCE_DETAIL_SHEET,
-    INTERACTION_NEIGHBORHOOD_SHEET,
+    INTERACTION_EVIDENCE_DETAIL_V2_COLUMNS,
     INTERACTION_QUERY_COLUMNS,
     interaction_evidence_detail_columns,
-    interaction_index_rows,
     interaction_neighborhood_columns,
-    interaction_pair_columns,
 )
+from output.report_v2 import build_workbook_sheets
 
 
 EXCEL_COLUMNS: tuple[str, ...] = (
@@ -69,86 +67,198 @@ EXCEL_COLUMNS: tuple[str, ...] = (
 )
 
 
-POSITIVE_SOURCE_SUMMARY_COLUMNS: tuple[str, ...] = (
+#: Phase 6-8 Stage 1 sheet names (design spec section 25.1). Sheet 01 is the
+#: Index itself (not listed in INDEX_ROWS_V2, same as the old INDEX_ROWS
+#: never listing "Index"); sheet 12 is deliberately reserved/empty, see
+#: claude/phase678_excel_word_redesign_investigation.md.
+SHEET_FINAL_SCORE = "02_Final_Score"
+SHEET_CANDIDATE_OVERVIEW = "03_Candidate_Overview"
+SHEET_SCORE_BREAKDOWN = "04_Score_Breakdown"
+SHEET_SEQUENCE_EVIDENCE = "05_Sequence_Evidence"
+SHEET_FUNCTIONAL_DOMAIN_EVIDENCE = "06_Functional_Domain_Evidence"
+SHEET_EVOLUTIONARY_EVIDENCE = "07_Evolutionary_Evidence"
+SHEET_GENOMIC_CONTEXT = "08_Genomic_Context"
+SHEET_INTERACTION_EVIDENCE = "09_Interaction_Evidence"
+SHEET_NEGATIVE_EVIDENCE = "10_Negative_Evidence"
+SHEET_RAW_AUDIT = "11_Raw_Audit"
+SHEET_RESERVED = "12_Reserved"
+
+FINAL_SCORE_COLUMNS: tuple[str, ...] = (
+    "candidate_rank",
+    "candidate_protein_id",
+    "candidate_old_locus_tag",
+    "query_id",
+    "query_protein_id",
+    "candidate_source",
+    "negative_hit_strength",
+    "final_score",
+    "final_score_tier",
+    "protein_hunter_score",
+    "interaction_score",
+    "candidate_priority_score",
+    "functional_domain_score",
+    "evolutionary_score",
+    "same_gene_neighborhood_score",
+    "interaction_evidence_score",
+    "final_score_negative_penalty",
+    "evidence_category_count",
+    "evidence_component_count",
+    "available_weight_total",
+    "word_report_link",
+    "candidate_description",
+)
+
+CANDIDATE_OVERVIEW_COLUMNS: tuple[str, ...] = (
     "protein_id",
-    "description",
     "old_locus_tag",
-    "negative_hit",
+    "description",
+    "candidate_source",
+    "negative_hit_strength",
+    "protein_hunter_score",
+    "blast_status",
+    "positive_hit_count",
+    "negative_hit_count",
+    "best_positive_hit",
+    "domain_count",
+    "uniprot_accession",
+    "alphafold_url",
     "positive_source_count",
     "positive_sources_hit",
     "positive_sources_missing",
-    "positive_hit_count",
-    "negative_hit_count",
-    "blast_status",
-    "best_positive_hit",
-    "best_positive_bitscore",
-    "best_positive_evalue",
-    "best_negative_hit",
-    "best_negative_bitscore",
-    "best_negative_evalue",
+    "sequence_length",
+    "notes",
+)
+
+SCORE_BREAKDOWN_COLUMNS: tuple[str, ...] = (
+    "query_id",
+    "query_protein_id",
+    "candidate_rank",
+    "candidate_protein_id",
+    "candidate_old_locus_tag",
+    "candidate_source",
+    "negative_hit_strength",
+    "candidate_priority_score",
+    "same_gene_neighborhood_score",
+    "functional_domain_score",
+    "co_occurrence_score",
+    "domain_complementarity_score",
+    "evolutionary_score",
+    "cellular_compatibility_score",
+    "interaction_evidence_score",
+    "alphafold_readiness_score",
+    "string_ppi_score",
+    "interaction_priority_score",
+    "interaction_score",
+    "final_score",
+    "evidence_tier",
+    "interaction_evidence_tier",
+    "final_score_tier",
+    "formal_score_available",
+    "evidence_category_count",
+    "evidence_component_count",
+    "available_weight_total",
+    "scoring_model",
+)
+
+#: (sheet name, evidence-detail categories shown there). v2_evidence_based
+#: only -- Interaction_Evidence_Detail's long format (category/component per
+#: row) is the only place these categories exist as discrete rows; legacy_additive
+#: has no per-category concept at all, so these sheets stay header-only for
+#: that scoring model (see 11_Raw_Audit for legacy's own wide-format detail
+#: instead). 07_Evolutionary_Evidence also carries pih_cellular_compatibility --
+#: both are PihEvidenceBundle-sourced and, per the Stage 1 directive, both
+#: are "mostly unfulfilled" today (no dedicated Cellular_Compatibility sheet
+#: exists in the 12-sheet budget); cellular_compatibility_score remains
+#: available as its own reference column on 04_Score_Breakdown.
+CATEGORY_EVIDENCE_SHEETS: tuple[tuple[str, frozenset[str]], ...] = (
+    (SHEET_SEQUENCE_EVIDENCE, frozenset({"source_classification"})),
+    (SHEET_FUNCTIONAL_DOMAIN_EVIDENCE, frozenset({"functional_annotation"})),
+    (SHEET_EVOLUTIONARY_EVIDENCE, frozenset({"pih_evolutionary", "pih_cellular_compatibility"})),
+    (SHEET_GENOMIC_CONTEXT, frozenset({"genomic_context"})),
+    (
+        SHEET_INTERACTION_EVIDENCE,
+        frozenset({"external_ppi_evidence", "coexpression_evidence", "pih_direct_interaction"}),
+    ),
+    (SHEET_NEGATIVE_EVIDENCE, frozenset({"source_reliability"})),
 )
 
 
-INDEX_ROWS: tuple[tuple[str, str, str, str], ...] = (
+INDEX_ROWS_V2: tuple[tuple[str, str, str, str], ...] = (
     (
-        "Candidates",
-        "positive hit present and no negative hit",
-        "strict candidate set; negative-free positive-associated targets",
-        "first-pass high-confidence candidate review",
+        SHEET_FINAL_SCORE,
+        "every candidate with a resolved query (or, with interaction_scoring "
+        "disabled/no query configured, every classified candidate)",
+        "final-score-first ranked view: protein_hunter_score + interaction_score "
+        "combined, one row per candidate_source-consolidated (query, candidate) pair",
+        "start here -- primary ranked candidate list",
     ),
     (
-        "Candidates_relaxed",
-        "positive hit present and no strong negative hit",
-        "retains targets with only medium/weak negative hits",
-        "avoid over-filtering by weak homolog/domain-level matches",
+        SHEET_CANDIDATE_OVERVIEW,
+        "every classified protein",
+        "global candidate identity, independent of any query: consolidated "
+        "candidate_source, negative_hit_strength, and BLAST/domain summary",
+        "look up a specific candidate's classification regardless of query",
     ),
     (
-        "Positive_all_sources",
-        "hits all positive sources and no negative hit",
-        "broadly conserved among cnm5U-positive organisms",
-        "search for shared cnm5U-related factors",
+        SHEET_SCORE_BREAKDOWN,
+        "same rows as 02_Final_Score",
+        "full per-category score breakdown behind each row's final_score",
+        "audit why a candidate scored the way it did",
     ),
     (
-        "Positive_source_summary",
-        "summarizes positive source hit distribution for each target",
-        "shows how widely each target is conserved in positive sources",
-        "compare positive source breadth",
+        SHEET_SEQUENCE_EVIDENCE,
+        "scoring_model: v2_evidence_based only",
+        "source_classification/sequence_evidence component-level detail",
+        "inspect the raw BLAST-identity evidence behind the Sequence category",
     ),
     (
-        "Negative_unmatched",
-        "no negative hit",
-        "targets not found in cnm5U-negative organisms",
-        "review all negative-unmatched targets",
+        SHEET_FUNCTIONAL_DOMAIN_EVIDENCE,
+        "scoring_model: v2_evidence_based only",
+        "functional_annotation (co_occurrence + domain_complementarity) component-level detail",
+        "inspect the raw functional/domain evidence behind the Functional+Domain category",
     ),
     (
-        "No_hit",
-        "no positive hit and no negative hit",
-        "Methanosarcina acetivorans-specific or poorly conserved candidates",
-        "search for novel thioamidation-related factors",
+        SHEET_EVOLUTIONARY_EVIDENCE,
+        "scoring_model: v2_evidence_based only, and only when a PIH evidence "
+        "bundle is configured",
+        "pih_evolutionary + pih_cellular_compatibility component-level detail -- "
+        "mostly empty today, not a bug (see claude/phase678_excel_word_redesign_investigation.md)",
+        "inspect PIH-bridged evolutionary/cellular-compatibility evidence when available",
     ),
     (
-        "Negative_hit",
-        "any negative hit",
-        "targets with at least one hit in cnm5U-negative organisms",
-        "inspect what would be excluded by strict filtering",
+        SHEET_GENOMIC_CONTEXT,
+        "scoring_model: v2_evidence_based only",
+        "genomic_context (+ STRING neighborhood) component-level detail",
+        "inspect the raw gene-neighborhood/STRING-neighborhood evidence",
     ),
     (
-        "Negative_strong_hit",
-        "at least one strong negative hit",
-        "likely common/ortholog-like factor present in negative organisms",
-        "generally lower priority or exclusion-oriented candidates",
+        SHEET_INTERACTION_EVIDENCE,
+        "scoring_model: v2_evidence_based only",
+        "external_ppi_evidence + coexpression_evidence + pih_direct_interaction "
+        "component-level detail",
+        "inspect the raw STRING/coexpression/PIH direct-interaction evidence",
     ),
     (
-        "Negative_medium_hit",
-        "medium negative hit but no strong negative hit",
-        "ambiguous homolog candidates",
-        "check conserved motifs, domains, and structure before excluding",
+        SHEET_NEGATIVE_EVIDENCE,
+        "scoring_model: v2_evidence_based only",
+        "negative_hit_strength component detail plus the reserved, always "
+        "NOT_APPLICABLE final_score_negative_penalty audit slot -- mostly "
+        "empty today, not a bug",
+        "inspect phylogenetic-novelty evidence and confirm the negative-penalty slot is unused",
     ),
     (
-        "Negative_weak_hit",
-        "weak negative hit only",
-        "possible distant homolog or shared domain",
-        "do not exclude automatically; use as caution flag",
+        SHEET_RAW_AUDIT,
+        "every interaction_scoring row",
+        "full unfiltered Interaction_Evidence_Detail rows, plus the resolved "
+        "query proteins and candidate-candidate genomic neighborhood pairs "
+        "as separate blocks further down the same sheet",
+        "full audit trail / raw export",
+    ),
+    (
+        SHEET_RESERVED,
+        "n/a",
+        "reserved for future expansion",
+        "not used in this stage",
     ),
 )
 
@@ -293,6 +403,65 @@ INTERACTION_SCORE_EXPLANATIONS: tuple[tuple[str, str], ...] = (
         "is unset or STRING has no data for this pair -- reference only, folded into both "
         "interaction_priority_score and interaction_score.",
     ),
+    (
+        "candidate_source",
+        "Phase 6-8 sheet redesign (design spec section 25.1): which candidate_sources bucket "
+        "this candidate was classified into, consolidated to one value per (query, candidate) "
+        "pair (or per candidate on 03_Candidate_Overview) -- Candidates > Positive_all_sources > "
+        "Candidates_relaxed > No_hit > Negative_unmatched > Negative_hit, highest-priority bucket "
+        "wins when a candidate was scored under more than one enabled bucket. "
+        "Negative_strong_hit/Negative_medium_hit/Negative_weak_hit are folded into Negative_hit "
+        "here -- see negative_hit_strength for the sub-classification.",
+    ),
+    (
+        "negative_hit_strength",
+        "strong / medium / weak / none -- see the Negative evidence columns block below for "
+        "the full explanation. Exposed directly on every pair row (both scoring models) as of "
+        "the Phase 6-8 sheet redesign, replacing the former separate Negative_strong/medium/"
+        "weak_hit sheets.",
+    ),
+    (
+        "functional_domain_score",
+        "scoring_model: v2_evidence_based only. The functional_annotation category's own "
+        "capped_score (co_occurrence + domain_complementarity combined and cap-renormalized) -- "
+        "blank when neither component had any evidence for this pair, not a scored zero.",
+    ),
+    (
+        "evolutionary_score",
+        "scoring_model: v2_evidence_based only, and only when a PIH evidence bundle is "
+        "configured. The pih_evolutionary category's own capped_score -- blank (not a scored "
+        "zero) when no PIH evolutionary evidence was evaluated for this pair. Mostly blank "
+        "today; not a bug, see claude/phase678_excel_word_redesign_investigation.md.",
+    ),
+    (
+        "cellular_compatibility_score",
+        "scoring_model: v2_evidence_based only, and only when a PIH evidence bundle is "
+        "configured. The pih_cellular_compatibility category's own capped_score -- blank (not "
+        "a scored zero) when no PIH cellular-compatibility evidence was evaluated. Mostly "
+        "blank today; not a bug.",
+    ),
+    (
+        "interaction_evidence_score",
+        "scoring_model: v2_evidence_based only. Sum of the external_ppi_evidence + "
+        "coexpression_evidence + pih_direct_interaction categories' own capped_score values -- "
+        "a raw category-level reference (like candidate_priority_score/"
+        "same_gene_neighborhood_score above), NOT the same number as interaction_score (which "
+        "is re-normalized to 0-100 over a different, overlapping component scope; see "
+        "interaction_score's own explanation). Blank when none of the three categories had any "
+        "evidence for this pair.",
+    ),
+    (
+        "final_score_negative_penalty",
+        "Always blank/NOT_APPLICABLE. Reserved audit column for a future biological-"
+        "contradiction negative-evidence signal (design spec section 7.7) -- see final_score's "
+        "own explanation for why negative_hit_strength was tried here and removed. Kept as a "
+        "column so a future real signal has a place to land without another sheet-layout change.",
+    ),
+    (
+        "word_report_link",
+        "Always blank in this stage (Phase 6-8 Stage 1, Excel only). Reserved for a hyperlink "
+        "to this candidate's section in the single-file Word report, planned for Stage 2.",
+    ),
 )
 
 INTERACTION_SCORE_NOTES: tuple[str, ...] = (
@@ -343,66 +512,70 @@ def write_records_to_excel(
 
 
 def write_classification_workbook(
-    candidates: dict[str, ProteinRecord],
+    config: Any,
+    blast_classification: Any,
     output_path: str | Path,
-    negative_unmatched: dict[str, ProteinRecord] | None = None,
-    no_hit: dict[str, ProteinRecord] | None = None,
-    negative_hit: dict[str, ProteinRecord] | None = None,
-    positive_all_sources: dict[str, ProteinRecord] | None = None,
-    positive_source_summary: dict[str, ProteinRecord] | None = None,
-    candidates_relaxed: dict[str, ProteinRecord] | None = None,
-    negative_strong_hit: dict[str, ProteinRecord] | None = None,
-    negative_medium_hit: dict[str, ProteinRecord] | None = None,
-    negative_weak_hit: dict[str, ProteinRecord] | None = None,
     interaction_result: Any | None = None,
-    include_interaction_sequences: bool = False,
 ) -> Path:
-    """Write candidate records and BLAST classification sheets to Excel."""
+    """Write the unified 12-sheet Phase 6-8 Stage 1 workbook and return its path.
+
+    Replaces the former ~10 base classification sheets + up to 11
+    Interaction_* bucket sheets with a fixed 12-sheet layout (design spec
+    section 25.1) keyed by a consolidated ``candidate_source`` column
+    instead of one sheet per bucket -- see output/report_v2.py for the row
+    consolidation logic and claude/phase678_excel_word_redesign_investigation.md
+    for the design background.
+    """
     resolved_output = Path(output_path).expanduser().resolve()
     resolved_output.parent.mkdir(parents=True, exist_ok=True)
-    sheets = {
-        "Candidates": records_to_dataframe(candidates),
-        "Candidates_relaxed": records_to_dataframe(candidates_relaxed or {}),
-        "Positive_all_sources": records_to_dataframe(positive_all_sources or {}),
-        "Positive_source_summary": positive_source_summary_dataframe(
-            positive_source_summary or {}
-        ),
-        "Negative_unmatched": records_to_dataframe(negative_unmatched or {}),
-        "No_hit": records_to_dataframe(no_hit or {}),
-        "Negative_hit": records_to_dataframe(negative_hit or {}),
-        "Negative_strong_hit": records_to_dataframe(negative_strong_hit or {}),
-        "Negative_medium_hit": records_to_dataframe(negative_medium_hit or {}),
-        "Negative_weak_hit": records_to_dataframe(negative_weak_hit or {}),
-    }
-    interaction_sheets = _interaction_dataframes(
-        interaction_result,
-        include_sequences=include_interaction_sequences,
+
+    sheets_data = build_workbook_sheets(config, blast_classification, interaction_result)
+    scoring_model = sheets_data["evidence_detail_scoring_model"]
+
+    final_score_df = pd.DataFrame(sheets_data["final_score_rows"], columns=FINAL_SCORE_COLUMNS)
+    overview_df = pd.DataFrame(sheets_data["overview_rows"], columns=CANDIDATE_OVERVIEW_COLUMNS)
+    score_breakdown_df = pd.DataFrame(sheets_data["final_score_rows"], columns=SCORE_BREAKDOWN_COLUMNS)
+
+    evidence_detail_rows = sheets_data["evidence_detail_rows"]
+    category_dataframes: dict[str, pd.DataFrame] = {}
+    for sheet_name, categories in CATEGORY_EVIDENCE_SHEETS:
+        if scoring_model == "v2_evidence_based":
+            filtered_rows = [row for row in evidence_detail_rows if row.get("category") in categories]
+        else:
+            filtered_rows = []
+        category_dataframes[sheet_name] = pd.DataFrame(filtered_rows, columns=INTERACTION_EVIDENCE_DETAIL_V2_COLUMNS)
+
+    raw_audit_df = pd.DataFrame(
+        evidence_detail_rows, columns=interaction_evidence_detail_columns(scoring_model)
     )
-    all_index_rows = (
-        *INDEX_ROWS,
-        *interaction_index_rows(list(interaction_sheets)),
-    )
+    query_df = pd.DataFrame(sheets_data["query_rows"], columns=INTERACTION_QUERY_COLUMNS)
+    neighborhood_df = pd.DataFrame(sheets_data["neighborhood_rows"], columns=interaction_neighborhood_columns())
+    reserved_df = pd.DataFrame(columns=("Reserved",))
 
     try:
         with pd.ExcelWriter(resolved_output, engine="openpyxl") as writer:
-            index_dataframe = _index_dataframe(all_index_rows)
-            index_dataframe.to_excel(writer, sheet_name="Index", index=False)
-            _format_index_worksheet(
-                writer.sheets["Index"],
-                index_dataframe,
-                all_index_rows,
-            )
+            index_dataframe = _index_dataframe(INDEX_ROWS_V2)
+            index_dataframe.to_excel(writer, sheet_name="01_Index", index=False)
+            _format_index_worksheet(writer.sheets["01_Index"], index_dataframe, INDEX_ROWS_V2)
 
-            for sheet_name, dataframe in {**sheets, **interaction_sheets}.items():
-                dataframe.to_excel(
-                    writer,
-                    sheet_name=sheet_name,
-                    index=False,
-                    startrow=1,
-                )
+            simple_sheets: dict[str, pd.DataFrame] = {
+                SHEET_FINAL_SCORE: final_score_df,
+                SHEET_CANDIDATE_OVERVIEW: overview_df,
+                SHEET_SCORE_BREAKDOWN: score_breakdown_df,
+                **category_dataframes,
+            }
+            for sheet_name, dataframe in simple_sheets.items():
+                dataframe.to_excel(writer, sheet_name=sheet_name, index=False, startrow=1)
                 worksheet = writer.sheets[sheet_name]
                 _add_back_to_index_link(worksheet)
                 _format_worksheet(worksheet, dataframe, header_row=2)
+
+            _write_raw_audit_sheet(writer, SHEET_RAW_AUDIT, raw_audit_df, query_df, neighborhood_df)
+
+            reserved_df.to_excel(writer, sheet_name=SHEET_RESERVED, index=False, startrow=1)
+            reserved_worksheet = writer.sheets[SHEET_RESERVED]
+            _add_back_to_index_link(reserved_worksheet)
+            reserved_worksheet["A2"] = "Reserved for future expansion (Word report cross-links, Stage 2)."
     except Exception as exc:
         message = (
             f"ProteinHunter could not write the Excel file: {resolved_output}. "
@@ -413,49 +586,39 @@ def write_classification_workbook(
     return resolved_output
 
 
-def positive_source_summary_dataframe(
-    records: dict[str, ProteinRecord],
-) -> pd.DataFrame:
-    """Return the compact positive-source summary DataFrame."""
-    rows = [_positive_source_summary_row(record) for record in records.values()]
-    return pd.DataFrame(rows, columns=POSITIVE_SOURCE_SUMMARY_COLUMNS)
+def _write_raw_audit_sheet(
+    writer: pd.ExcelWriter,
+    sheet_name: str,
+    detail_df: pd.DataFrame,
+    query_df: pd.DataFrame,
+    neighborhood_df: pd.DataFrame,
+) -> None:
+    """Write 11_Raw_Audit's three stacked blocks: detail, query, neighborhood."""
+    detail_header_row = 2
+    detail_df.to_excel(writer, sheet_name=sheet_name, index=False, startrow=detail_header_row - 1)
+    worksheet = writer.sheets[sheet_name]
+    _add_back_to_index_link(worksheet)
+    _format_worksheet(worksheet, detail_df, header_row=detail_header_row)
 
+    query_label_row = detail_header_row + len(detail_df) + 2
+    query_header_row = query_label_row + 1
+    worksheet.cell(row=query_label_row, column=1, value="Interaction_query: resolved query proteins")
+    worksheet.cell(row=query_label_row, column=1).font = Font(bold=True)
+    query_df.to_excel(writer, sheet_name=sheet_name, index=False, startrow=query_header_row - 1)
+    for cell in worksheet[query_header_row]:
+        cell.font = Font(bold=True)
 
-def _interaction_dataframes(
-    interaction_result: Any | None,
-    include_sequences: bool,
-) -> dict[str, pd.DataFrame]:
-    """Return Interaction_* DataFrames only when interaction scoring ran."""
-    if interaction_result is None:
-        return {}
-
-    sheets: dict[str, pd.DataFrame] = {}
-    sheets["Interaction_query"] = pd.DataFrame(
-        interaction_result.query_rows,
-        columns=INTERACTION_QUERY_COLUMNS,
+    neighborhood_label_row = query_header_row + len(query_df) + 2
+    neighborhood_header_row = neighborhood_label_row + 1
+    worksheet.cell(
+        row=neighborhood_label_row,
+        column=1,
+        value="Interaction_Neighborhood: candidate-candidate genomic proximity pairs",
     )
-    pair_columns = interaction_pair_columns(include_sequences)
-    for sheet_name, rows in interaction_result.source_rows.items():
-        sheets[sheet_name] = pd.DataFrame(rows, columns=pair_columns)
-
-    evidence_detail_rows = getattr(interaction_result, "evidence_detail_rows", [])
-    if evidence_detail_rows:
-        evidence_detail_scoring_model = getattr(
-            interaction_result, "evidence_detail_scoring_model", "legacy_additive"
-        )
-        sheets[INTERACTION_EVIDENCE_DETAIL_SHEET] = pd.DataFrame(
-            evidence_detail_rows,
-            columns=interaction_evidence_detail_columns(evidence_detail_scoring_model),
-        )
-
-    neighborhood_rows = getattr(interaction_result, "neighborhood_rows", [])
-    if neighborhood_rows:
-        sheets[INTERACTION_NEIGHBORHOOD_SHEET] = pd.DataFrame(
-            neighborhood_rows,
-            columns=interaction_neighborhood_columns(),
-        )
-
-    return sheets
+    worksheet.cell(row=neighborhood_label_row, column=1).font = Font(bold=True)
+    neighborhood_df.to_excel(writer, sheet_name=sheet_name, index=False, startrow=neighborhood_header_row - 1)
+    for cell in worksheet[neighborhood_header_row]:
+        cell.font = Font(bold=True)
 
 
 def _format_worksheet(
@@ -620,7 +783,7 @@ def _format_index_worksheet(
 def _add_back_to_index_link(worksheet: Worksheet) -> None:
     """Add a consistent internal link back to the Index sheet."""
     worksheet["A1"] = "Back to Index"
-    worksheet["A1"].hyperlink = "#'Index'!A1"
+    worksheet["A1"].hyperlink = "#'01_Index'!A1"
     worksheet["A1"].style = "Hyperlink"
 
 
@@ -687,29 +850,6 @@ def _record_to_row(record: ProteinRecord) -> dict[str, Any]:
         "positive_source_count": record.positive_source_count,
         "positive_sources_hit": "; ".join(record.positive_sources_hit),
         "positive_sources_missing": "; ".join(record.positive_sources_missing),
-    }
-
-
-def _positive_source_summary_row(record: ProteinRecord) -> dict[str, Any]:
-    """Convert one ProteinRecord into a positive source summary row."""
-    row = _record_to_row(record)
-    return {
-        "protein_id": row["protein_id"],
-        "description": row["description"],
-        "old_locus_tag": row["old_locus_tag"],
-        "negative_hit": bool(record.negative_hits),
-        "positive_source_count": row["positive_source_count"],
-        "positive_sources_hit": row["positive_sources_hit"],
-        "positive_sources_missing": row["positive_sources_missing"],
-        "positive_hit_count": row["positive_hit_count"],
-        "negative_hit_count": row["negative_hit_count"],
-        "blast_status": row["blast_status"],
-        "best_positive_hit": row["best_positive_hit"],
-        "best_positive_bitscore": row["best_positive_bitscore"],
-        "best_positive_evalue": row["best_positive_evalue"],
-        "best_negative_hit": row["best_negative_hit"],
-        "best_negative_bitscore": row["best_negative_bitscore"],
-        "best_negative_evalue": row["best_negative_evalue"],
     }
 
 
@@ -795,12 +935,14 @@ def _blast_status(record: ProteinRecord) -> str:
 
 
 __all__: tuple[str, ...] = (
+    "CANDIDATE_OVERVIEW_COLUMNS",
+    "CATEGORY_EVIDENCE_SHEETS",
     "EXCEL_COLUMNS",
-    "INDEX_ROWS",
+    "FINAL_SCORE_COLUMNS",
+    "INDEX_ROWS_V2",
     "INTERACTION_SCORE_EXPLANATIONS",
     "INTERACTION_SCORE_NOTES",
-    "POSITIVE_SOURCE_SUMMARY_COLUMNS",
-    "positive_source_summary_dataframe",
+    "SCORE_BREAKDOWN_COLUMNS",
     "records_to_dataframe",
     "write_classification_workbook",
     "write_records_to_excel",

@@ -1,24 +1,30 @@
-"""Tests for minimal Excel output helpers."""
+"""Tests for minimal Excel output helpers and the 12-sheet workbook writer."""
 
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
 from openpyxl import load_workbook
 
+from config import (
+    INTERACTION_ALPHAFOLD_DEFAULT,
+    INTERACTION_EVIDENCE_DETAIL_DEFAULT,
+    INTERACTION_NEIGHBORHOOD_DEFAULT,
+    INTERACTION_SCORING_WEIGHTS_DEFAULT,
+    InteractionScoringConfig,
+)
 from core.exceptions import ExcelOutputError
 from core.models import BlastHit, CandidateScore, DomainHit, ProteinRecord
 from analysis.interaction_scoring import (
-    INTERACTION_EVIDENCE_DETAIL_LEGACY_COLUMNS,
     INTERACTION_EVIDENCE_DETAIL_V2_COLUMNS,
     InteractionScoringResult,
-    interaction_pair_columns,
 )
 from output.excel import (
     EXCEL_COLUMNS,
-    INDEX_ROWS,
+    INDEX_ROWS_V2,
     records_to_dataframe,
     write_classification_workbook,
     write_records_to_excel,
@@ -275,16 +281,6 @@ def test_records_to_dataframe_joins_motifs_and_notes() -> None:
     assert row["notes"] == "reviewed; export ready"
 
 
-
-
-def test_interaction_pair_columns_include_distance_independent_ranking() -> None:
-    """Interaction sheets should expose distance-independent ranking fields."""
-    columns = interaction_pair_columns(False)
-
-    assert "distance_independent_score" in columns
-    assert "distance_independent_rank" in columns
-    assert "priority_group" in columns
-
 def test_write_records_to_excel_creates_xlsx_file(tmp_path: Path) -> None:
     """Excel writer should create a readable xlsx file."""
     output_path = tmp_path / "reports" / "candidates.xlsx"
@@ -297,197 +293,6 @@ def test_write_records_to_excel_creates_xlsx_file(tmp_path: Path) -> None:
     dataframe = pd.read_excel(result, sheet_name="Candidates")
     assert list(dataframe.columns) == list(EXCEL_COLUMNS)
     assert dataframe.loc[0, "protein_id"] == "protein_1"
-
-
-def test_write_classification_workbook_creates_expected_sheets(
-    tmp_path: Path,
-) -> None:
-    """Classification workbook should include all BLAST category sheets."""
-    candidate = ProteinRecord(
-        protein_id="A_positive_only",
-        positive_hits=[make_hit("positive", 50.0, 1e-20)],
-        positive_source_count=1,
-        positive_sources_hit=["A"],
-    )
-    no_hit = ProteinRecord(protein_id="B_no_hits")
-    negative_only = ProteinRecord(
-        protein_id="C_negative_only",
-        negative_hits=[make_hit("negative", 40.0, 1e-10, source="negative")],
-    )
-    both = ProteinRecord(
-        protein_id="D_both",
-        positive_hits=[make_hit("positive", 50.0, 1e-20)],
-        negative_hits=[make_hit("negative", 40.0, 1e-10, source="negative")],
-    )
-    output_path = tmp_path / "reports" / "classification.xlsx"
-
-    result = write_classification_workbook(
-        candidates={"A_positive_only": candidate},
-        output_path=output_path,
-        positive_all_sources={"A_positive_only": candidate},
-        positive_source_summary={
-            "A_positive_only": candidate,
-            "B_no_hits": no_hit,
-            "C_negative_only": negative_only,
-            "D_both": both,
-        },
-        negative_unmatched={
-            "A_positive_only": candidate,
-            "B_no_hits": no_hit,
-        },
-        no_hit={"B_no_hits": no_hit},
-        negative_hit={
-            "C_negative_only": negative_only,
-            "D_both": both,
-        },
-    )
-
-    workbook = load_workbook(result)
-    assert workbook.sheetnames == [
-        "Index",
-        "Candidates",
-        "Candidates_relaxed",
-        "Positive_all_sources",
-        "Positive_source_summary",
-        "Negative_unmatched",
-        "No_hit",
-        "Negative_hit",
-        "Negative_strong_hit",
-        "Negative_medium_hit",
-        "Negative_weak_hit",
-    ]
-    assert workbook["Candidates"].max_row == 3
-    assert workbook["Positive_all_sources"].max_row == 3
-    assert workbook["Positive_source_summary"].max_row == 6
-    assert workbook["Negative_unmatched"].max_row == 4
-    assert workbook["No_hit"].max_row == 3
-    assert workbook["Negative_hit"].max_row == 4
-
-    negative_hit = pd.read_excel(result, sheet_name="Negative_hit", header=1)
-    assert set(negative_hit["protein_id"]) == {"C_negative_only", "D_both"}
-
-
-
-
-def test_index_sheet_explains_interaction_scoring_columns(tmp_path: Path) -> None:
-    """Index should include short explanations for key interaction scoring columns."""
-    output_path = tmp_path / "reports" / "index_scoring_explanations.xlsx"
-
-    result = write_classification_workbook(
-        candidates={},
-        output_path=output_path,
-    )
-
-    workbook = load_workbook(result)
-    index_values = [
-        str(cell.value)
-        for row in workbook["Index"].iter_rows()
-        for cell in row
-        if cell.value is not None
-    ]
-    index_text = "\n".join(index_values)
-
-    assert "interaction_priority_score" in index_text
-    assert "distance_independent_score" in index_text
-    assert "priority_group" in index_text
-    assert "protein_hunter_score" in index_text
-    assert "alphafold_readiness_score" in index_text
-    assert "not a direct protein-protein interaction probability" in index_text
-    assert "string_ppi_score" in index_text
-    assert "string-db.org" in index_text
-    assert "CC BY 4.0" in index_text
-
-def test_classification_workbook_index_links_all_sheets(tmp_path: Path) -> None:
-    """Index should be first and link to every classification sheet."""
-    output_path = tmp_path / "reports" / "classification_links.xlsx"
-
-    result = write_classification_workbook(
-        candidates={},
-        output_path=output_path,
-    )
-
-    workbook = load_workbook(result)
-    assert workbook.sheetnames[0] == "Index"
-    index = workbook["Index"]
-    expected_sheets = [row[0] for row in INDEX_ROWS]
-    linked_sheets = [index.cell(row=row_index, column=1).value for row_index in range(2, 12)]
-    assert linked_sheets == expected_sheets
-    for row_index, sheet_name in enumerate(expected_sheets, start=2):
-        assert index.cell(row=row_index, column=1).hyperlink.target == (
-            f"#'{sheet_name}'!A1"
-        )
-
-    for sheet_name in expected_sheets:
-        worksheet = workbook[sheet_name]
-        assert worksheet["A1"].value == "Back to Index"
-        assert worksheet["A1"].hyperlink.target == "#'Index'!A1"
-
-
-def test_classification_workbook_adds_only_created_interaction_sheets(
-    tmp_path: Path,
-) -> None:
-    """Interaction sheets should appear in Index only when actually created."""
-    output_path = tmp_path / "reports" / "interaction.xlsx"
-    interaction_result = InteractionScoringResult(
-        query_rows=[
-            {
-                "query_id": "query_1",
-                "input_protein_id": "query_1",
-                "input_old_locus_tag": "",
-                "resolved_protein_id": "query_1",
-                "resolved_old_locus_tag": "",
-                "sequence_length": 10,
-                "resolution_status": "resolved",
-                "description": "query",
-                "notes": "",
-            }
-        ],
-        source_rows={
-            "Interaction_Positive_all": [
-                {
-                    "query_id": "query_1",
-                    "query_protein_id": "query_1",
-                    "query_old_locus_tag": "",
-                    "candidate_rank": 1,
-                    "candidate_protein_id": "candidate_1",
-                    "candidate_old_locus_tag": "",
-                    "candidate_source": "Positive_all_sources",
-                    "candidate_description": "candidate",
-                    "interaction_priority_score": 42.0,
-                    "interaction_score_reasons": "candidate source: Positive_all_sources",
-                    "candidate_priority_score": 30.0,
-                    "same_gene_neighborhood_score": 0.0,
-                    "distance_bp": None,
-                    "co_occurrence_score": 0.0,
-                    "domain_complementarity_score": 0.0,
-                    "alphafold_readiness_score": 10.0,
-                    "pair_total_length": 20,
-                    "alphafold_recommended": True,
-                }
-            ]
-        },
-        neighborhood_rows=[],
-        warnings=[],
-    )
-
-    result = write_classification_workbook(
-        candidates={},
-        output_path=output_path,
-        interaction_result=interaction_result,
-    )
-
-    workbook = load_workbook(result)
-    assert "Interaction_query" in workbook.sheetnames
-    assert "Interaction_Positive_all" in workbook.sheetnames
-    assert "Interaction_Positive_all_sources" not in workbook.sheetnames
-    assert "Interaction_No_hit" not in workbook.sheetnames
-    index_values = [cell.value for cell in workbook["Index"]["A"]]
-    assert "Interaction_query" in index_values
-    assert "Interaction_Positive_all" in index_values
-    assert "Interaction_Positive_all_sources" not in index_values
-    assert "Interaction_No_hit" not in index_values
-    assert workbook["Interaction_query"]["A1"].hyperlink.target == "#'Index'!A1"
-    assert workbook["Interaction_Positive_all"]["A1"].hyperlink.target == "#'Index'!A1"
 
 
 def test_write_records_to_excel_applies_simple_formatting(tmp_path: Path) -> None:
@@ -531,10 +336,300 @@ def test_write_records_to_excel_raises_excel_output_error(
         write_records_to_excel({"protein_1": make_record()}, tmp_path / "bad.xlsx")
 
 
+# ---------------------------------------------------------------------------
+# write_classification_workbook: Phase 6-8 Stage 1 unified 12-sheet layout
+# ---------------------------------------------------------------------------
 
-def test_index_hyperlinks_point_to_existing_sheets(tmp_path: Path) -> None:
-    """Every Index hyperlink should point to a sheet that exists."""
-    output_path = tmp_path / "reports" / "interaction_links.xlsx"
+EXPECTED_SHEET_NAMES: tuple[str, ...] = (
+    "01_Index",
+    "02_Final_Score",
+    "03_Candidate_Overview",
+    "04_Score_Breakdown",
+    "05_Sequence_Evidence",
+    "06_Functional_Domain_Evidence",
+    "07_Evolutionary_Evidence",
+    "08_Genomic_Context",
+    "09_Interaction_Evidence",
+    "10_Negative_Evidence",
+    "11_Raw_Audit",
+    "12_Reserved",
+)
+
+
+def blast_classification(**buckets: dict[str, ProteinRecord]) -> SimpleNamespace:
+    """Build a minimal blast_classification-like object with only the given buckets set."""
+    defaults: dict[str, dict[str, ProteinRecord]] = {
+        "all_records": {},
+        "positive_only_records": {},
+        "candidates_relaxed_records": {},
+        "positive_all_sources_records": {},
+        "negative_unmatched_records": {},
+        "no_hit_records": {},
+        "negative_hit_records": {},
+        "negative_strong_hit_records": {},
+        "negative_medium_hit_records": {},
+        "negative_weak_hit_records": {},
+    }
+    defaults.update(buckets)
+    return SimpleNamespace(**defaults)
+
+
+def app_config(*, enabled: bool = False, scoring_model: str = "legacy_additive") -> SimpleNamespace:
+    """Build a minimal app config object, matching write_classification_workbook's needs."""
+    return SimpleNamespace(
+        interaction_scoring=InteractionScoringConfig(
+            enabled=enabled,
+            query_proteins=(),
+            query_fasta=None,
+            candidate_sources={"candidates": True},
+            max_candidates_per_query=200,
+            include_sequences_in_excel=False,
+            scoring_weights=INTERACTION_SCORING_WEIGHTS_DEFAULT,
+            alphafold=INTERACTION_ALPHAFOLD_DEFAULT,
+            neighborhood=INTERACTION_NEIGHBORHOOD_DEFAULT,
+            scoring_model=scoring_model,
+            scoring_engine_config=None,
+            functional_complementarity_ruleset=None,
+            pih_evidence_bundle=None,
+            evidence_detail_sheet=INTERACTION_EVIDENCE_DETAIL_DEFAULT,
+        )
+    )
+
+
+def _minimal_pair_row(candidate_protein_id: str = "candidate_1", **extra: object) -> dict:
+    """A minimal but complete consolidated pair row for 02_Final_Score/04_Score_Breakdown tests."""
+    row = {
+        "query_id": "query_1",
+        "query_protein_id": "query_1",
+        "query_old_locus_tag": "",
+        "candidate_rank": 1,
+        "candidate_protein_id": candidate_protein_id,
+        "candidate_old_locus_tag": "",
+        "candidate_source": "Candidates",
+        "candidate_description": "candidate",
+        "negative_hit_strength": "none",
+        "interaction_priority_score": 42.0,
+        "interaction_score_reasons": "candidate source: Candidates",
+        "candidate_priority_score": 30.0,
+        "same_gene_neighborhood_score": 0.0,
+        "distance_bp": None,
+        "co_occurrence_score": 0.0,
+        "domain_complementarity_score": 0.0,
+        "alphafold_readiness_score": 10.0,
+        "pair_total_length": 20,
+        "alphafold_recommended": True,
+        "protein_hunter_score": 14.0,
+        "protein_hunter_score_components": "no_negative_hit=5.0; domain_hit=4.0",
+        "protein_hunter_score_reasons": "This protein has no negative BLAST hits.",
+        "interaction_score": 40.0,
+        "final_score": 42.0,
+        "final_score_tier": "Tier3_Moderate",
+    }
+    row.update(extra)
+    return row
+
+
+def test_write_classification_workbook_creates_exactly_12_sheets(tmp_path: Path) -> None:
+    """The workbook should have exactly the 12 Phase 6-8 Stage 1 sheets, in order."""
+    output_path = tmp_path / "reports" / "classification.xlsx"
+
+    result = write_classification_workbook(
+        config=app_config(),
+        blast_classification=blast_classification(),
+        output_path=output_path,
+    )
+
+    workbook = load_workbook(result)
+    assert workbook.sheetnames == list(EXPECTED_SHEET_NAMES)
+
+
+def test_candidate_overview_consolidates_base_classification_buckets(tmp_path: Path) -> None:
+    """03_Candidate_Overview should have one row per protein with a consolidated candidate_source."""
+    candidate = ProteinRecord(protein_id="A_candidate", positive_hits=[make_hit("positive", 50.0, 1e-20)])
+    relaxed_only = ProteinRecord(protein_id="B_relaxed_only")
+    no_hit = ProteinRecord(protein_id="C_no_hit")
+    output_path = tmp_path / "reports" / "overview.xlsx"
+
+    bc = blast_classification(
+        all_records={"A_candidate": candidate, "B_relaxed_only": relaxed_only, "C_no_hit": no_hit},
+        positive_only_records={"A_candidate": candidate},
+        candidates_relaxed_records={"A_candidate": candidate, "B_relaxed_only": relaxed_only},
+        no_hit_records={"C_no_hit": no_hit},
+    )
+
+    result = write_classification_workbook(config=app_config(), blast_classification=bc, output_path=output_path)
+
+    overview = pd.read_excel(result, sheet_name="03_Candidate_Overview", header=1)
+    by_id = overview.set_index("protein_id")
+    assert by_id.loc["A_candidate", "candidate_source"] == "Candidates"
+    assert by_id.loc["B_relaxed_only", "candidate_source"] == "Candidates_relaxed"
+    assert by_id.loc["C_no_hit", "candidate_source"] == "No_hit"
+
+
+def test_final_score_falls_back_to_protein_hunter_alone_without_interaction_result(
+    tmp_path: Path,
+) -> None:
+    """02_Final_Score should still be populated (protein_hunter_score alone) with no interaction_result."""
+    candidate = ProteinRecord(protein_id="A_candidate", positive_hits=[make_hit("positive", 50.0, 1e-20)])
+    candidate.score = CandidateScore(protein_id="A_candidate")
+    candidate.score.add_component("positive_hit", 5.0, "hit")
+    output_path = tmp_path / "reports" / "final_score_fallback.xlsx"
+
+    bc = blast_classification(
+        all_records={"A_candidate": candidate},
+        positive_only_records={"A_candidate": candidate},
+    )
+
+    result = write_classification_workbook(config=app_config(), blast_classification=bc, output_path=output_path)
+
+    final_score = pd.read_excel(result, sheet_name="02_Final_Score", header=1)
+    assert len(final_score) == 1
+    assert final_score.loc[0, "candidate_protein_id"] == "A_candidate"
+    assert final_score.loc[0, "interaction_score"] != final_score.loc[0, "interaction_score"] or pd.isna(
+        final_score.loc[0, "interaction_score"]
+    )
+    assert not pd.isna(final_score.loc[0, "final_score"])
+
+
+def test_final_score_uses_interaction_result_when_present(tmp_path: Path) -> None:
+    """02_Final_Score should reflect interaction_result's rows, ranked by final_score."""
+    output_path = tmp_path / "reports" / "final_score_interaction.xlsx"
+    interaction_result = InteractionScoringResult(
+        query_rows=[],
+        source_rows={"Interaction_Candidates": [_minimal_pair_row()]},
+        neighborhood_rows=[],
+        warnings=[],
+    )
+
+    result = write_classification_workbook(
+        config=app_config(enabled=True),
+        blast_classification=blast_classification(),
+        output_path=output_path,
+        interaction_result=interaction_result,
+    )
+
+    final_score = pd.read_excel(result, sheet_name="02_Final_Score", header=1)
+    assert len(final_score) == 1
+    assert final_score.loc[0, "candidate_protein_id"] == "candidate_1"
+    assert final_score.loc[0, "final_score"] == 42.0
+    assert final_score.loc[0, "candidate_rank"] == 1
+
+
+def test_final_score_dedups_candidate_scored_under_multiple_buckets(tmp_path: Path) -> None:
+    """A candidate scored under both Candidates and Candidates_relaxed should appear once."""
+    output_path = tmp_path / "reports" / "final_score_dedup.xlsx"
+    interaction_result = InteractionScoringResult(
+        query_rows=[],
+        source_rows={
+            "Interaction_Candidates": [_minimal_pair_row(final_score=50.0, candidate_source="Candidates")],
+            "Interaction_Candidates_relaxed": [
+                _minimal_pair_row(final_score=40.0, candidate_source="Candidates_relaxed")
+            ],
+        },
+        neighborhood_rows=[],
+        warnings=[],
+    )
+
+    result = write_classification_workbook(
+        config=app_config(enabled=True),
+        blast_classification=blast_classification(),
+        output_path=output_path,
+        interaction_result=interaction_result,
+    )
+
+    final_score = pd.read_excel(result, sheet_name="02_Final_Score", header=1)
+    assert len(final_score) == 1
+    assert final_score.loc[0, "candidate_source"] == "Candidates"
+    assert final_score.loc[0, "final_score"] == 50.0
+
+
+def test_category_evidence_sheets_populated_for_v2_and_empty_for_legacy(tmp_path: Path) -> None:
+    """05-10 should show only their own category's rows for v2, and stay empty for legacy_additive."""
+    detail_rows = [
+        {
+            "query_id": "query_1",
+            "query_protein_id": "query_1",
+            "query_old_locus_tag": "",
+            "candidate_protein_id": "candidate_1",
+            "candidate_old_locus_tag": "",
+            "candidate_source": "Candidates",
+            "candidate_rank": 1,
+            "category": "genomic_context",
+            "component_name": "genomic_context",
+            "status": "AVAILABLE",
+            "raw_value": 100,
+            "normalized_value": 1.0,
+            "weight": 1.0,
+            "category_cap": 25.0,
+            "is_negative": False,
+            "explanation": "near query",
+        },
+        {
+            "query_id": "query_1",
+            "query_protein_id": "query_1",
+            "query_old_locus_tag": "",
+            "candidate_protein_id": "candidate_1",
+            "candidate_old_locus_tag": "",
+            "candidate_source": "Candidates",
+            "candidate_rank": 1,
+            "category": "functional_annotation",
+            "component_name": "co_occurrence",
+            "status": "AVAILABLE",
+            "raw_value": 1.0,
+            "normalized_value": 1.0,
+            "weight": 10.0,
+            "category_cap": 20.0,
+            "is_negative": False,
+            "explanation": "shared source",
+        },
+    ]
+    output_path_v2 = tmp_path / "reports" / "category_evidence_v2.xlsx"
+    interaction_result_v2 = InteractionScoringResult(
+        query_rows=[],
+        source_rows={"Interaction_Candidates": [_minimal_pair_row()]},
+        neighborhood_rows=[],
+        warnings=[],
+        evidence_detail_rows=detail_rows,
+        evidence_detail_scoring_model="v2_evidence_based",
+    )
+    result_v2 = write_classification_workbook(
+        config=app_config(enabled=True, scoring_model="v2_evidence_based"),
+        blast_classification=blast_classification(),
+        output_path=output_path_v2,
+        interaction_result=interaction_result_v2,
+    )
+    genomic_context = pd.read_excel(result_v2, sheet_name="08_Genomic_Context", header=1)
+    functional_domain = pd.read_excel(result_v2, sheet_name="06_Functional_Domain_Evidence", header=1)
+    evolutionary = pd.read_excel(result_v2, sheet_name="07_Evolutionary_Evidence", header=1)
+    assert len(genomic_context) == 1
+    assert genomic_context.loc[0, "component_name"] == "genomic_context"
+    assert len(functional_domain) == 1
+    assert functional_domain.loc[0, "component_name"] == "co_occurrence"
+    assert len(evolutionary) == 0
+
+    output_path_legacy = tmp_path / "reports" / "category_evidence_legacy.xlsx"
+    interaction_result_legacy = InteractionScoringResult(
+        query_rows=[],
+        source_rows={"Interaction_Candidates": [_minimal_pair_row()]},
+        neighborhood_rows=[],
+        warnings=[],
+        evidence_detail_rows=[{"query_id": "query_1", "candidate_protein_id": "candidate_1"}],
+        evidence_detail_scoring_model="legacy_additive",
+    )
+    result_legacy = write_classification_workbook(
+        config=app_config(enabled=True, scoring_model="legacy_additive"),
+        blast_classification=blast_classification(),
+        output_path=output_path_legacy,
+        interaction_result=interaction_result_legacy,
+    )
+    legacy_genomic_context = pd.read_excel(result_legacy, sheet_name="08_Genomic_Context", header=1)
+    assert len(legacy_genomic_context) == 0
+    assert list(legacy_genomic_context.columns) == list(INTERACTION_EVIDENCE_DETAIL_V2_COLUMNS)
+
+
+def test_raw_audit_sheet_stacks_detail_query_and_neighborhood_blocks(tmp_path: Path) -> None:
+    """11_Raw_Audit should contain the detail table plus labeled query/neighborhood blocks below it."""
+    output_path = tmp_path / "reports" / "raw_audit.xlsx"
     interaction_result = InteractionScoringResult(
         query_rows=[
             {
@@ -549,279 +644,124 @@ def test_index_hyperlinks_point_to_existing_sheets(tmp_path: Path) -> None:
                 "notes": "",
             }
         ],
-        source_rows={
-            "Interaction_Positive_all": [
-                {
-                    "query_id": "query_1",
-                    "query_protein_id": "query_1",
-                    "query_old_locus_tag": "",
-                    "candidate_rank": 1,
-                    "candidate_protein_id": "candidate_1",
-                    "candidate_old_locus_tag": "",
-                    "candidate_source": "Positive_all_sources",
-                    "candidate_description": "candidate",
-                    "same_contig": True,
-                    "query_start": 1,
-                    "query_end": 100,
-                    "query_strand": "+",
-                    "candidate_start": 200,
-                    "candidate_end": 300,
-                    "candidate_strand": "+",
-                    "distance_bp": 100,
-                    "strand_relation": "same_strand",
-                    "same_gene_neighborhood_score": 25.0,
-                    "interaction_priority_score": 42.0,
-                    "interaction_score_reasons": "candidate source: Positive_all_sources",
-                    "candidate_priority_score": 30.0,
-                    "co_occurrence_score": 0.0,
-                    "domain_complementarity_score": 0.0,
-                    "alphafold_readiness_score": 10.0,
-                    "pair_total_length": 20,
-                    "alphafold_recommended": True,
-                }
-            ]
-        },
+        source_rows={"Interaction_Candidates": [_minimal_pair_row()]},
         neighborhood_rows=[
             {
                 "query_id": "query_1",
-                "query_protein_id": "query_1",
-                "query_old_locus_tag": "",
-                "query_description": "query",
-                "query_contig": "contig1",
-                "query_start": 1,
-                "query_end": 100,
-                "query_strand": "+",
-                "candidate_rank_by_distance": 1,
                 "candidate_protein_id": "candidate_1",
-                "candidate_old_locus_tag": "",
-                "candidate_description": "candidate",
-                "candidate_source": "Positive_all_sources",
-                "candidate_contig": "contig1",
-                "candidate_start": 200,
-                "candidate_end": 300,
-                "candidate_strand": "+",
-                "distance_bp": 100,
-                "strand_relation": "same_strand",
-                "neighborhood_band": "<=5kb",
-                "same_gene_neighborhood_score": 25.0,
-                "interaction_priority_score": 42.0,
-                "domain_complementarity_score": 0.0,
-                "candidate_priority_score": 30.0,
-                "co_occurrence_score": 0.0,
-                "alphafold_recommended": True,
-                "interaction_score_reasons": "candidate source: Positive_all_sources",
+                "candidate_rank_by_distance": 1,
             }
         ],
         warnings=[],
+        evidence_detail_rows=[{"query_id": "query_1", "candidate_protein_id": "candidate_1"}],
+        evidence_detail_scoring_model="legacy_additive",
     )
 
     result = write_classification_workbook(
-        candidates={},
+        config=app_config(enabled=True),
+        blast_classification=blast_classification(),
         output_path=output_path,
         interaction_result=interaction_result,
     )
 
     workbook = load_workbook(result)
+    worksheet = workbook["11_Raw_Audit"]
+    values = [cell.value for row in worksheet.iter_rows() for cell in row if cell.value is not None]
+    text = "\n".join(str(v) for v in values)
+    assert "Interaction_query: resolved query proteins" in text
+    assert "Interaction_Neighborhood: candidate-candidate genomic proximity pairs" in text
+    assert "resolution_status" in text  # query block header
+    assert "candidate_rank_by_distance" in text  # neighborhood block header
+
+
+def test_reserved_sheet_is_present_and_empty(tmp_path: Path) -> None:
+    """12_Reserved should exist with a placeholder note and no data rows."""
+    output_path = tmp_path / "reports" / "reserved.xlsx"
+
+    result = write_classification_workbook(
+        config=app_config(),
+        blast_classification=blast_classification(),
+        output_path=output_path,
+    )
+
+    workbook = load_workbook(result)
+    worksheet = workbook["12_Reserved"]
+    assert "Reserved for future expansion" in str(worksheet["A2"].value)
+
+
+def test_index_sheet_explains_interaction_scoring_columns(tmp_path: Path) -> None:
+    """Index should include short explanations for key interaction scoring columns."""
+    output_path = tmp_path / "reports" / "index_scoring_explanations.xlsx"
+
+    result = write_classification_workbook(
+        config=app_config(),
+        blast_classification=blast_classification(),
+        output_path=output_path,
+    )
+
+    workbook = load_workbook(result)
+    index_values = [
+        str(cell.value)
+        for row in workbook["01_Index"].iter_rows()
+        for cell in row
+        if cell.value is not None
+    ]
+    index_text = "\n".join(index_values)
+
+    assert "interaction_priority_score" in index_text
+    assert "distance_independent_score" in index_text
+    assert "protein_hunter_score" in index_text
+    assert "not a direct protein-protein interaction probability" in index_text
+    assert "string_ppi_score" in index_text
+    assert "string-db.org" in index_text
+    assert "CC BY 4.0" in index_text
+    assert "functional_domain_score" in index_text
+    assert "final_score_negative_penalty" in index_text
+    assert "word_report_link" in index_text
+
+
+def test_classification_workbook_index_links_all_sheets(tmp_path: Path) -> None:
+    """01_Index should be first and link every one of the other 11 sheets."""
+    output_path = tmp_path / "reports" / "classification_links.xlsx"
+
+    result = write_classification_workbook(
+        config=app_config(),
+        blast_classification=blast_classification(),
+        output_path=output_path,
+    )
+
+    workbook = load_workbook(result)
+    assert workbook.sheetnames[0] == "01_Index"
+    index = workbook["01_Index"]
+    expected_sheets = [row[0] for row in INDEX_ROWS_V2]
+    linked_sheets = [
+        index.cell(row=row_index, column=1).value for row_index in range(2, 2 + len(expected_sheets))
+    ]
+    assert linked_sheets == expected_sheets
+    for row_index, sheet_name in enumerate(expected_sheets, start=2):
+        assert index.cell(row=row_index, column=1).hyperlink.target == f"#'{sheet_name}'!A1"
+
+    for sheet_name in expected_sheets:
+        worksheet = workbook[sheet_name]
+        assert worksheet["A1"].value == "Back to Index"
+        assert worksheet["A1"].hyperlink.target == "#'01_Index'!A1"
+
+
+def test_index_hyperlinks_point_to_existing_sheets(tmp_path: Path) -> None:
+    """Every Index hyperlink should point to a sheet that actually exists."""
+    output_path = tmp_path / "reports" / "interaction_links.xlsx"
+
+    result = write_classification_workbook(
+        config=app_config(),
+        blast_classification=blast_classification(),
+        output_path=output_path,
+    )
+
+    workbook = load_workbook(result)
     sheet_names = set(workbook.sheetnames)
-    for cell in workbook["Index"]["A"]:
+    for cell in workbook["01_Index"]["A"]:
         if cell.hyperlink is None:
             continue
         target = cell.hyperlink.target
         linked_sheet = target.split("'")[1]
         assert linked_sheet in sheet_names
-    assert "Interaction_Positive_all" in sheet_names
-    assert "Interaction_Neighborhood" in sheet_names
-    assert workbook["Interaction_Neighborhood"]["A1"].hyperlink.target == "#'Index'!A1"
-    assert "Interaction_Positive_all_sources" not in sheet_names
-
-
-def _minimal_pair_row(candidate_protein_id: str = "candidate_1") -> dict:
-    """A minimal but complete Interaction_Candidates-shaped row for Excel tests."""
-    return {
-        "query_id": "query_1",
-        "query_protein_id": "query_1",
-        "query_old_locus_tag": "",
-        "candidate_rank": 1,
-        "candidate_protein_id": candidate_protein_id,
-        "candidate_old_locus_tag": "",
-        "candidate_source": "Candidates",
-        "candidate_description": "candidate",
-        "interaction_priority_score": 42.0,
-        "interaction_score_reasons": "candidate source: Candidates",
-        "candidate_priority_score": 30.0,
-        "same_gene_neighborhood_score": 0.0,
-        "distance_bp": None,
-        "co_occurrence_score": 0.0,
-        "domain_complementarity_score": 0.0,
-        "alphafold_readiness_score": 10.0,
-        "pair_total_length": 20,
-        "alphafold_recommended": True,
-        "protein_hunter_score": 14.0,
-        "protein_hunter_score_components": "no_negative_hit=5.0; domain_hit=4.0",
-        "protein_hunter_score_reasons": "This protein has no negative BLAST hits.",
-    }
-
-
-def test_interaction_candidates_sheet_shows_protein_hunter_score_column(
-    tmp_path: Path,
-) -> None:
-    """protein_hunter_score reference columns should render in Interaction_* sheets."""
-    output_path = tmp_path / "reports" / "protein_hunter_score.xlsx"
-    interaction_result = InteractionScoringResult(
-        query_rows=[],
-        source_rows={"Interaction_Candidates": [_minimal_pair_row()]},
-        neighborhood_rows=[],
-        warnings=[],
-    )
-
-    result = write_classification_workbook(
-        candidates={},
-        output_path=output_path,
-        interaction_result=interaction_result,
-    )
-
-    dataframe = pd.read_excel(result, sheet_name="Interaction_Candidates", header=1)
-    assert dataframe.loc[0, "protein_hunter_score"] == 14.0
-    assert dataframe.loc[0, "protein_hunter_score_components"] == (
-        "no_negative_hit=5.0; domain_hit=4.0"
-    )
-    # interaction_priority_score is unaffected by the new reference columns.
-    assert dataframe.loc[0, "interaction_priority_score"] == 42.0
-
-
-def test_classification_workbook_writes_v2_evidence_detail_sheet(tmp_path: Path) -> None:
-    """Interaction_Evidence_Detail should hold one row per component for v2 runs."""
-    output_path = tmp_path / "reports" / "evidence_detail_v2.xlsx"
-    interaction_result = InteractionScoringResult(
-        query_rows=[],
-        source_rows={"Interaction_Candidates": [_minimal_pair_row()]},
-        neighborhood_rows=[],
-        warnings=[],
-        evidence_detail_rows=[
-            {
-                "query_id": "query_1",
-                "query_protein_id": "query_1",
-                "query_old_locus_tag": "",
-                "candidate_protein_id": "candidate_1",
-                "candidate_old_locus_tag": "",
-                "candidate_source": "Candidates",
-                "candidate_rank": 1,
-                "category": "source_classification",
-                "component_name": "source_classification",
-                "status": "AVAILABLE",
-                "raw_value": "Candidates",
-                "normalized_value": 1.0,
-                "weight": 1.0,
-                "category_cap": 30.0,
-                "is_negative": False,
-                "explanation": "candidate source: Candidates",
-            },
-            {
-                "query_id": "query_1",
-                "query_protein_id": "query_1",
-                "query_old_locus_tag": "",
-                "candidate_protein_id": "candidate_1",
-                "candidate_old_locus_tag": "",
-                "candidate_source": "Candidates",
-                "candidate_rank": 1,
-                "category": "genomic_context",
-                "component_name": "genomic_context",
-                "status": "MISSING",
-                "raw_value": None,
-                "normalized_value": None,
-                "weight": 0.0,
-                "category_cap": None,
-                "is_negative": False,
-                "explanation": "no GFF coordinates",
-            },
-        ],
-        evidence_detail_scoring_model="v2_evidence_based",
-    )
-
-    result = write_classification_workbook(
-        candidates={},
-        output_path=output_path,
-        interaction_result=interaction_result,
-    )
-
-    workbook = load_workbook(result)
-    assert "Interaction_Evidence_Detail" in workbook.sheetnames
-    # Existing sheets are unaffected by adding the detail sheet.
-    assert workbook["Interaction_Candidates"].max_row == 3  # back-link + header + 1 row
-
-    detail = pd.read_excel(result, sheet_name="Interaction_Evidence_Detail", header=1)
-    assert list(detail.columns) == list(INTERACTION_EVIDENCE_DETAIL_V2_COLUMNS)
-    assert len(detail) == 2
-    assert set(detail["component_name"]) == {"source_classification", "genomic_context"}
-    source_row = detail[detail["component_name"] == "source_classification"].iloc[0]
-    assert source_row["status"] == "AVAILABLE"
-    assert source_row["category_cap"] == 30.0
-
-    index_values = [cell.value for cell in workbook["Index"]["A"]]
-    assert "Interaction_Evidence_Detail" in index_values
-    assert workbook["Interaction_Evidence_Detail"]["A1"].hyperlink.target == "#'Index'!A1"
-
-
-def test_classification_workbook_writes_legacy_evidence_detail_sheet(tmp_path: Path) -> None:
-    """Interaction_Evidence_Detail should be a wide, one-row-per-pair projection for legacy runs."""
-    output_path = tmp_path / "reports" / "evidence_detail_legacy.xlsx"
-    interaction_result = InteractionScoringResult(
-        query_rows=[],
-        source_rows={"Interaction_Candidates": [_minimal_pair_row()]},
-        neighborhood_rows=[],
-        warnings=[],
-        evidence_detail_rows=[
-            {
-                "query_id": "query_1",
-                "query_protein_id": "query_1",
-                "query_old_locus_tag": "",
-                "candidate_protein_id": "candidate_1",
-                "candidate_old_locus_tag": "",
-                "candidate_source": "Candidates",
-                "candidate_rank": 1,
-                "candidate_priority_score": 30.0,
-                "same_gene_neighborhood_score": 0.0,
-                "co_occurrence_score": 0.0,
-                "domain_complementarity_score": 0.0,
-                "alphafold_readiness_score": 10.0,
-                "interaction_score_reasons": "candidate source: Candidates",
-            }
-        ],
-        evidence_detail_scoring_model="legacy_additive",
-    )
-
-    result = write_classification_workbook(
-        candidates={},
-        output_path=output_path,
-        interaction_result=interaction_result,
-    )
-
-    workbook = load_workbook(result)
-    assert "Interaction_Evidence_Detail" in workbook.sheetnames
-    detail = pd.read_excel(result, sheet_name="Interaction_Evidence_Detail", header=1)
-    assert list(detail.columns) == list(INTERACTION_EVIDENCE_DETAIL_LEGACY_COLUMNS)
-    assert len(detail) == 1
-    assert detail.iloc[0]["candidate_priority_score"] == 30.0
-
-
-def test_classification_workbook_omits_evidence_detail_sheet_when_empty(tmp_path: Path) -> None:
-    """No Interaction_Evidence_Detail sheet should be written when there are no detail rows."""
-    output_path = tmp_path / "reports" / "evidence_detail_empty.xlsx"
-    interaction_result = InteractionScoringResult(
-        query_rows=[],
-        source_rows={"Interaction_Candidates": [_minimal_pair_row()]},
-        neighborhood_rows=[],
-        warnings=[],
-    )
-
-    result = write_classification_workbook(
-        candidates={},
-        output_path=output_path,
-        interaction_result=interaction_result,
-    )
-
-    workbook = load_workbook(result)
-    assert "Interaction_Evidence_Detail" not in workbook.sheetnames
-    assert "Interaction_Evidence_Detail" not in [cell.value for cell in workbook["Index"]["A"]]
-    # Existing sheets are still written normally.
-    assert "Interaction_Candidates" in workbook.sheetnames
