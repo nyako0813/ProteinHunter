@@ -21,3 +21,6 @@ xlsxwriter>=3.2
 typing_extensions>=4.14
 
 colorama>=0.4.6
+
+# Word report generation (Phase 6-8 Stage 2)
+python-docx>=1.2

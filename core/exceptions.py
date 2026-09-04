@@ -126,6 +126,12 @@ class ExcelOutputError(ProteinHunterError):
     default_message = "ProteinHunter could not create the Excel output file."
 
 
+class WordReportError(ProteinHunterError):
+    """Raised when the Word report (Phase 6-8 Stage 2) cannot be created."""
+
+    default_message = "ProteinHunter could not create the Word report file."
+
+
 __all__: tuple[str, ...] = (
     "ProteinHunterError",
     "ConfigError",
@@ -145,4 +151,5 @@ __all__: tuple[str, ...] = (
     "CacheError",
     "ScoringError",
     "ExcelOutputError",
+    "WordReportError",
 )

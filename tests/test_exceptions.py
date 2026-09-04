@@ -22,6 +22,7 @@ from core.exceptions import (
     StartupCheckError,
     StringPpiAnnotationError,
     UniProtAnnotationError,
+    WordReportError,
 )
 
 
@@ -43,6 +44,7 @@ CUSTOM_EXCEPTIONS: tuple[type[ProteinHunterError], ...] = (
     CacheError,
     ScoringError,
     ExcelOutputError,
+    WordReportError,
 )
 
 BLAST_EXCEPTIONS: tuple[type[BlastError], ...] = (
