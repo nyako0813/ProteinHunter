@@ -8,11 +8,6 @@ project:
 
 input_mode: directory
 
-#他生物種の遺伝子を考慮するならtrue、考慮しないならfalse
-#このスイッチを使うときはannotaiton_targetsのgffをコメントアウトしておく必要がある
-#個別選択したいところはコメントアウトせずに選択する→個別選択が優先される
-consider_cross_species_matches: true
-
 # ----------------------------------------------------------
 # Input / Output
 # ----------------------------------------------------------
@@ -27,7 +22,7 @@ paths:
   gff: "./data/input/genome.gff"
 
   # Output Excel
-  output_excel: "./data/output/.xlsx"
+  output_excel: "./data/output/MA_0826_with_pn.xlsx"
 
   # Output Word report (Phase 6-8 Stage 2). Optional -- when unset,
   # defaults to output_excel's directory/stem with a .docx extension
@@ -99,25 +94,25 @@ annotation_targets:
     alphafold: false
 
   positive_all_sources:
-    #gff: false
+    gff: true
     pfam: false
     uniprot: false
     alphafold: false
 
   no_hit:
-    #gff: false
+    gff: true
     pfam: false
     uniprot: false
     alphafold: false
 
   negative_unmatched:
-    #gff: false
+    gff: true
     pfam: false
     uniprot: false
     alphafold: false
 
   negative_hit:
-    #gff: false
+    gff: true
     pfam: false
     uniprot: false
     alphafold: false
@@ -153,12 +148,9 @@ ortholog_filter:
 interaction_scoring:
   enabled: true
 
-#protein_idはncbiのWPから始まる個別番号
-#どれか一つが入力されていれば機能する
-#ただし、genome.gffに存在しない場合はsequenceやquery_fastaの入力が必要
   query_proteins:
     - protein_id: ""
-      old_locus_tag: ""
+      old_locus_tag: "MA_0826"
       sequence: ""
 
   query_fasta: ""
@@ -191,15 +183,15 @@ interaction_scoring:
   candidate_sources:
     candidates: true
     candidates_relaxed: true
-    #positive_all_sources: false
-    #negative_unmatched: false
+    positive_all_sources: false
+    negative_unmatched: false
     no_hit: true
-    #negative_hit: false
+    negative_hit: false
     negative_strong_hit: false
     negative_medium_hit: false
     negative_weak_hit: false
 
-  #max_candidates_per_query: 500
+  max_candidates_per_query: 200
   include_sequences_in_excel: false
 
   # Scope of the optional Interaction_Evidence_Detail sheet (component-level
@@ -241,7 +233,7 @@ interaction_scoring:
   # evidence per category (source_classification / genomic_context /
   # functional_annotation) instead of adding raw points, and reports an
   # Evidence_Tier per candidate. See docs/scoring_engine_v2.md.
-  scoring_model: v2_evidence_based
+  scoring_model: legacy_additive
 
   # Optional path to a scoring engine config YAML (category caps, negative
   # penalty cap, minimum evidence for a formal score, tier thresholds).
@@ -284,7 +276,7 @@ interaction_scoring:
   # interaction_priority_score/evidence_tier/priority_group/final_score/
   # final_score_tier columns keep their original values either way -- only
   # candidate_rank/row order change.
-  #ranking_metric: interaction_priority_score
+  ranking_metric: interaction_priority_score   # positive/negativeを考慮する(candidate_priority_score + co_occurrenceを含む)
 
   # Optional NCBI taxonomy id for STRING (string-db.org) PPI evidence
   # (Phase 6a, used only by scoring_model: v2_evidence_based; see
