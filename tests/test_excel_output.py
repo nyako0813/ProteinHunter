@@ -15,6 +15,7 @@ from config import (
     INTERACTION_NEIGHBORHOOD_DEFAULT,
     INTERACTION_SCORING_WEIGHTS_DEFAULT,
     InteractionScoringConfig,
+    WordReportConfig,
 )
 from core.exceptions import ExcelOutputError
 from core.models import BlastHit, CandidateScore, DomainHit, ProteinRecord
@@ -22,6 +23,7 @@ from analysis.interaction_scoring import (
     INTERACTION_EVIDENCE_DETAIL_V2_COLUMNS,
     InteractionScoringResult,
 )
+from output.report_v2 import bookmark_name
 from output.excel import (
     EXCEL_COLUMNS,
     INDEX_ROWS_V2,
@@ -765,3 +767,91 @@ def test_index_hyperlinks_point_to_existing_sheets(tmp_path: Path) -> None:
         target = cell.hyperlink.target
         linked_sheet = target.split("'")[1]
         assert linked_sheet in sheet_names
+
+
+# ---------------------------------------------------------------------------
+# Phase 6-8 Stage 2: word_report_link (Excel -> Word cross-link)
+# ---------------------------------------------------------------------------
+
+
+def test_word_report_link_blank_without_filename(tmp_path: Path) -> None:
+    """Default (word_report_filename=None) keeps word_report_link blank, matching Stage 1's reserved column."""
+    output_path = tmp_path / "reports" / "no_word_link.xlsx"
+    interaction_result = InteractionScoringResult(
+        query_rows=[],
+        source_rows={"Interaction_Candidates": [_minimal_pair_row()]},
+        neighborhood_rows=[],
+        warnings=[],
+    )
+
+    result = write_classification_workbook(
+        config=app_config(enabled=True),
+        blast_classification=blast_classification(),
+        output_path=output_path,
+        interaction_result=interaction_result,
+    )
+
+    final_score = pd.read_excel(result, sheet_name="02_Final_Score", header=1)
+    assert pd.isna(final_score.loc[0, "word_report_link"])
+
+
+def test_word_report_link_populated_and_clickable_when_filename_given(tmp_path: Path) -> None:
+    """A candidate the Word report would show gets a real, clickable hyperlink cell."""
+    output_path = tmp_path / "reports" / "word_link.xlsx"
+    interaction_result = InteractionScoringResult(
+        query_rows=[],
+        source_rows={"Interaction_Candidates": [_minimal_pair_row(candidate_protein_id="candidate_1")]},
+        neighborhood_rows=[],
+        warnings=[],
+    )
+
+    result = write_classification_workbook(
+        config=app_config(enabled=True),
+        blast_classification=blast_classification(),
+        output_path=output_path,
+        interaction_result=interaction_result,
+        word_report_filename="ProteinHunter_report.docx",
+    )
+
+    expected_target = f"ProteinHunter_report.docx#{bookmark_name('query_1', 'candidate_1')}"
+    final_score = pd.read_excel(result, sheet_name="02_Final_Score", header=1)
+    assert final_score.loc[0, "word_report_link"] == expected_target
+
+    workbook = load_workbook(result)
+    worksheet = workbook["02_Final_Score"]
+    column_index = list(final_score.columns).index("word_report_link") + 1
+    cell = worksheet.cell(row=3, column=column_index)
+    assert cell.hyperlink is not None
+    assert cell.hyperlink.target == expected_target
+    assert cell.style == "Hyperlink"
+
+
+def test_word_report_link_respects_max_candidates_per_query(tmp_path: Path) -> None:
+    """A candidate ranked beyond max_candidates_per_query (and not Tier1/Tier2) stays unlinked."""
+    output_path = tmp_path / "reports" / "word_link_topn.xlsx"
+    rows = [
+        _minimal_pair_row(candidate_protein_id="in_range", final_score=90.0, final_score_tier="Tier2_Strong"),
+        _minimal_pair_row(candidate_protein_id="out_of_range", final_score=10.0, final_score_tier="Tier4_Weak"),
+    ]
+    interaction_result = InteractionScoringResult(
+        query_rows=[],
+        source_rows={"Interaction_Candidates": rows},
+        neighborhood_rows=[],
+        warnings=[],
+    )
+    config = app_config(enabled=True)
+    config.interaction_scoring = InteractionScoringConfig(
+        **{**config.interaction_scoring.__dict__, "word_report": WordReportConfig(enabled=True, max_candidates_per_query=1)}
+    )
+
+    result = write_classification_workbook(
+        config=config,
+        blast_classification=blast_classification(),
+        output_path=output_path,
+        interaction_result=interaction_result,
+        word_report_filename="report.docx",
+    )
+
+    final_score = pd.read_excel(result, sheet_name="02_Final_Score", header=1).set_index("candidate_protein_id")
+    assert not pd.isna(final_score.loc["in_range", "word_report_link"])
+    assert pd.isna(final_score.loc["out_of_range", "word_report_link"])

@@ -167,6 +167,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         from core.cache import JsonCache
         from core.fasta_sources import DirectoryFastaResult, prepare_directory_fasta
         from output.excel import write_classification_workbook
+        from output.word_report import write_word_report
 
         config_path = Path(args.config)
         config = load_config(config_path)
@@ -581,6 +582,13 @@ def main(argv: Sequence[str] | None = None) -> None:
                         f"{len(interaction_result.source_rows)}"
                     )
 
+        # Phase 6-8 Stage 2: default the Word report next to the Excel file
+        # (same directory/stem, .docx extension) when paths.output_word is
+        # not set, rather than requiring every existing config.yaml to add
+        # the key -- see config.py::PathConfig.output_word.
+        word_report_config = config.interaction_scoring.word_report
+        word_output_path = config.paths.output_word or config.paths.output_excel.with_suffix(".docx")
+
         with logger.section("Excel output"):
             with logger.timer("Write Excel output"):
                 excel_path = write_classification_workbook(
@@ -588,6 +596,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                     blast_classification=blast_classification,
                     output_path=config.paths.output_excel,
                     interaction_result=interaction_result,
+                    word_report_filename=word_output_path.name if word_report_config.enabled else None,
                 )
 
             logger.info(f"Final annotated candidate count: {len(records)}")
@@ -598,6 +607,28 @@ def main(argv: Sequence[str] | None = None) -> None:
                 "10_Negative_Evidence, 11_Raw_Audit, 12_Reserved"
             )
             logger.info(f"Excel file written to: {excel_path}")
+
+        with logger.section("Word report output"):
+            if not word_report_config.enabled:
+                logger.info(
+                    "Word report generation is disabled "
+                    "(interaction_scoring.word_report.enabled: false); skipping it."
+                )
+            else:
+                with logger.timer("Write Word report"):
+                    word_path = write_word_report(
+                        config=config,
+                        blast_classification=blast_classification,
+                        output_path=word_output_path,
+                        interaction_result=interaction_result,
+                        excel_filename=excel_path.name,
+                    )
+                logger.info(
+                    "Word report candidates per query: up to "
+                    f"{word_report_config.max_candidates_per_query}, plus any "
+                    "Tier1_VeryStrong/Tier2_Strong candidate regardless of rank"
+                )
+                logger.info(f"Word report written to: {word_path}")
 
         logger.summary()
         logger.success("Protein Hunter finished successfully")

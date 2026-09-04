@@ -32,6 +32,11 @@ class PathConfig:
     output_excel: Path
     cache_dir: Path
     log_dir: Path
+    # Phase 6-8 Stage 2: optional explicit path for the Word report. When
+    # unset, main.py derives a default next to output_excel (same stem,
+    # .docx extension) rather than requiring every existing config.yaml to
+    # add this key.
+    output_word: Path | None = None
 
 
 @dataclass
@@ -180,6 +185,26 @@ class InteractionEvidenceDetailConfig:
 
 
 @dataclass(frozen=True)
+class WordReportConfig:
+    """Settings for the optional Phase 6-8 Stage 2 Word report.
+
+    ``max_candidates_per_query`` is a display-count knob only -- it does
+    not affect scoring, candidate_rank, or any Excel sheet; it only bounds
+    how many candidates get a full write-up in the Word report's
+    "8. Candidate Details" section for each query. A candidate reaching
+    Tier1_VeryStrong or Tier2_Strong is always included regardless of this
+    count (see output/report_v2.py::select_top_candidates_per_query) --
+    the count is a floor for "show enough to be useful," not a ceiling
+    that can silently drop a high-confidence candidate. See
+    claude/phase678_stage2_word_report_investigation.md, item 2, for the
+    real-data reasoning behind the default of 15.
+    """
+
+    enabled: bool = True
+    max_candidates_per_query: int = 15
+
+
+@dataclass(frozen=True)
 class InteractionScoringConfig:
     enabled: bool
     query_proteins: tuple[InteractionQueryConfig, ...]
@@ -203,6 +228,9 @@ class InteractionScoringConfig:
     evidence_detail_sheet: InteractionEvidenceDetailConfig = field(
         default_factory=InteractionEvidenceDetailConfig
     )
+    # Phase 6-8 Stage 2 (design spec section 29+): the single-file Word
+    # report generated alongside the Excel workbook. See WordReportConfig.
+    word_report: WordReportConfig = field(default_factory=WordReportConfig)
     # Which score determines candidate_rank / sheet ordering within each
     # Interaction_* source (design spec section 22, Phase 5 M5).
     # "interaction_priority_score" (default) preserves the exact pre-Phase-5
@@ -388,6 +416,11 @@ INTERACTION_EVIDENCE_DETAIL_DEFAULT = InteractionEvidenceDetailConfig(
     include_no_hit=False,
 )
 
+WORD_REPORT_DEFAULT = WordReportConfig(
+    enabled=True,
+    max_candidates_per_query=15,
+)
+
 INTERACTION_SCORING_DEFAULT = InteractionScoringConfig(
     enabled=False,
     query_proteins=(),
@@ -454,6 +487,7 @@ def load_config(config_file: str | Path = CONFIG_FILE, initialize: bool = True) 
         gff=optional_gff,
         gff_file=optional_gff,
         output_excel=Path(raw["paths"]["output_excel"]),
+        output_word=_optional_path(raw["paths"].get("output_word")),
         cache_dir=Path(raw["paths"]["cache_dir"]),
         log_dir=Path(raw["paths"]["log_dir"]),
     )
@@ -581,6 +615,7 @@ def _validate_paths_section(raw: dict[object, object]) -> None:
         "negative_dir",
         "gff",
         "gff_file",
+        "output_word",
     )
     for key in optional_path_keys:
         value = paths.get(key)
@@ -1001,6 +1036,35 @@ def _validate_interaction_scoring_section(raw: dict[object, object]) -> None:
             "must be true or false."
         )
 
+    word_report = section.get("word_report", {})
+    if word_report is None:
+        word_report = {}
+    if not isinstance(word_report, dict):
+        raise ConfigError(
+            "config.yaml value 'interaction_scoring.word_report' must be a mapping."
+        )
+    word_report_enabled = word_report.get("enabled", True)
+    if not isinstance(word_report_enabled, bool):
+        raise ConfigError(
+            "config.yaml value 'interaction_scoring.word_report.enabled' "
+            "must be true or false."
+        )
+    word_report_max_candidates = word_report.get("max_candidates_per_query", 15)
+    if not isinstance(word_report_max_candidates, int) or isinstance(
+        word_report_max_candidates, bool
+    ):
+        raise ConfigError(
+            "config.yaml value "
+            "'interaction_scoring.word_report.max_candidates_per_query' "
+            "must be an integer."
+        )
+    if word_report_max_candidates < 1:
+        raise ConfigError(
+            "config.yaml value "
+            "'interaction_scoring.word_report.max_candidates_per_query' "
+            "must be at least 1."
+        )
+
     ranking_metric = section.get("ranking_metric", "interaction_priority_score")
     if ranking_metric not in VALID_INTERACTION_RANKING_METRICS:
         raise ConfigError(
@@ -1141,6 +1205,19 @@ def _load_interaction_scoring(raw_scoring: object) -> InteractionScoringConfig:
         ),
     )
 
+    raw_word_report = raw_scoring.get("word_report", {})
+    if not isinstance(raw_word_report, dict):
+        raw_word_report = {}
+    word_report = WordReportConfig(
+        enabled=bool(raw_word_report.get("enabled", WORD_REPORT_DEFAULT.enabled)),
+        max_candidates_per_query=int(
+            raw_word_report.get(
+                "max_candidates_per_query",
+                WORD_REPORT_DEFAULT.max_candidates_per_query,
+            )
+        ),
+    )
+
     return InteractionScoringConfig(
         enabled=bool(raw_scoring.get("enabled", False)),
         query_proteins=tuple(query_proteins),
@@ -1160,6 +1237,7 @@ def _load_interaction_scoring(raw_scoring: object) -> InteractionScoringConfig:
         ),
         pih_evidence_bundle=_optional_path(raw_scoring.get("pih_evidence_bundle")),
         evidence_detail_sheet=evidence_detail_sheet,
+        word_report=word_report,
         ranking_metric=str(
             raw_scoring.get("ranking_metric", "interaction_priority_score")
         ),

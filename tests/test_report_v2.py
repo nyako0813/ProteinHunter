@@ -16,7 +16,9 @@ from config import (
 from core.models import ProteinRecord
 from analysis.scoring_engine_config import load_scoring_engine_config
 from output.report_v2 import (
+    TIER_SAFETY_NET,
     apply_wider_protein_hunter_scores,
+    bookmark_name,
     build_base_overview_rows,
     build_no_query_final_score_rows,
     build_workbook_sheets,
@@ -24,6 +26,7 @@ from output.report_v2 import (
     consolidate_interaction_rows,
     normalize_candidate_source,
     rerank_final_score_rows,
+    select_top_candidates_per_query,
 )
 
 
@@ -308,3 +311,73 @@ def test_build_no_query_final_score_rows_uses_protein_hunter_alone() -> None:
     assert p2_row["candidate_rank"] == 0
     # p1 (protein_hunter_score=14) should outrank p2 (no score at all).
     assert p1_row["candidate_rank"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Phase 6-8 Stage 2: Word report candidate selection / bookmark naming
+# ---------------------------------------------------------------------------
+
+
+def _ranked_row(query_id: str, rank: int, tier: str = "Tier4_Weak", candidate: str | None = None) -> dict:
+    return {
+        "query_id": query_id,
+        "candidate_protein_id": candidate or f"c{rank}",
+        "candidate_rank": rank,
+        "final_score_tier": tier,
+    }
+
+
+def test_bookmark_name_is_deterministic() -> None:
+    assert bookmark_name("q1", "cand_1") == bookmark_name("q1", "cand_1")
+
+
+def test_bookmark_name_differs_for_different_inputs() -> None:
+    assert bookmark_name("q1", "cand_1") != bookmark_name("q1", "cand_2")
+    assert bookmark_name("q1", "cand_1") != bookmark_name("q2", "cand_1")
+
+
+def test_bookmark_name_is_word_legal() -> None:
+    name = bookmark_name("MA_4115", "WP_012345678.1")
+    assert name[0].isalpha() or name[0] == "_"
+    assert all(ch.isalnum() or ch == "_" for ch in name)
+    assert len(name) <= 40
+
+
+def test_bookmark_name_long_ids_do_not_collide() -> None:
+    long_id_a = "protein_" + "a" * 60
+    long_id_b = "protein_" + "a" * 59 + "b"
+    assert bookmark_name("q1", long_id_a) != bookmark_name("q1", long_id_b)
+
+
+def test_select_top_candidates_per_query_keeps_only_top_n() -> None:
+    rows = [_ranked_row("q1", rank) for rank in range(1, 6)]
+    selected = select_top_candidates_per_query(rows, max_per_query=3)
+    assert [row["candidate_protein_id"] for row in selected] == ["c1", "c2", "c3"]
+
+
+def test_select_top_candidates_per_query_includes_safety_net_beyond_n() -> None:
+    rows = [_ranked_row("q1", rank) for rank in range(1, 6)]
+    rows[4]["final_score_tier"] = "Tier1_VeryStrong"  # rank 5, beyond max_per_query=3
+    selected = select_top_candidates_per_query(rows, max_per_query=3)
+    assert [row["candidate_protein_id"] for row in selected] == ["c1", "c2", "c3", "c5"]
+
+
+def test_select_top_candidates_per_query_excludes_no_query_rows() -> None:
+    rows = [_ranked_row("", 1)]
+    assert select_top_candidates_per_query(rows, max_per_query=15) == []
+
+
+def test_select_top_candidates_per_query_excludes_ineligible_rows() -> None:
+    rows = [_ranked_row("q1", 0), _ranked_row("q1", 1)]
+    selected = select_top_candidates_per_query(rows, max_per_query=15)
+    assert [row["candidate_rank"] for row in selected] == [1]
+
+
+def test_select_top_candidates_per_query_is_per_query_independent() -> None:
+    rows = [_ranked_row("q1", 1), _ranked_row("q1", 2), _ranked_row("q2", 1), _ranked_row("q2", 2)]
+    selected = select_top_candidates_per_query(rows, max_per_query=1)
+    assert [(row["query_id"], row["candidate_rank"]) for row in selected] == [("q1", 1), ("q2", 1)]
+
+
+def test_tier_safety_net_contains_only_top_two_tiers() -> None:
+    assert TIER_SAFETY_NET == {"Tier1_VeryStrong", "Tier2_Strong"}

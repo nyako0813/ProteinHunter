@@ -2,6 +2,113 @@
 
 ProteinHunter_v5 の変更履歴です。
 
+## 未リリース: Phase 6-8 Stage 2: Wordレポート生成
+
+design spec §29〜45(ユーザー提示の要約に基づく、原文はリポジトリに
+存在しない——`claude/phase678_excel_word_redesign_investigation.md`
+item 1参照)に基づき、Excelワークブックと並行して単一の`.docx`
+Wordレポートを生成する機能を追加。調査・設計・実装記録は
+`claude/phase678_stage2_word_report_investigation.md`参照。
+
+### Added
+
+- `requirements.txt`: `python-docx>=1.2`を追加。
+- `output/word_narrative.py`(新規): 「Why this candidate ranks highly」
+  「Biological Interpretation」を`final_score_tier`・`candidate_source`・
+  `negative_hit_strength`・カテゴリ別参照スコア列から条件分岐+穴埋めで
+  機械的に生成する純粋関数モジュール。LLM・ネットワーク呼び出しは一切
+  行わない(design spec §45再現性: 同一入力なら常に同一文字列)。
+  「Biological Interpretation」は必ず「現在利用可能なEvidenceに基づき
+  順位付けされた」という枕詞で始まり、「このタンパク質が目的酵素/相互作用
+  相手であると確定したものではない」と明記(design spec §35)。両
+  `scoring_model`に対応(v2は7カテゴリの参照列、legacy_additiveは
+  `scoring_weights`由来の別カテゴリ集合)。
+- `output/report_v2.py`: `bookmark_name()`(Word用ブックマーク名を
+  `(query_id, candidate_protein_id)`から決定論的に生成、40文字制限は
+  ハッシュ付き切り詰めで衝突回避)と`select_top_candidates_per_query()`
+  (クエリごとTop-N + Tier1_VeryStrong/Tier2_Strong該当候補は順位に関わらず
+  必須採用のセーフティネット)を追加。Excel(`output/excel.py`)とWord
+  (`output/word_report.py`)の両方がこの2関数を共有し、互いにデータを
+  受け渡すことなく独立して同じ選定・命名結果に到達する。
+- `output/word_report.py`(新規): Wordレポート本体の組み立て。
+  `python-docx`に高レベルAPIがないブックマーク・外部ハイパーリンク・
+  目次(TOC)フィールドを`docx.oxml`直接操作で実装。TOCはWordの
+  `w:updateFields`設定(settings.xml)を`true`にすることで、手動の
+  「フィールド更新」操作なしに開封時自動更新されるようにした。
+  「5. Evidence Architecture」(5.1〜5.7、7エビデンスカテゴリの固定説明文。
+  5.5 Evolutionary/5.6 Cellular CompatibilityはPIH bundle未設定時に
+  正直に「データ未提供」と表示し、5.7 NegativeはPIH bundleの有無に
+  関わらず常に「本バージョンには未実装」と明記——前者はconfigで解消
+  可能なデータギャップ、後者は現時点で解消不能な機能ギャップとして
+  意図的に書き分けた)、「7. Candidate Ranking」(クエリごとの要約表、
+  design spec §29「1パイプライン実行につき1ファイル」を「複数クエリは
+  サブセクション分割」で満たす)、「8. Candidate Details」(クエリ×候補
+  ごとにブックマーク付き見出し+2つの生成文+Excel参照行)を出力。
+- `output/excel.py`: `write_classification_workbook()`に
+  `word_report_filename`引数を追加(既定`None`、後方互換)。指定時、
+  `select_top_candidates_per_query()`で選ばれた候補の`word_report_link`
+  列に`f"{filename}#{bookmark_name(...)}"`形式の実クリック可能な
+  Excelハイパーリンクを設定(Stage 1で予約済みだった列、design spec
+  Excel⇔Wordリンクのoption A+C)。
+- `main.py`: Excel出力の直後にWordレポート出力セクションを追加。
+  `paths.output_word`未設定時は`output_excel`と同じディレクトリ・
+  同じstemに`.docx`拡張子を付けたパスを既定値として使用(既存の
+  config.yamlに新キー追加を強制しない)。
+- `config.py` / `config.yaml`: `PathConfig.output_word`(任意)と
+  `InteractionScoringConfig.word_report`(`WordReportConfig`:
+  `enabled`・`max_candidates_per_query`、既定15)を追加。
+  `max_candidates_per_query`は表示件数のみを制御し、スコアリング・
+  Excelワークブックには一切影響しない。
+- `core/exceptions.py`: `WordReportError`を追加(`ExcelOutputError`と
+  同じパターン)。
+
+### Design decisions confirmed by the user (this session)
+
+- クエリの並び順はconfig記載順(query_id昇順ではない)。
+- Top-N既定値は**15**、実データでの精密なTier分布再検証は今回は不要
+  (表示件数調整用パラメータでありスコアリングに影響しないため、暫定値で
+  運用し後日調整)。
+- M6の実データ検証はPIH bundleなしで実施(PIH連携自体が別途未着手の
+  検証事項であるため)。
+
+### Real-data verification (M6)
+
+Stage 1と同一の5クエリ(MA_0688・MA_4165・MA_3898・MA_3899・MA_4115)・
+`v2_evidence_based`・STRING PPI(taxid 188937)+GEO coexpression有効・
+PIH bundleなし・`candidate_sources`に`negative_hit`含む・
+`ranking_metric: final_score`という設定で、実BLAST/CDD/STRING/GEOデータに
+対して実行(`.cache/word_report_verification/`、gitignore対象のため
+非コミット、`config.yaml`自体は無変更)。総実行時間974.5秒(うちCDD注釈が
+913.5秒、Word出力自体は0.45秒)。
+
+- 4,627件のtarget中151件が`Candidates`シート該当、`interaction_scoring`は
+  5クエリ全件で成功し、`02_Final_Score`は2,775行(151候補×クエリ、一部
+  除外あり)。Excel・Word両方とも正常終了、クラッシュなし。
+- **`final_score_tier`の実分布(2,775行)**: `Tier4_Weak` 1,566件、
+  `Tier3_Moderate` 1,201件、`Tier2_Strong` **8件のみ**、
+  `Tier1_VeryStrong` **0件**。design spec §29〜35調査時点(実データ分布
+  未取得)で示した懸念——「Tier1〜2のみに絞ると空になりかねない」——が
+  実データで正確に裏付けられた。今回採用したTop-15(順位ベース)+
+  Tier1/2セーフティネットの設計判断は妥当だったことを確認。
+- Word側候補数: 5クエリ×最大15 = 75候補(実際も75件、セーフティネットが
+  追加した候補はゼロ——今回のTier2該当8件は全てもとから各クエリの
+  Top15順位内に収まっていたため)。`.docx`ファイルサイズ49KB(全2,775行を
+  ミラーした場合との対比で、「Top-N要約+Excel誘導」設計の妥当性を確認)。
+- Excel `word_report_link`列: 選定された75候補全件で
+  `f"{filename}#{bookmark}"`形式の実クリック可能ハイパーリンク
+  (`cell.style == "Hyperlink"`)を確認、対応するWord側ブックマーク
+  (`w:bookmarkStart`)が全件存在することも確認。
+- Word設定XML(`settings.xml`)に`w:updateFields=true`が実ファイルにも
+  正しく書き込まれていることを確認(手動フィールド更新なしでのTOC自動更新)。
+- 生成文のサンプル確認(`candidate_source=No_hit`・`final_score_tier=Tier2_Strong`
+  の候補1件): 「Why ranks highly」がカテゴリ別の実スコア・実配点上限を
+  正しく列挙、「Biological Interpretation」がdesign spec §35の
+  必須枕詞("not a confirmed identification..."）およびEvolutionary/
+  Cellular Compatibility/Negativeの正直な限界表示を含むことを目視確認。
+- `07_Evolutionary_Evidence`・`10_Negative_Evidence`および対応する
+  Word「5.5」「5.6」「5.7」節は、想定通りPIH bundle未設定のため
+  「データ未提供」(5.5/5.6)・「未実装」(5.7)の文言で表示。
+
 ## 未リリース: Phase 6-8 Stage 1: Excelワークブック12シート再設計
 
 design spec §25.1に準拠し、Excel出力全体を12シートへ統合。従来の
