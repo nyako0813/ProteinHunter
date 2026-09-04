@@ -31,6 +31,8 @@ already uses inside its own source_classification scoring component).
 
 from __future__ import annotations
 
+import hashlib
+import re
 from typing import Any
 
 from analysis.interaction_scoring import (
@@ -287,6 +289,73 @@ def build_no_query_final_score_rows(
     return rows
 
 
+#: final_score_tier / evidence_tier values that always earn a candidate a
+#: spot in the Word report regardless of rank (Phase 6-8 Stage 2 item 2,
+#: see claude/phase678_stage2_word_report_investigation.md). Not
+#: config-exposed -- only the display count
+#: (WordReportConfig.max_candidates_per_query) is a user-facing knob; which
+#: tiers act as a safety net is a design decision, not a per-run setting.
+TIER_SAFETY_NET: frozenset[str] = frozenset({"Tier1_VeryStrong", "Tier2_Strong"})
+
+#: Word bookmark names must start with a letter/underscore, contain only
+#: letters/digits/underscores, and stay under Word's 40-character limit.
+_BOOKMARK_INVALID_CHARS = re.compile(r"[^A-Za-z0-9_]")
+
+
+def bookmark_name(query_id: str, candidate_protein_id: str) -> str:
+    """Return a deterministic, Word-legal bookmark name for one (query, candidate) pair.
+
+    Pure function of its two inputs (design spec section 45,
+    reproducibility) -- same query/candidate always produces the same
+    bookmark, so Excel's word_report_link column
+    (output/excel.py::_attach_word_report_links) and the Word report's own
+    bookmarks (output/word_report.py) can be built independently and still
+    agree, without passing a shared lookup table between the two writers.
+    Long ids are hashed down rather than merely truncated, to avoid two
+    different candidates colliding on the same truncated prefix.
+    """
+    raw = f"Q_{query_id}_C_{candidate_protein_id}"
+    sanitized = _BOOKMARK_INVALID_CHARS.sub("_", raw)
+    if not sanitized or not (sanitized[0].isalpha() or sanitized[0] == "_"):
+        sanitized = "B_" + sanitized
+    if len(sanitized) > 40:
+        digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:8]
+        sanitized = f"{sanitized[:31]}_{digest}"
+    return sanitized
+
+
+def select_top_candidates_per_query(
+    rows: list[dict[str, Any]],
+    max_per_query: int,
+    tier_safety_net: frozenset[str] = TIER_SAFETY_NET,
+) -> list[dict[str, Any]]:
+    """Select the Word report's (and Excel's word_report_link's) per-query candidate set.
+
+    ``rows`` must already be reranked (see rerank_final_score_rows) so
+    candidate_rank reflects final_score-descending order within each
+    query. Keeps every row with candidate_rank in 1..max_per_query, plus
+    -- regardless of rank -- every row whose final_score_tier is in
+    tier_safety_net, so a high-confidence candidate is never silently
+    dropped just because more candidates happened to outrank it (the count
+    is a floor for "show enough to be useful," not a ceiling that can hide
+    a Tier1/Tier2 result). Rows with no query (query_id == "", the
+    no-query fallback shape from build_no_query_final_score_rows) or
+    candidate_rank <= 0 (ineligible/unscored) are excluded -- both the
+    Word report and word_report_link only ever cover ranked,
+    query-specific candidates. Preserves incoming row order.
+    """
+    selected: list[dict[str, Any]] = []
+    for row in rows:
+        if not row.get("query_id"):
+            continue
+        rank = row.get("candidate_rank") or 0
+        if rank <= 0:
+            continue
+        if rank <= max_per_query or row.get("final_score_tier") in tier_safety_net:
+            selected.append(row)
+    return selected
+
+
 def build_workbook_sheets(config: Any, blast_classification: Any, interaction_result: Any | None) -> dict[str, Any]:
     """Orchestrate every row list the 12-sheet workbook needs, in one place.
 
@@ -330,11 +399,14 @@ def build_workbook_sheets(config: Any, blast_classification: Any, interaction_re
 __all__: tuple[str, ...] = (
     "build_workbook_sheets",
     "CANDIDATE_SOURCE_DEDUP_ORDER",
+    "TIER_SAFETY_NET",
     "apply_wider_protein_hunter_scores",
+    "bookmark_name",
     "build_base_overview_rows",
     "build_no_query_final_score_rows",
     "candidate_source_for_protein",
     "consolidate_interaction_rows",
     "normalize_candidate_source",
     "rerank_final_score_rows",
+    "select_top_candidates_per_query",
 )
