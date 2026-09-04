@@ -24,6 +24,13 @@ paths:
   # Output Excel
   output_excel: "./data/output/ProteinHunter_results.xlsx"
 
+  # Output Word report (Phase 6-8 Stage 2). Optional -- when unset,
+  # defaults to output_excel's directory/stem with a .docx extension
+  # (e.g. "./data/output/ProteinHunter_results.docx"). See
+  # interaction_scoring.word_report to disable report generation or
+  # change how many candidates per query it includes.
+  # output_word: "./data/output/ProteinHunter_results.docx"
+
   # Cache directory
   cache_dir: "./.cache"
 
@@ -194,6 +201,16 @@ interaction_scoring:
   # are heavily tied.
   evidence_detail_sheet:
     include_no_hit: false
+
+  # Phase 6-8 Stage 2: the single-file Word report generated alongside the
+  # Excel workbook (see paths.output_word). max_candidates_per_query is a
+  # display-count knob only -- it does not affect scoring or the Excel
+  # workbook. A candidate reaching Tier1_VeryStrong or Tier2_Strong is
+  # always included regardless of this count; see
+  # claude/phase678_stage2_word_report_investigation.md.
+  word_report:
+    enabled: true
+    max_candidates_per_query: 15
 
   scoring_weights:
     candidate_priority: 30
