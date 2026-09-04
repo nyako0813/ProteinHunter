@@ -20,7 +20,7 @@ from analysis.interaction_scoring import (
     interaction_evidence_detail_columns,
     interaction_neighborhood_columns,
 )
-from output.report_v2 import build_workbook_sheets
+from output.report_v2 import TIER_SAFETY_NET, bookmark_name, build_workbook_sheets, select_top_candidates_per_query
 
 
 EXCEL_COLUMNS: tuple[str, ...] = (
@@ -516,6 +516,7 @@ def write_classification_workbook(
     blast_classification: Any,
     output_path: str | Path,
     interaction_result: Any | None = None,
+    word_report_filename: str | None = None,
 ) -> Path:
     """Write the unified 12-sheet Phase 6-8 Stage 1 workbook and return its path.
 
@@ -525,12 +526,27 @@ def write_classification_workbook(
     instead of one sheet per bucket -- see output/report_v2.py for the row
     consolidation logic and claude/phase678_excel_word_redesign_investigation.md
     for the design background.
+
+    ``word_report_filename`` (Phase 6-8 Stage 2) is the Word report's
+    filename relative to this workbook -- when given, every
+    ``02_Final_Score`` row selected for the Word report (same
+    ``select_top_candidates_per_query`` selection ``output/word_report.py``
+    itself uses) gets a real, clickable ``word_report_link`` hyperlink into
+    that candidate's bookmarked section
+    (``f"{word_report_filename}#{bookmark_name(...)}"``, design spec's
+    Excel-\\>Word cross-link, option A+C from
+    claude/phase678_excel_word_redesign_investigation.md item 6). Left
+    ``None`` (the default), every row's ``word_report_link`` stays blank,
+    exactly as it has since Phase 6-8 Stage 1 reserved the column.
     """
     resolved_output = Path(output_path).expanduser().resolve()
     resolved_output.parent.mkdir(parents=True, exist_ok=True)
 
     sheets_data = build_workbook_sheets(config, blast_classification, interaction_result)
     scoring_model = sheets_data["evidence_detail_scoring_model"]
+
+    if word_report_filename:
+        _attach_word_report_links(sheets_data["final_score_rows"], config, word_report_filename)
 
     final_score_df = pd.DataFrame(sheets_data["final_score_rows"], columns=FINAL_SCORE_COLUMNS)
     overview_df = pd.DataFrame(sheets_data["overview_rows"], columns=CANDIDATE_OVERVIEW_COLUMNS)
@@ -569,6 +585,8 @@ def write_classification_workbook(
                 worksheet = writer.sheets[sheet_name]
                 _add_back_to_index_link(worksheet)
                 _format_worksheet(worksheet, dataframe, header_row=2)
+                if sheet_name == SHEET_FINAL_SCORE:
+                    _style_word_report_link_column(worksheet, dataframe, header_row=2)
 
             _write_raw_audit_sheet(writer, SHEET_RAW_AUDIT, raw_audit_df, query_df, neighborhood_df)
 
@@ -785,6 +803,53 @@ def _add_back_to_index_link(worksheet: Worksheet) -> None:
     worksheet["A1"] = "Back to Index"
     worksheet["A1"].hyperlink = "#'01_Index'!A1"
     worksheet["A1"].style = "Hyperlink"
+
+
+def _attach_word_report_links(
+    rows: list[dict[str, Any]], config: Any, word_report_filename: str
+) -> None:
+    """Populate ``word_report_link`` in place for every row the Word report also shows.
+
+    Uses the exact same selection (``select_top_candidates_per_query``) and
+    bookmark naming (``bookmark_name``) the Word report itself uses --
+    both pure, deterministic functions of the row data alone (see
+    output/report_v2.py), so this can recompute "would this candidate be
+    in the Word report" independently, without output/excel.py and
+    output/word_report.py needing to pass data to each other. Rows not
+    selected keep ``word_report_link`` as whatever build_workbook_sheets
+    already set it to (``None``/blank).
+    """
+    scoring_config = getattr(config, "interaction_scoring", None)
+    word_report_config = getattr(scoring_config, "word_report", None)
+    max_per_query = int(getattr(word_report_config, "max_candidates_per_query", 15))
+
+    selected = select_top_candidates_per_query(rows, max_per_query, TIER_SAFETY_NET)
+    selected_keys = {(str(row["query_id"]), str(row["candidate_protein_id"])) for row in selected}
+
+    for row in rows:
+        key = (str(row.get("query_id")), str(row.get("candidate_protein_id")))
+        if key in selected_keys:
+            name = bookmark_name(*key)
+            row["word_report_link"] = f"{word_report_filename}#{name}"
+
+
+def _style_word_report_link_column(worksheet: Worksheet, dataframe: pd.DataFrame, header_row: int) -> None:
+    """Turn populated word_report_link cells into real, clickable Excel hyperlinks.
+
+    ``dataframe.to_excel`` only ever writes plain text -- this applies the
+    same hyperlink + "Hyperlink" style treatment _add_back_to_index_link
+    already uses elsewhere in this file, cell by cell, to just this one
+    column.
+    """
+    if "word_report_link" not in dataframe.columns:
+        return
+    column_index = list(dataframe.columns).index("word_report_link") + 1
+    for offset, value in enumerate(dataframe["word_report_link"]):
+        if not value or pd.isna(value):
+            continue
+        cell = worksheet.cell(row=header_row + 1 + offset, column=column_index)
+        cell.hyperlink = str(value)
+        cell.style = "Hyperlink"
 
 
 def _column_width(column_name: str, values: pd.Series) -> int:
