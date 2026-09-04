@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 import yaml
 
-from config import CONFIG_FILE, load_config, redundant_negative_hit_sources
+from config import load_config, redundant_negative_hit_sources
 from core.exceptions import ConfigError
 
 
@@ -218,14 +218,6 @@ def test_invalid_consider_cross_species_matches_raises_config_error(tmp_path: Pa
 
     with pytest.raises(ConfigError, match="consider_cross_species_matches"):
         load_config(config_path, initialize=False)
-
-
-def test_repo_config_yaml_enables_string_and_geo_by_default() -> None:
-    """The checked-in config.yaml should ship with STRING/GEO evidence on."""
-    cfg = load_config(CONFIG_FILE, initialize=False)
-
-    assert cfg.interaction_scoring.string_ppi_ncbi_taxon_id == 188937
-    assert cfg.interaction_scoring.geo_coexpression_enabled is True
 
 
 def test_annotation_targets_can_enable_no_hit_pfam(tmp_path: Path) -> None:

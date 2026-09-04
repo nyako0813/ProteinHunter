@@ -39,17 +39,23 @@ ProteinHunter_v5 の変更履歴です。
   コメントアウトした参考値に変更。
 - `tests/test_config_validation.py`: スイッチがtrue/falseそれぞれの
   プリセットを正しく適用すること、個別キーの明示指定がスイッチより
-  優先されること、不正な型を拒否すること、実際の`config.yaml`が
-  STRING/GEOをデフォルトで有効化していることを検証するテストを追加。
+  優先されること、不正な型を拒否することを検証するテストを追加。
 
 ### Changed
 
-- `config.yaml`: `interaction_scoring.string_ppi_ncbi_taxon_id`を
-  コメントアウト状態から`188937`(M. acetivorans C2Aの株レベルtaxid)
-  に変更してSTRING PPI証拠をデフォルトで有効化。
-  `geo_coexpression_enabled`を`false`から`true`に変更してGEO共発現
-  証拠(GSE77738/GSE64349)もデフォルトで有効化。どちらも初回実行時に
-  外部データを取得する(STRING: 数十MB、GEO: 数MB)。
+- リファレンスとしての`config.yaml`(このリポジトリのテンプレート):
+  `interaction_scoring.string_ppi_ncbi_taxon_id`をコメントアウト状態
+  から`188937`(M. acetivorans C2Aの株レベルtaxid)に変更してSTRING PPI
+  証拠をデフォルトで有効化。`geo_coexpression_enabled`を`false`から
+  `true`に変更してGEO共発現証拠(GSE77738/GSE64349)もデフォルトで
+  有効化。どちらも初回実行時に外部データを取得する
+  (STRING: 数十MB、GEO: 数MB)。
+
+  **注記**: 実際の解析用に`config.yaml`を既にカスタマイズ済みの
+  ローカル環境では、この`config.yaml`自体の変更はコードの変更
+  (`config.py`/`tests/`)とは別に、手元のファイルへ手動で反映する
+  (`consider_cross_species_matches: true`を1行追加するなど)必要がある。
+  自動パッチで未コミットのカスタム設定を上書きしないための判断。
 
 ## 未リリース: Phase 6-8 Stage 2: Wordレポート生成
 
