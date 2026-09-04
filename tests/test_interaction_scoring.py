@@ -503,6 +503,151 @@ def test_interaction_score_reflects_genomic_context_when_available(tmp_path: Pat
 
 
 # ---------------------------------------------------------------------------
+# genomic_context: operon-tight spacing + strand awareness
+#
+# See claude/genomic_distance_weight_finding.md for the real-genome check
+# behind these thresholds: true M. acetivorans operons (the Mcr activation
+# complex gene cluster, the nifI1-nifI2-nifK-nifD operon, mtpA-mtpC) all
+# have intergenic gaps of a few bp up to ~70 bp on the same strand. A pair
+# several kb apart, even on the same strand, is not "operon-tight"; a pair
+# on opposite strands is essentially never in the same operon regardless of
+# distance.
+# ---------------------------------------------------------------------------
+
+
+def _genomic_context_component(result, candidate_id: str = "candidate") -> dict:
+    return next(
+        r
+        for r in result.evidence_detail_rows
+        if r["candidate_protein_id"] == candidate_id and r["component_name"] == "genomic_context"
+    )
+
+
+def _genomic_context_fixture(
+    tmp_path: Path, *, query_end: int, candidate_start: int, query_strand: str, candidate_strand: str
+) -> tuple[dict[str, ProteinRecord], SimpleNamespace, Path]:
+    gff_file = tmp_path / "genome.gff"
+    gff_file.write_text(
+        "##gff-version 3\n"
+        f"contig1\tRefSeq\tgene\t1\t{query_end}\t.\t{query_strand}\t.\tID=query\n"
+        f"contig1\tRefSeq\tgene\t{candidate_start}\t{candidate_start + 300}\t.\t{candidate_strand}\t.\tID=candidate\n",
+        encoding="utf-8",
+    )
+    records = {
+        "query": record("query", description="", positive_sources_hit=[]),
+        "candidate": record("candidate", description="", positive_sources_hit=[]),
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+    return records, classification(records), gff_file
+
+
+def test_genomic_context_operon_tight_same_strand_scores_full(tmp_path: Path) -> None:
+    """A ~50 bp same-strand gap (real-operon-tight, e.g. mtpA-mtpC at 70 bp) scores 1.0."""
+    _records, cls, gff_file = _genomic_context_fixture(
+        tmp_path, query_end=400, candidate_start=450, query_strand="+", candidate_strand="+"
+    )
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+        scoring_model="v2_evidence_based",
+        gff_file=gff_file,
+    )
+
+    result = run_interaction_scoring(cfg, cls)
+
+    assert result is not None
+    component = _genomic_context_component(result)
+    assert component["status"] == "AVAILABLE"
+    assert component["normalized_value"] == pytest.approx(1.0)
+    assert "operon-tight" in component["explanation"]
+
+
+def test_genomic_context_same_strand_but_not_operon_tight_scores_lower(tmp_path: Path) -> None:
+    """A same-strand gap well beyond real operon spacing (e.g. ~2.9 kb, like
+    MA_0826-MA_0823) must not receive full "close" credit even though the
+    strand matches."""
+    _records, cls, gff_file = _genomic_context_fixture(
+        tmp_path, query_end=400, candidate_start=3260, query_strand="+", candidate_strand="+"
+    )
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+        scoring_model="v2_evidence_based",
+        gff_file=gff_file,
+    )
+
+    result = run_interaction_scoring(cfg, cls)
+
+    assert result is not None
+    component = _genomic_context_component(result)
+    assert component["status"] == "AVAILABLE"
+    assert 0.0 < component["normalized_value"] < 1.0
+    assert component["normalized_value"] == pytest.approx(0.4)
+
+
+def test_genomic_context_opposite_strand_scores_much_lower_than_same_strand(tmp_path: Path) -> None:
+    """At a comparable distance, an opposite-strand pair must score noticeably
+    lower than a same-strand pair -- opposite-strand genes are essentially
+    never part of the same operon."""
+    same_dir = tmp_path / "same"
+    opposite_dir = tmp_path / "opposite"
+    same_dir.mkdir()
+    opposite_dir.mkdir()
+    _, cls_same, gff_same = _genomic_context_fixture(
+        same_dir, query_end=400, candidate_start=3260, query_strand="+", candidate_strand="+"
+    )
+    _, cls_opposite, gff_opposite = _genomic_context_fixture(
+        opposite_dir, query_end=400, candidate_start=3260, query_strand="+", candidate_strand="-"
+    )
+    cfg_same = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+        scoring_model="v2_evidence_based",
+        gff_file=gff_same,
+    )
+    cfg_opposite = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+        scoring_model="v2_evidence_based",
+        gff_file=gff_opposite,
+    )
+
+    same_result = run_interaction_scoring(cfg_same, cls_same)
+    opposite_result = run_interaction_scoring(cfg_opposite, cls_opposite)
+
+    assert same_result is not None and opposite_result is not None
+    same_component = _genomic_context_component(same_result)
+    opposite_component = _genomic_context_component(opposite_result)
+    assert opposite_component["normalized_value"] < same_component["normalized_value"]
+    assert opposite_component["normalized_value"] == pytest.approx(0.05)
+
+
+def test_genomic_context_unknown_strand_falls_back_to_original_distance_tiers(tmp_path: Path) -> None:
+    """When strand is unavailable ("."), fall back to the original,
+    strand-agnostic distance tiers unchanged (don't guess operon-likeness
+    without the information needed to judge it)."""
+    _records, cls, gff_file = _genomic_context_fixture(
+        tmp_path, query_end=400, candidate_start=3260, query_strand=".", candidate_strand="+"
+    )
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+        scoring_model="v2_evidence_based",
+        gff_file=gff_file,
+    )
+
+    result = run_interaction_scoring(cfg, cls)
+
+    assert result is not None
+    component = _genomic_context_component(result)
+    assert component["status"] == "AVAILABLE"
+    # <=5000 bp with strand unknown keeps the original "close" value (1.0).
+    assert component["normalized_value"] == pytest.approx(1.0)
+    assert "strand unknown" in component["explanation"]
+
+
+# ---------------------------------------------------------------------------
 # legacy_additive interaction_score (M4)
 # ---------------------------------------------------------------------------
 

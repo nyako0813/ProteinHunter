@@ -107,6 +107,37 @@ _NEGATIVE_HIT_STRENGTH_VALUES: dict[str, float] = {
     "weak": 0.2,
 }
 
+# Gene-spacing thresholds for the v2_evidence_based genomic_context
+# component (see _gene_neighborhood_v2). PROVISIONAL -- like every other
+# threshold in this module -- but grounded in a real-genome check rather
+# than a guess (see claude/genomic_distance_weight_finding.md): the
+# original tiers below (still used for legacy_additive's _gene_neighborhood,
+# left untouched) treated any pair within 5,000 bp as "close" and gave it
+# full credit. Checking actual M. acetivorans operons in this project's own
+# data/input/genome.gff (the Mcr activation complex gene cluster
+# MA_4546-MA_4550, the nifI1-nifI2-nifK-nifD operon, and the mtpA-mtpC
+# pair -- all independently confirmed real complexes, see
+# claude/experimental_interactions_curation.md) found every adjacent-gene
+# intergenic gap between 2 bp and 70 bp. A 5,000 bp gap is roughly two
+# orders of magnitude looser than any real operon spacing observed, and
+# strand agreement alone (same_strand vs. opposite_strand) does not capture
+# this: two same-strand genes several kb apart are not meaningfully more
+# likely to be co-transcribed than random same-strand neighbors. Genes on
+# opposite strands are essentially never in the same operon regardless of
+# distance (a real operon is transcribed as one polycistronic message), so
+# opposite-strand proximity gets a small, non-zero allowance only (a
+# divergent/convergent gene pair can still share a regulatory region) --
+# never the same treatment as a true operon-tight pair.
+#
+# When strand information is unavailable ("unknown"), _gene_neighborhood_v2
+# falls back to the original distance-only tiers unchanged: there is not
+# enough information here to distinguish "real operon" from "just nearby",
+# so this deliberately does not guess in either direction.
+_OPERON_TIGHT_MAX_BP = 150
+_SAME_STRAND_CLOSE_MAX_BP = 5000
+_SAME_STRAND_MODERATE_MAX_BP = 20000
+_SAME_STRAND_WEAK_MAX_BP = 100000
+
 #: Theoretical ceiling of protein_hunter_score (analysis/scoring.py::build_candidate_score
 #: with DEFAULT_WEIGHTS, unconfigured): sum of every *positive* component
 #: weight (annotation_warning is a penalty, not part of the ceiling).
@@ -2196,18 +2227,57 @@ def _gene_neighborhood_v2(
         return {**base, "same_contig": False}, EvidenceStatus.NOT_APPLICABLE, None, "different contig"
 
     distance = _interval_distance(query_location, candidate_location)
-    if distance <= 5000:
-        normalized_value = 1.0
-        reason = f"close genomic neighborhood: {distance} bp"
-    elif distance <= 20000:
-        normalized_value = 0.6
-        reason = f"moderate genomic neighborhood: {distance} bp"
-    elif distance <= 100000:
-        normalized_value = 0.2
-        reason = f"weak genomic neighborhood: {distance} bp"
-    else:
-        normalized_value = 0.0
-        reason = "distant genomic neighborhood"
+    strand_relation = base["strand_relation"]
+
+    if strand_relation == "unknown":
+        # No strand information to judge operon-likeness -- keep the
+        # original, strand-agnostic distance tiers (conservative: don't
+        # guess when the input needed to do better is missing).
+        if distance <= _SAME_STRAND_CLOSE_MAX_BP:
+            normalized_value = 1.0
+            reason = f"close genomic neighborhood: {distance} bp (strand unknown)"
+        elif distance <= _SAME_STRAND_MODERATE_MAX_BP:
+            normalized_value = 0.6
+            reason = f"moderate genomic neighborhood: {distance} bp (strand unknown)"
+        elif distance <= _SAME_STRAND_WEAK_MAX_BP:
+            normalized_value = 0.2
+            reason = f"weak genomic neighborhood: {distance} bp (strand unknown)"
+        else:
+            normalized_value = 0.0
+            reason = "distant genomic neighborhood"
+    elif strand_relation == "same_strand":
+        if distance <= _OPERON_TIGHT_MAX_BP:
+            normalized_value = 1.0
+            reason = f"operon-tight same-strand neighborhood: {distance} bp"
+        elif distance <= _SAME_STRAND_CLOSE_MAX_BP:
+            normalized_value = 0.4
+            reason = f"same-strand but not operon-tight (>{_OPERON_TIGHT_MAX_BP} bp): {distance} bp"
+        elif distance <= _SAME_STRAND_MODERATE_MAX_BP:
+            normalized_value = 0.15
+            reason = f"same-strand, moderate distance: {distance} bp"
+        elif distance <= _SAME_STRAND_WEAK_MAX_BP:
+            normalized_value = 0.05
+            reason = f"same-strand, weak distance signal: {distance} bp"
+        else:
+            normalized_value = 0.0
+            reason = "distant genomic neighborhood"
+    else:  # opposite_strand
+        if distance <= _OPERON_TIGHT_MAX_BP:
+            normalized_value = 0.2
+            reason = (
+                f"opposite-strand, very close ({distance} bp) -- "
+                "unlikely to be co-transcribed with the query"
+            )
+        elif distance <= _SAME_STRAND_CLOSE_MAX_BP:
+            normalized_value = 0.05
+            reason = (
+                f"opposite-strand, close ({distance} bp) -- "
+                "unlikely to be co-transcribed with the query"
+            )
+        else:
+            normalized_value = 0.0
+            reason = f"opposite-strand, too far to be meaningful: {distance} bp"
+
     return {**base, "same_contig": True, "distance_bp": distance}, EvidenceStatus.AVAILABLE, normalized_value, reason
 
 
