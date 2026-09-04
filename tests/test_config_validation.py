@@ -112,14 +112,22 @@ def test_missing_annotation_targets_uses_safe_defaults(tmp_path: Path) -> None:
 
     cfg = load_config(config_path, initialize=False)
 
+    assert cfg.consider_cross_species_matches is True
     assert cfg.annotation_targets["candidates"].pfam is True
     assert cfg.annotation_targets["candidates_relaxed"].gff is True
     assert cfg.annotation_targets["candidates_relaxed"].pfam is True
     assert cfg.annotation_targets["candidates_relaxed"].uniprot is False
     assert cfg.annotation_targets["positive_all_sources"].pfam is True
-    assert cfg.annotation_targets["no_hit"].gff is True
+    # consider_cross_species_matches defaults to True (考慮する): only
+    # candidates/candidates_relaxed get gff=True by default; the other
+    # sheets stay off unless consider_cross_species_matches is set to
+    # false. See config.yaml's top-of-file switch and 設定.xlsx.
+    assert cfg.annotation_targets["positive_all_sources"].gff is False
+    assert cfg.annotation_targets["no_hit"].gff is False
     assert cfg.annotation_targets["no_hit"].pfam is False
+    assert cfg.annotation_targets["negative_unmatched"].gff is False
     assert cfg.annotation_targets["negative_unmatched"].uniprot is False
+    assert cfg.annotation_targets["negative_hit"].gff is False
     assert cfg.annotation_targets["negative_hit"].alphafold is False
     assert cfg.ortholog_filter.negative_exclusion_mode == "any_hit"
     assert cfg.ortholog_filter.strong.min_identity == 40.0
@@ -127,14 +135,89 @@ def test_missing_annotation_targets_uses_safe_defaults(tmp_path: Path) -> None:
     assert cfg.interaction_scoring.candidate_sources["candidates"] is True
     assert cfg.interaction_scoring.candidate_sources["candidates_relaxed"] is True
     assert cfg.interaction_scoring.candidate_sources["no_hit"] is True
+    assert cfg.interaction_scoring.candidate_sources["positive_all_sources"] is False
+    assert cfg.interaction_scoring.candidate_sources["negative_unmatched"] is False
     assert cfg.interaction_scoring.candidate_sources["negative_hit"] is False
     assert cfg.interaction_scoring.neighborhood.enabled is True
     assert cfg.interaction_scoring.neighborhood.max_distance_bp == 100000
     assert cfg.interaction_scoring.neighborhood.max_rows_per_query == 200
     assert cfg.interaction_scoring.evidence_detail_sheet.include_no_hit is False
     assert cfg.interaction_scoring.ranking_metric == "interaction_priority_score"
+    assert cfg.interaction_scoring.max_candidates_per_query == 200
     assert cfg.interaction_scoring.string_ppi_ncbi_taxon_id is None
     assert cfg.interaction_scoring.geo_coexpression_enabled is False
+
+
+def test_consider_cross_species_matches_false_broadens_defaults(tmp_path: Path) -> None:
+    """Flipping the single ON/OFF switch should apply the "考慮しない" preset.
+
+    This is the entire point of the switch (設定.xlsx): one boolean should
+    reproduce the whole "broaden" preset without touching the ~6 individual
+    keys it stands in for.
+    """
+    data = valid_config_data()
+    data["consider_cross_species_matches"] = False
+    config_path = write_config(tmp_path, data)
+
+    cfg = load_config(config_path, initialize=False)
+
+    assert cfg.consider_cross_species_matches is False
+    # annotation_targets(gff): every sheet, not just candidates/candidates_relaxed.
+    for sheet in (
+        "candidates",
+        "candidates_relaxed",
+        "positive_all_sources",
+        "no_hit",
+        "negative_unmatched",
+        "negative_hit",
+    ):
+        assert cfg.annotation_targets[sheet].gff is True, sheet
+    # candidate_sources: positive_all_sources/negative_unmatched/negative_hit on.
+    assert cfg.interaction_scoring.candidate_sources["positive_all_sources"] is True
+    assert cfg.interaction_scoring.candidate_sources["negative_unmatched"] is True
+    assert cfg.interaction_scoring.candidate_sources["negative_hit"] is True
+    # Untouched by the switch: core buckets stay on, strength sub-buckets stay off.
+    assert cfg.interaction_scoring.candidate_sources["candidates"] is True
+    assert cfg.interaction_scoring.candidate_sources["candidates_relaxed"] is True
+    assert cfg.interaction_scoring.candidate_sources["no_hit"] is True
+    assert cfg.interaction_scoring.candidate_sources["negative_strong_hit"] is False
+    assert cfg.interaction_scoring.candidate_sources["negative_medium_hit"] is False
+    assert cfg.interaction_scoring.candidate_sources["negative_weak_hit"] is False
+    assert cfg.interaction_scoring.ranking_metric == "interaction_score"
+    assert cfg.interaction_scoring.max_candidates_per_query == 500
+
+
+def test_consider_cross_species_matches_does_not_override_explicit_values(tmp_path: Path) -> None:
+    """An explicit interaction_scoring/annotation_targets value always wins over the switch."""
+    data = valid_config_data()
+    data["consider_cross_species_matches"] = False
+    data["interaction_scoring"] = {
+        "ranking_metric": "interaction_priority_score",
+        "candidate_sources": {"negative_hit": False},
+        "max_candidates_per_query": 42,
+    }
+    data["annotation_targets"] = {"negative_hit": {"gff": False}}
+    config_path = write_config(tmp_path, data)
+
+    cfg = load_config(config_path, initialize=False)
+
+    assert cfg.interaction_scoring.ranking_metric == "interaction_priority_score"
+    assert cfg.interaction_scoring.candidate_sources["negative_hit"] is False
+    assert cfg.interaction_scoring.max_candidates_per_query == 42
+    assert cfg.annotation_targets["negative_hit"].gff is False
+    # Untouched keys still pick up the false-preset (考慮しない) default.
+    assert cfg.interaction_scoring.candidate_sources["positive_all_sources"] is True
+    assert cfg.annotation_targets["positive_all_sources"].gff is True
+
+
+def test_invalid_consider_cross_species_matches_raises_config_error(tmp_path: Path) -> None:
+    """consider_cross_species_matches must be true or false."""
+    data = valid_config_data()
+    data["consider_cross_species_matches"] = "yes"
+    config_path = write_config(tmp_path, data)
+
+    with pytest.raises(ConfigError, match="consider_cross_species_matches"):
+        load_config(config_path, initialize=False)
 
 
 def test_annotation_targets_can_enable_no_hit_pfam(tmp_path: Path) -> None:
@@ -149,7 +232,10 @@ def test_annotation_targets_can_enable_no_hit_pfam(tmp_path: Path) -> None:
 
     cfg = load_config(config_path, initialize=False)
 
-    assert cfg.annotation_targets["no_hit"].gff is True
+    # gff is left unset here, so it keeps the consider_cross_species_matches
+    # default (True/考慮する -> no_hit.gff defaults to False); pfam is
+    # explicitly set above and is honored regardless.
+    assert cfg.annotation_targets["no_hit"].gff is False
     assert cfg.annotation_targets["no_hit"].pfam is True
 
 
@@ -171,7 +257,9 @@ def test_annotation_targets_missing_subkeys_keep_defaults(tmp_path: Path) -> Non
     assert cfg.annotation_targets["candidates"].gff is True
     assert cfg.annotation_targets["candidates"].pfam is False
     assert cfg.annotation_targets["candidates"].uniprot is True
-    assert cfg.annotation_targets["negative_hit"].gff is True
+    # negative_hit.gff is left unset, so it keeps the
+    # consider_cross_species_matches default (True/考慮する -> False).
+    assert cfg.annotation_targets["negative_hit"].gff is False
     assert cfg.annotation_targets["negative_hit"].pfam is False
     assert cfg.annotation_targets["negative_hit"].uniprot is True
 

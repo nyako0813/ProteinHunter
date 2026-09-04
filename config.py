@@ -7,7 +7,7 @@ Author: OpenAI + nyako
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 import multiprocessing
 import yaml
@@ -290,6 +290,19 @@ class Config:
     score: ScoreConfig
     logging: LoggingConfig
 
+    # Single ON/OFF switch bundling the "他生物種のタンパク質との一致を考慮する
+    # か否か" preset (see config.yaml's top-of-file comment and 設定.xlsx,
+    # the user's own comparison table). True (default) = 考慮する: keep
+    # candidate_sources / ranking_metric / annotation_targets(gff) /
+    # max_candidates_per_query at their species-specific, conservative
+    # defaults. False = 考慮しない: broaden all four so candidates that also
+    # match another species (e.g. conserved true positives that would
+    # otherwise be misclassified into Negative_hit) are not silently
+    # dropped. Only supplies *defaults* for those settings -- an explicit
+    # value for one of them in config.yaml always wins over this switch,
+    # same as every other optional setting in this file.
+    consider_cross_species_matches: bool = True
+
 
 # ==========================================================
 # Config Loader
@@ -335,6 +348,81 @@ ANNOTATION_TARGET_DEFAULTS: dict[str, AnnotationTargetConfig] = {
         alphafold=False,
     ),
 }
+
+#: Sheets whose annotation_targets(gff) default stays True regardless of the
+#: consider_cross_species_matches switch -- "Candidates"/"Candidates_relaxed"
+#: are the pipeline's core positive-hit sheets, always worth GFF locus-tag
+#: enrichment. The other four sheets (positive_all_sources, no_hit,
+#: negative_unmatched, negative_hit) are the ones 設定.xlsx's
+#: "annotation_targets(gff)" row actually toggles.
+_ANNOTATION_TARGETS_GFF_ALWAYS_ON: frozenset[str] = frozenset(
+    {"candidates", "candidates_relaxed"}
+)
+
+#: candidate_sources buckets whose default stays fixed regardless of the
+#: consider_cross_species_matches switch. "candidates"/"candidates_relaxed"/
+#: "no_hit" are the pipeline's normal candidate pool and must stay on; the
+#: negative_strong_hit/medium_hit/weak_hit sub-buckets are a separate,
+#: finer-grained axis (see redundant_negative_hit_sources()) that the
+#: switch deliberately leaves alone.
+_CANDIDATE_SOURCES_FIXED_DEFAULTS: dict[str, bool] = {
+    "candidates": True,
+    "candidates_relaxed": True,
+    "no_hit": True,
+    "negative_strong_hit": False,
+    "negative_medium_hit": False,
+    "negative_weak_hit": False,
+}
+
+#: candidate_sources buckets that 設定.xlsx's toggle actually controls.
+_CANDIDATE_SOURCES_TOGGLED: tuple[str, ...] = (
+    "positive_all_sources",
+    "negative_unmatched",
+    "negative_hit",
+)
+
+
+def _annotation_target_defaults_for(consider_cross_species_matches: bool) -> dict[str, AnnotationTargetConfig]:
+    """Return the ANNOTATION_TARGET_DEFAULTS variant for one preset.
+
+    consider_cross_species_matches=True (デフォルト/考慮する): only
+    candidates/candidates_relaxed get gff=True. False (前回提案/考慮しない):
+    every sheet gets gff=True, so proteins that also match another species
+    still get GFF locus-tag context instead of being dropped from
+    annotation entirely. pfam/uniprot/alphafold are untouched -- 設定.xlsx
+    only lists gff for this row.
+    """
+    defaults: dict[str, AnnotationTargetConfig] = {}
+    for name, target in ANNOTATION_TARGET_DEFAULTS.items():
+        gff_default = name in _ANNOTATION_TARGETS_GFF_ALWAYS_ON or not consider_cross_species_matches
+        defaults[name] = target if target.gff == gff_default else replace(target, gff=gff_default)
+    return defaults
+
+
+def _candidate_source_defaults_for(consider_cross_species_matches: bool) -> dict[str, bool]:
+    """Return the INTERACTION_CANDIDATE_SOURCE_DEFAULTS variant for one preset.
+
+    consider_cross_species_matches=True (デフォルト/考慮する):
+    positive_all_sources/negative_unmatched/negative_hit default to False
+    (species-specific candidates only). False (前回提案/考慮しない): all
+    three default to True, so candidates that also hit another species
+    still get scored instead of being excluded outright.
+    """
+    defaults = dict(_CANDIDATE_SOURCES_FIXED_DEFAULTS)
+    for key in _CANDIDATE_SOURCES_TOGGLED:
+        defaults[key] = not consider_cross_species_matches
+    return defaults
+
+
+def _ranking_metric_default_for(consider_cross_species_matches: bool) -> str:
+    """Return the ranking_metric default for one consider_cross_species_matches preset."""
+    return "interaction_priority_score" if consider_cross_species_matches else "interaction_score"
+
+
+def _max_candidates_per_query_default_for(consider_cross_species_matches: bool) -> int:
+    """Return the max_candidates_per_query default for one preset."""
+    return 200 if consider_cross_species_matches else 500
+
 
 ORTHOLOG_FILTER_DEFAULT = OrthologFilterConfig(
     negative_exclusion_mode="any_hit",
@@ -436,20 +524,20 @@ INTERACTION_SCORING_DEFAULT = InteractionScoringConfig(
 )
 
 
-def _default_interaction_scoring() -> InteractionScoringConfig:
+def _default_interaction_scoring(consider_cross_species_matches: bool = True) -> InteractionScoringConfig:
     """Return a fresh disabled interaction scoring config."""
     return InteractionScoringConfig(
         enabled=False,
         query_proteins=(),
         query_fasta=None,
-        candidate_sources=dict(INTERACTION_CANDIDATE_SOURCE_DEFAULTS),
-        max_candidates_per_query=200,
+        candidate_sources=_candidate_source_defaults_for(consider_cross_species_matches),
+        max_candidates_per_query=_max_candidates_per_query_default_for(consider_cross_species_matches),
         include_sequences_in_excel=False,
         scoring_weights=INTERACTION_SCORING_WEIGHTS_DEFAULT,
         alphafold=INTERACTION_ALPHAFOLD_DEFAULT,
         neighborhood=INTERACTION_NEIGHBORHOOD_DEFAULT,
         evidence_detail_sheet=INTERACTION_EVIDENCE_DETAIL_DEFAULT,
-        ranking_metric="interaction_priority_score",
+        ranking_metric=_ranking_metric_default_for(consider_cross_species_matches),
     )
 
 
@@ -511,9 +599,14 @@ def load_config(config_file: str | Path = CONFIG_FILE, initialize: bool = True) 
             raw["annotation"].get("pfam_evalue_threshold", 1e-5)
         ),
     )
-    annotation_targets = _load_annotation_targets(raw.get("annotation_targets"))
+    consider_cross_species_matches = bool(raw.get("consider_cross_species_matches", True))
+    annotation_targets = _load_annotation_targets(
+        raw.get("annotation_targets"), consider_cross_species_matches
+    )
     ortholog_filter = _load_ortholog_filter(raw.get("ortholog_filter"))
-    interaction_scoring = _load_interaction_scoring(raw.get("interaction_scoring"))
+    interaction_scoring = _load_interaction_scoring(
+        raw.get("interaction_scoring"), consider_cross_species_matches
+    )
 
     cache = CacheConfig(**raw["cache"])
 
@@ -534,6 +627,7 @@ def load_config(config_file: str | Path = CONFIG_FILE, initialize: bool = True) 
         cache=cache,
         score=score,
         logging=logging,
+        consider_cross_species_matches=consider_cross_species_matches,
     )
 
     if initialize:
@@ -548,6 +642,7 @@ def validate_config(raw: object) -> None:
         raise ConfigError("config.yaml must contain a YAML mapping at the top level.")
 
     _validate_input_mode(raw)
+    _validate_consider_cross_species_matches_section(raw)
     _validate_paths_section(raw)
     _validate_blast_section(raw)
     _validate_annotation_section(raw)
@@ -630,6 +725,15 @@ def _validate_input_mode(raw: dict[object, object]) -> None:
     input_mode = raw.get("input_mode", "file")
     if input_mode not in {"file", "directory"}:
         raise ConfigError("config.yaml value 'input_mode' must be 'file' or 'directory'.")
+
+
+def _validate_consider_cross_species_matches_section(raw: dict[object, object]) -> None:
+    """Validate the top-level consider_cross_species_matches ON/OFF switch."""
+    value = raw.get("consider_cross_species_matches", True)
+    if not isinstance(value, bool):
+        raise ConfigError(
+            "config.yaml value 'consider_cross_species_matches' must be true or false."
+        )
 
 
 def _validate_blast_section(raw: dict[object, object]) -> None:
@@ -726,9 +830,16 @@ def _validate_annotation_targets_section(raw: dict[object, object]) -> None:
 
 def _load_annotation_targets(
     raw_targets: object,
+    consider_cross_species_matches: bool = True,
 ) -> AnnotationTargetsConfig:
-    """Load per-sheet annotation target settings with safe defaults."""
-    targets = dict(ANNOTATION_TARGET_DEFAULTS)
+    """Load per-sheet annotation target settings with safe defaults.
+
+    ``consider_cross_species_matches`` (see ``Config`` docstring / the
+    top-of-file config.yaml switch) picks which gff defaults apply before
+    any explicit ``raw_targets`` values are merged in -- an explicit value
+    always wins over either preset.
+    """
+    targets = dict(_annotation_target_defaults_for(consider_cross_species_matches))
     if not isinstance(raw_targets, dict):
         return AnnotationTargetsConfig(**targets)
 
@@ -1087,10 +1198,21 @@ def _validate_interaction_scoring_section(raw: dict[object, object]) -> None:
         )
 
 
-def _load_interaction_scoring(raw_scoring: object) -> InteractionScoringConfig:
-    """Load optional lightweight interaction scoring settings."""
+def _load_interaction_scoring(
+    raw_scoring: object,
+    consider_cross_species_matches: bool = True,
+) -> InteractionScoringConfig:
+    """Load optional lightweight interaction scoring settings.
+
+    ``consider_cross_species_matches`` picks the preset default for
+    ``candidate_sources`` (positive_all_sources/negative_unmatched/
+    negative_hit), ``ranking_metric``, and ``max_candidates_per_query``
+    before any explicit ``raw_scoring`` values are merged in -- an explicit
+    value in config.yaml always wins over either preset, same as every
+    other optional interaction_scoring setting.
+    """
     if not isinstance(raw_scoring, dict):
-        return _default_interaction_scoring()
+        return _default_interaction_scoring(consider_cross_species_matches)
 
     raw_queries = raw_scoring.get("query_proteins", [])
     if not isinstance(raw_queries, list):
@@ -1108,7 +1230,7 @@ def _load_interaction_scoring(raw_scoring: object) -> InteractionScoringConfig:
         )
 
     raw_candidate_sources = raw_scoring.get("candidate_sources", {})
-    candidate_sources = dict(INTERACTION_CANDIDATE_SOURCE_DEFAULTS)
+    candidate_sources = _candidate_source_defaults_for(consider_cross_species_matches)
     if isinstance(raw_candidate_sources, dict):
         for source_name, enabled in raw_candidate_sources.items():
             if source_name in candidate_sources:
@@ -1223,7 +1345,12 @@ def _load_interaction_scoring(raw_scoring: object) -> InteractionScoringConfig:
         query_proteins=tuple(query_proteins),
         query_fasta=_optional_path(raw_scoring.get("query_fasta")),
         candidate_sources=candidate_sources,
-        max_candidates_per_query=int(raw_scoring.get("max_candidates_per_query", 200)),
+        max_candidates_per_query=int(
+            raw_scoring.get(
+                "max_candidates_per_query",
+                _max_candidates_per_query_default_for(consider_cross_species_matches),
+            )
+        ),
         include_sequences_in_excel=bool(
             raw_scoring.get("include_sequences_in_excel", False)
         ),
@@ -1239,7 +1366,10 @@ def _load_interaction_scoring(raw_scoring: object) -> InteractionScoringConfig:
         evidence_detail_sheet=evidence_detail_sheet,
         word_report=word_report,
         ranking_metric=str(
-            raw_scoring.get("ranking_metric", "interaction_priority_score")
+            raw_scoring.get(
+                "ranking_metric",
+                _ranking_metric_default_for(consider_cross_species_matches),
+            )
         ),
         string_ppi_ncbi_taxon_id=(
             int(raw_scoring["string_ppi_ncbi_taxon_id"])

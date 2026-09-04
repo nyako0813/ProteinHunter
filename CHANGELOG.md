@@ -2,6 +2,49 @@
 
 ProteinHunter_v5 の変更履歴です。
 
+## 未リリース: 他生物種一致の考慮/非考慮を1スイッチで切り替え(設定.xlsx)
+
+`設定.xlsx`(ユーザー提示の2プリセット比較表)がまとめていた
+「他生物種のタンパク質と一致する候補を考慮するか否か」という6項目
+(`ranking_metric`、`candidate_sources`の`positive_all_sources`/
+`negative_unmatched`/`negative_hit`、`annotation_targets`の`gff`、
+`max_candidates_per_query`)を、`config.yaml`冒頭の
+`consider_cross_species_matches`という1つのON/OFFスイッチにまとめた。
+
+### Added
+
+- `config.py`: `Config.consider_cross_species_matches: bool = True`を
+  追加。`_load_annotation_targets()`/`_load_interaction_scoring()`が
+  この値に応じてデフォルト値(`ranking_metric`、
+  `candidate_sources.positive_all_sources`/`negative_unmatched`/
+  `negative_hit`、`annotation_targets.*.gff`(candidates/
+  candidates_relaxedを除く4シート)、`max_candidates_per_query`)を
+  切り替える。**個別キーをconfig.yamlで明示した場合は、そちらの値が
+  スイッチより優先される**(既存の設定システム全体の慣習と同じ)。
+  `candidates`/`candidates_relaxed`/`no_hit`と
+  `negative_strong_hit`/`negative_medium_hit`/`negative_weak_hit`は
+  このスイッチの対象外(常に既存のデフォルト値のまま)。
+  `_validate_consider_cross_species_matches_section()`で型検証を追加。
+- `config.yaml`: `project:`直後に`consider_cross_species_matches: true`
+  (デフォルト・考慮する)を追加。影響を受ける6項目のうち4項目
+  (`annotation_targets`の4シートの`gff`、`candidate_sources`の
+  `positive_all_sources`/`negative_unmatched`/`negative_hit`、
+  `ranking_metric`)は、スイッチが効くようコメントアウトした参考値に変更
+  (`max_candidates_per_query`も同様)。
+- `tests/test_config_validation.py`: スイッチがtrue/falseそれぞれの
+  プリセットを正しく適用すること、個別キーの明示指定がスイッチより
+  優先されること、不正な型を拒否することを検証するテストを追加。
+
+### Changed
+
+- `consider_cross_species_matches`のデフォルト値(true)により、
+  `annotation_targets`の`positive_all_sources`/`no_hit`/
+  `negative_unmatched`/`negative_hit`の`gff`デフォルトが、
+  config.yamlで明示しない場合は`true`から`false`に変わった
+  (`candidates`/`candidates_relaxed`は`true`のまま)。これは
+  設定.xlsxが定義した「デフォルト(考慮する)」プリセットに合わせる
+  意図的な変更。
+
 ## 未リリース: Phase 6-8 Stage 2: Wordレポート生成
 
 design spec §29〜45(ユーザー提示の要約に基づく、原文はリポジトリに
