@@ -293,14 +293,21 @@ class Config:
     # Single ON/OFF switch bundling the "他生物種のタンパク質との一致を考慮する
     # か否か" preset (see config.yaml's top-of-file comment and 設定.xlsx,
     # the user's own comparison table). True (default) = 考慮する: keep
-    # candidate_sources / ranking_metric / annotation_targets(gff) /
-    # max_candidates_per_query at their species-specific, conservative
-    # defaults. False = 考慮しない: broaden all four so candidates that also
-    # match another species (e.g. conserved true positives that would
-    # otherwise be misclassified into Negative_hit) are not silently
-    # dropped. Only supplies *defaults* for those settings -- an explicit
-    # value for one of them in config.yaml always wins over this switch,
-    # same as every other optional setting in this file.
+    # candidate_sources.{positive_all_sources,negative_unmatched,
+    # negative_hit} off, ranking_metric=interaction_priority_score,
+    # max_candidates_per_query=200 -- species-specific, conservative
+    # defaults. annotation_targets(gff) stays True on every sheet (nothing
+    # extra is being scored yet, so there's nothing to skip GFF for).
+    # False = 考慮しない: turn those three candidate_sources buckets on so
+    # candidates that also match another species (e.g. conserved true
+    # positives that would otherwise be misclassified into Negative_hit)
+    # are not silently dropped, ranking_metric=interaction_score,
+    # max_candidates_per_query=500 -- but annotation_targets(gff) narrows to
+    # just candidates/candidates_relaxed, so GFF enrichment isn't also
+    # extended to the newly-included, much larger buckets. Only supplies
+    # *defaults* for those settings -- an explicit value for one of them in
+    # config.yaml always wins over this switch, same as every other
+    # optional setting in this file.
     consider_cross_species_matches: bool = True
 
 
@@ -385,16 +392,26 @@ _CANDIDATE_SOURCES_TOGGLED: tuple[str, ...] = (
 def _annotation_target_defaults_for(consider_cross_species_matches: bool) -> dict[str, AnnotationTargetConfig]:
     """Return the ANNOTATION_TARGET_DEFAULTS variant for one preset.
 
-    consider_cross_species_matches=True (デフォルト/考慮する): only
-    candidates/candidates_relaxed get gff=True. False (前回提案/考慮しない):
-    every sheet gets gff=True, so proteins that also match another species
-    still get GFF locus-tag context instead of being dropped from
-    annotation entirely. pfam/uniprot/alphafold are untouched -- 設定.xlsx
-    only lists gff for this row.
+    This is keyed off whether positive_all_sources/negative_unmatched/
+    negative_hit are USED as candidate_sources (see
+    _candidate_source_defaults_for), not directly off
+    consider_cross_species_matches's own boolean sense:
+
+    consider_cross_species_matches=True (デフォルト): candidate_sources
+    positive_all_sources/negative_unmatched/negative_hit stay off (species-
+    specific candidates only), so every sheet still gets gff=True -- there's
+    no scored candidate pool in those extra buckets to skip GFF work for.
+    False (前回提案): those three candidate_sources buckets turn on, and
+    only candidates/candidates_relaxed keep gff=True -- GFF locus-tag
+    enrichment is deliberately NOT extended to the newly-included, much
+    larger positive_all_sources/no_hit/negative_unmatched/negative_hit
+    buckets, to avoid the extra annotation cost of enriching every one of
+    them. pfam/uniprot/alphafold are untouched -- 設定.xlsx only lists gff
+    for this row.
     """
     defaults: dict[str, AnnotationTargetConfig] = {}
     for name, target in ANNOTATION_TARGET_DEFAULTS.items():
-        gff_default = name in _ANNOTATION_TARGETS_GFF_ALWAYS_ON or not consider_cross_species_matches
+        gff_default = name in _ANNOTATION_TARGETS_GFF_ALWAYS_ON or consider_cross_species_matches
         defaults[name] = target if target.gff == gff_default else replace(target, gff=gff_default)
     return defaults
 

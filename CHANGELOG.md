@@ -5,45 +5,54 @@ ProteinHunter_v5 の変更履歴です。
 ## 未リリース: 他生物種一致の考慮/非考慮を1スイッチで切り替え(設定.xlsx)
 
 `設定.xlsx`(ユーザー提示の2プリセット比較表)がまとめていた
-「他生物種のタンパク質と一致する候補を考慮するか否か」という6項目
-(`ranking_metric`、`candidate_sources`の`positive_all_sources`/
-`negative_unmatched`/`negative_hit`、`annotation_targets`の`gff`、
-`max_candidates_per_query`)を、`config.yaml`冒頭の
-`consider_cross_species_matches`という1つのON/OFFスイッチにまとめた。
+「他生物種のタンパク質と一致する候補を考慮するか否か」という設定を、
+`config.yaml`冒頭の`consider_cross_species_matches`という1つのON/OFF
+スイッチにまとめた。加えて、STRING/GEO証拠統合をデフォルトで有効化した。
 
 ### Added
 
 - `config.py`: `Config.consider_cross_species_matches: bool = True`を
   追加。`_load_annotation_targets()`/`_load_interaction_scoring()`が
-  この値に応じてデフォルト値(`ranking_metric`、
-  `candidate_sources.positive_all_sources`/`negative_unmatched`/
-  `negative_hit`、`annotation_targets.*.gff`(candidates/
-  candidates_relaxedを除く4シート)、`max_candidates_per_query`)を
-  切り替える。**個別キーをconfig.yamlで明示した場合は、そちらの値が
-  スイッチより優先される**(既存の設定システム全体の慣習と同じ)。
-  `candidates`/`candidates_relaxed`/`no_hit`と
-  `negative_strong_hit`/`negative_medium_hit`/`negative_weak_hit`は
-  このスイッチの対象外(常に既存のデフォルト値のまま)。
+  この値に応じて以下のデフォルト値を切り替える:
+  - `true`(デフォルト・考慮する): `candidate_sources`の
+    `positive_all_sources`/`negative_unmatched`/`negative_hit`は
+    候補として使わない(`false`)。`ranking_metric`は
+    `interaction_priority_score`、`max_candidates_per_query`は`200`。
+    これらpositive/negative系のバケツを候補として使わない分、
+    `annotation_targets(gff)`は**全シートtrue**のまま
+    (絞り込む必要がない)。
+  - `false`(前回提案・考慮しない): 上記3バケツを候補として使う
+    (`true`)。`ranking_metric`は`interaction_score`、
+    `max_candidates_per_query`は`500`。その代わり
+    `annotation_targets(gff)`は**Candidates/Candidates_relaxedのみtrue**
+    に絞る(新たに候補として使う大きなバケツにまでGFF注釈を広げる
+    コストを避けるため)。
+  
+  **個別キーをconfig.yamlで明示した場合は、そちらの値がスイッチより
+  優先される**(既存の設定システム全体の慣習と同じ)。`candidates`/
+  `candidates_relaxed`/`no_hit`と`negative_strong_hit`/
+  `negative_medium_hit`/`negative_weak_hit`はこのスイッチの対象外
+  (常に既存のデフォルト値のまま)。
   `_validate_consider_cross_species_matches_section()`で型検証を追加。
 - `config.yaml`: `project:`直後に`consider_cross_species_matches: true`
-  (デフォルト・考慮する)を追加。影響を受ける6項目のうち4項目
+  (デフォルト・考慮する)を追加。影響を受ける項目
   (`annotation_targets`の4シートの`gff`、`candidate_sources`の
   `positive_all_sources`/`negative_unmatched`/`negative_hit`、
-  `ranking_metric`)は、スイッチが効くようコメントアウトした参考値に変更
-  (`max_candidates_per_query`も同様)。
+  `ranking_metric`、`max_candidates_per_query`)は、スイッチが効くよう
+  コメントアウトした参考値に変更。
 - `tests/test_config_validation.py`: スイッチがtrue/falseそれぞれの
   プリセットを正しく適用すること、個別キーの明示指定がスイッチより
-  優先されること、不正な型を拒否することを検証するテストを追加。
+  優先されること、不正な型を拒否すること、実際の`config.yaml`が
+  STRING/GEOをデフォルトで有効化していることを検証するテストを追加。
 
 ### Changed
 
-- `consider_cross_species_matches`のデフォルト値(true)により、
-  `annotation_targets`の`positive_all_sources`/`no_hit`/
-  `negative_unmatched`/`negative_hit`の`gff`デフォルトが、
-  config.yamlで明示しない場合は`true`から`false`に変わった
-  (`candidates`/`candidates_relaxed`は`true`のまま)。これは
-  設定.xlsxが定義した「デフォルト(考慮する)」プリセットに合わせる
-  意図的な変更。
+- `config.yaml`: `interaction_scoring.string_ppi_ncbi_taxon_id`を
+  コメントアウト状態から`188937`(M. acetivorans C2Aの株レベルtaxid)
+  に変更してSTRING PPI証拠をデフォルトで有効化。
+  `geo_coexpression_enabled`を`false`から`true`に変更してGEO共発現
+  証拠(GSE77738/GSE64349)もデフォルトで有効化。どちらも初回実行時に
+  外部データを取得する(STRING: 数十MB、GEO: 数MB)。
 
 ## 未リリース: Phase 6-8 Stage 2: Wordレポート生成
 
