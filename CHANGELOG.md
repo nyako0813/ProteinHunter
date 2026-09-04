@@ -13,20 +13,17 @@ ProteinHunter_v5 の変更履歴です。
 
 - `config.py`: `Config.consider_cross_species_matches: bool = True`を
   追加。`_load_annotation_targets()`/`_load_interaction_scoring()`が
-  この値に応じて以下のデフォルト値を切り替える:
-  - `true`(デフォルト・考慮する): `candidate_sources`の
+  この値に応じて以下のデフォルト値を切り替える(true/falseどちらも
+  全項目が同じ方向に揃っている: true=絞る側、false=広げる側):
+  - `true`(デフォルト・考慮する・絞る側): `candidate_sources`の
     `positive_all_sources`/`negative_unmatched`/`negative_hit`は
     候補として使わない(`false`)。`ranking_metric`は
-    `interaction_priority_score`、`max_candidates_per_query`は`200`。
-    これらpositive/negative系のバケツを候補として使わない分、
-    `annotation_targets(gff)`は**全シートtrue**のまま
-    (絞り込む必要がない)。
-  - `false`(前回提案・考慮しない): 上記3バケツを候補として使う
-    (`true`)。`ranking_metric`は`interaction_score`、
-    `max_candidates_per_query`は`500`。その代わり
-    `annotation_targets(gff)`は**Candidates/Candidates_relaxedのみtrue**
-    に絞る(新たに候補として使う大きなバケツにまでGFF注釈を広げる
-    コストを避けるため)。
+    `interaction_priority_score`、`max_candidates_per_query`は`200`、
+    `annotation_targets(gff)`は**Candidates/Candidates_relaxedのみtrue**。
+  - `false`(前回提案・考慮しない・広げる側): `candidate_sources`の
+    上記3バケツを候補として使う(`true`)。`ranking_metric`は
+    `interaction_score`、`max_candidates_per_query`は`500`、
+    `annotation_targets(gff)`は**全シートtrue**。
   
   **個別キーをconfig.yamlで明示した場合は、そちらの値がスイッチより
   優先される**(既存の設定システム全体の慣習と同じ)。`candidates`/
