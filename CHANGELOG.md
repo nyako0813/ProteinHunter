@@ -56,6 +56,74 @@ ProteinHunter_v5 の変更履歴です。
   (`config.py`/`tests/`)とは別に、手元のファイルへ手動で反映する
   (`consider_cross_species_matches: true`を1行追加するなど)必要がある。
   自動パッチで未コミットのカスタム設定を上書きしないための判断。
+## 未リリース: domain_complementarity v3 (UniProt Pfam/InterProベース)
+
+`claude_code_instructions_domain_complementarity_v3.md`に基づき、
+`domain_complementarity`(scoring_model: v2_evidence_based)の判定に
+UniProt Pfam/InterPro/SUPFAMベースのドメインファミリー分類層を追加。
+既存の自由記述キーワードマッチング(`config/functional_complementarity_rules.v1.yaml`)
+はそのまま残し、その前段に挿入する形で組み込んだ。動機は、クエリ
+タンパク質MA_4115のNCBI注釈("alpha hydrolase")が実際のPfam分類
+(HUP/PP-loop ATPaseドメイン、PF24167)と乖離しており、自由記述の
+言い回しに依存する限りflavodoxin系タンパク質(MA_0361/MA_0363)との
+機能的関連が一切スコアに反映されないという問題。
+
+### Added
+
+- `annotation/uniprot_bulk.py`(新規): UniProtKB REST一括エクスポート
+  JSON(`{"results": [...]}`)を読み込み、`old_locus_tag`(例:`MA_4115`)
+  をキーに`UniProtDomainInfo`(pfam/interpro/supfam/protein_existence)を
+  返す`load_uniprot_bulk_domain_map()`。ファイルが存在しない・不正な
+  JSONの場合は例外を送出せず空辞書を返す(`JsonCache`の「壊れたキャッシュは
+  エラー」方針とは異なり、「無ければ機能を無効化」方針)。プロセス内
+  `lru_cache`で36MB級ファイルの毎回パースを回避。
+- `analysis/domain_family_map.py`(新規): `config/domain_family_map.v1.yaml`
+  形式のドメインファミリー分類(カテゴリ→Pfam/InterPro/SUPFAM accession集合、
+  カテゴリ間の相補性ルール)を読み込む`load_domain_family_map()`。
+  `analysis/functional_complementarity_rules.py`と同じYAML読み込み→
+  バリデーション→frozen dataclass化のパターンを踏襲し、ファイルが
+  設定されているのに見つからない/不正な場合は`ConfigError`を送出する
+  (呼び出し元の`run_interaction_scoring`で捕捉しフォールバックする設計、
+  下記参照)。
+- `config/domain_family_map.v1.yaml`(新規): `electron_carrier`
+  (flavodoxin系、MA_0361/MA_0363で確認済み)、`atp_dependent_activator`
+  (HUP/PP-loopドメイン、MA_4115で確認済み)を含む4カテゴリと、
+  カテゴリ間相補性ルールを定義。`sulfur_carrier`・`radical_sam`は
+  Pfam ID未確認のため空のまま(今後の別タスクで充実予定)。
+- `config.py` / `config.yaml`: `InteractionScoringConfig`に
+  `domain_family_map_path`・`uniprot_bulk_export_path`(共に既定`None`)を
+  追加。両方が設定された場合のみ新機能が有効化される。
+- `analysis/interaction_scoring.py`: `_domain_complementarity_status_and_value`
+  (v2専用)に、既存の`ruleset.find_match()`呼び出しの直前でドメイン
+  ファミリー一致判定を追加。一致した場合は`EvidenceStatus.AVAILABLE`・
+  値`1.0`・説明文に`"domain family match"`を含めて返す。一致しなければ
+  既存の自由記述マッチングにそのままフォールスルーする。`domain_family_map`・
+  `uniprot_domain_map`は`run_interaction_scoring`→`_rank_source_candidates_v2`
+  →`_score_pair_v2`→`_build_evidence_components_v2`と、既存の`pih_bundle`と
+  同じ経路で配線。`domain_family_map_path`が設定されているのにファイルの
+  読み込みに失敗した場合は`ConfigError`を捕捉して警告に変換し、機能を
+  無効化して実行を継続する(非破壊要件)。`legacy_additive`用の
+  `_domain_complementarity_score`は一切変更していない。
+- `tests/test_uniprot_bulk.py`・`tests/test_domain_family_map.py`(新規)、
+  `tests/test_interaction_scoring.py`への統合テスト3件
+  (MA_4115/MA_0361相当の合成データでドメインファミリー一致がスコアに
+  反映されること、未設定時の回帰確認、ファイル欠損時のフォールバック確認)。
+
+### Notes
+
+- 36MBのUniProtバルクJSON(`uniprotkb_methanosarcina_acetivorans_2026_09_06.json`)
+  はこのリポジトリのどこにも存在せず、ユーザーが別途用意する必要がある。
+  配置先は`data/databases/uniprot/uniprotkb_methanosarcina_acetivorans.json`
+  (`data/databases/`配下の既存データファイルと同様、gitignore対象ではない)。
+  配置後、`config.yaml`の`domain_family_map_path`・`uniprot_bulk_export_path`を
+  設定すれば有効化される。
+- 受け入れ基準のうち「MA_4115クエリを実データで実行し
+  `domain_complementarity_score`が0→正の値になることを目視確認する」
+  (design spec §3.6「実データでの確認(重要)」)は、上記UniProtバルク
+  JSONが未配置のため本セッションでは未実施。合成データによる同等の
+  統合テストでロジックは検証済み。
+- `sulfur_carrier`・`radical_sam`カテゴリのPfam ID充実は対象外(design
+  spec §5)。
 
 ## 未リリース: Phase 6-8 Stage 2: Wordレポート生成
 

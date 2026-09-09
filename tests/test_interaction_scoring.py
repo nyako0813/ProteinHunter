@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import gzip
+import json
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -50,6 +51,8 @@ def interaction_config(
     scoring_engine_config: Path | None = None,
     functional_complementarity_ruleset: Path | None = None,
     pih_evidence_bundle: Path | None = None,
+    domain_family_map_path: Path | None = None,
+    uniprot_bulk_export_path: Path | None = None,
     evidence_detail_sheet: InteractionEvidenceDetailConfig = INTERACTION_EVIDENCE_DETAIL_DEFAULT,
     cache_dir: Path | None = None,
 ) -> SimpleNamespace:
@@ -74,6 +77,8 @@ def interaction_config(
             scoring_engine_config=scoring_engine_config,
             functional_complementarity_ruleset=functional_complementarity_ruleset,
             pih_evidence_bundle=pih_evidence_bundle,
+            domain_family_map_path=domain_family_map_path,
+            uniprot_bulk_export_path=uniprot_bulk_export_path,
             evidence_detail_sheet=evidence_detail_sheet,
         )
     )
@@ -2501,6 +2506,150 @@ minimum_evidence:
     assert row["formal_score_available"] is False
     assert row["evidence_tier"] == "Unclassified"
     assert row["interaction_priority_score"] is None
+
+
+def _write_domain_family_map(tmp_path: Path) -> Path:
+    path = tmp_path / "domain_family_map.yaml"
+    path.write_text(
+        """
+version: test
+categories:
+  atp_dependent_activator:
+    pfam: [PF24167]
+  electron_carrier:
+    pfam: [PF12724]
+category_rules:
+  - left: atp_dependent_activator
+    right: electron_carrier
+    note: "activator x carrier"
+""",
+        encoding="utf-8",
+    )
+    return path
+
+
+def _write_uniprot_bulk_export(tmp_path: Path) -> Path:
+    path = tmp_path / "uniprot_bulk.json"
+    path.write_text(
+        json.dumps(
+            {
+                "results": [
+                    {
+                        "genes": [{"orderedLocusNames": [{"value": "MA_4115"}]}],
+                        "uniProtKBCrossReferences": [
+                            {"database": "Pfam", "id": "PF24167", "properties": []}
+                        ],
+                    },
+                    {
+                        "genes": [{"orderedLocusNames": [{"value": "MA_0361"}]}],
+                        "uniProtKBCrossReferences": [
+                            {"database": "Pfam", "id": "PF12724", "properties": []}
+                        ],
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_v2_mode_domain_family_map_scores_pfam_match_without_legacy_keyword_overlap(
+    tmp_path: Path,
+) -> None:
+    """MA_4115/MA_0361-style pair with no free-text overlap should still match via UniProt Pfam."""
+    domain_family_map_path = _write_domain_family_map(tmp_path)
+    uniprot_bulk_export_path = _write_uniprot_bulk_export(tmp_path)
+    records = {
+        "query": record(
+            "query",
+            old_locus_tag="MA_4115",
+            description="Asparagine synthetase domain-containing protein",
+            positive_sources_hit=["A"],
+        ),
+        "candidate": record(
+            "candidate",
+            old_locus_tag="MA_0361",
+            description="Flavodoxin domain-containing protein",
+            positive_sources_hit=["A"],
+        ),
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+        scoring_model="v2_evidence_based",
+        domain_family_map_path=domain_family_map_path,
+        uniprot_bulk_export_path=uniprot_bulk_export_path,
+    )
+
+    result = run_interaction_scoring(cfg, classification(records))
+
+    assert result is not None
+    row = result.source_rows["Interaction_Candidates"][0]
+    assert row["domain_complementarity_score"] == 10.0
+    assert "domain family match" in row["interaction_score_reasons"]
+
+
+def test_v2_mode_domain_family_map_unset_falls_back_to_legacy_matching() -> None:
+    """Regression: default (None/None) config must keep scoring domain_complementarity as before."""
+    records = {
+        "query": record(
+            "query",
+            old_locus_tag="MA_4115",
+            description="Asparagine synthetase domain-containing protein",
+            positive_sources_hit=["A"],
+        ),
+        "candidate": record(
+            "candidate",
+            old_locus_tag="MA_0361",
+            description="Flavodoxin domain-containing protein",
+            positive_sources_hit=["A"],
+        ),
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+        scoring_model="v2_evidence_based",
+    )
+
+    result = run_interaction_scoring(cfg, classification(records))
+
+    assert result is not None
+    row = result.source_rows["Interaction_Candidates"][0]
+    assert row["domain_complementarity_score"] == 0.0
+    assert "domain family match" not in row["interaction_score_reasons"]
+
+
+def test_v2_mode_domain_family_map_missing_file_falls_back_without_crashing(
+    tmp_path: Path,
+) -> None:
+    """A configured but missing domain_family_map_path must disable the layer, not abort the run."""
+    records = {
+        "query": record("query", description="radical SAM protein", positive_sources_hit=["A"]),
+        "candidate": record(
+            "candidate", description="iron-sulfur carrier protein", positive_sources_hit=["A"]
+        ),
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+        scoring_model="v2_evidence_based",
+        domain_family_map_path=tmp_path / "does_not_exist.yaml",
+    )
+
+    result = run_interaction_scoring(cfg, classification(records))
+
+    assert result is not None
+    row = result.source_rows["Interaction_Candidates"][0]
+    # Legacy free-text rule (radical sam / iron-sulfur) still fires normally.
+    assert row["domain_complementarity_score"] == 10.0
+    assert any("domain family map disabled" in warning for warning in result.warnings)
 
 
 def test_v2_mode_uses_custom_functional_complementarity_ruleset(tmp_path: Path) -> None:

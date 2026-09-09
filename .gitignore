@@ -24,3 +24,5 @@ __pycache__/
 .pytest_cache/
 data/local_backup/
 *:Zone.Identifier
+
+data/databases/negative/thermoplasma_acidophilum/

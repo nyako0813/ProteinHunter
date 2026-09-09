@@ -9,12 +9,15 @@ import re
 from typing import Any
 
 from annotation.gff import GffFeatureLocation, load_gff_feature_map
+from annotation.uniprot_bulk import UniProtDomainInfo, load_uniprot_bulk_domain_map
 from core.cache import JsonCache
+from core.exceptions import ConfigError
 from core.evidence import EvidenceComponent, EvidenceStatus, clamp01, linear_normalize
 from core.fasta import read_fasta_as_components
 from core.models import CandidateScore, ProteinRecord
 from analysis.candidates import get_best_hit
 from analysis.scoring import DEFAULT_WEIGHTS, build_candidate_score
+from analysis.domain_family_map import DomainFamilyMap, load_domain_family_map
 from analysis.functional_complementarity_rules import (
     FunctionalComplementarityRuleset,
     load_functional_complementarity_ruleset,
@@ -563,6 +566,8 @@ def run_interaction_scoring(config: Any, blast_classification: Any) -> Interacti
     ruleset: FunctionalComplementarityRuleset | None = None
     pih_bundle: PihEvidenceBundle | None = None
     string_ppi_bundle: StringPpiBundle | None = None
+    domain_family_map: DomainFamilyMap | None = None
+    uniprot_domain_map: dict[str, UniProtDomainInfo] | None = None
     # Loaded unconditionally (not gated to v2_evidence_based like ruleset/
     # pih_bundle below): Final Score (design spec sections 17-22/27) reuses
     # its category_caps/negative_penalty_cap/tiers for both scoring models,
@@ -580,6 +585,30 @@ def run_interaction_scoring(config: Any, blast_classification: Any) -> Interacti
         if pih_bundle_path is not None:
             pih_bundle = load_pih_evidence_bundle(pih_bundle_path)
             warnings.extend(pih_bundle.warnings)
+
+        # UniProt Pfam/InterPro/SUPFAM domain-family classification layer
+        # (see claude_code_instructions_domain_complementarity_v3.md). Both
+        # paths must be configured to activate -- an unset/missing
+        # domain_family_map_path leaves domain_family_map None, which fully
+        # disables the feature and falls back to the existing free-text
+        # keyword matching, unchanged.
+        domain_family_map_path = getattr(scoring_config, "domain_family_map_path", None)
+        if domain_family_map_path is not None:
+            try:
+                domain_family_map = load_domain_family_map(domain_family_map_path)
+            except ConfigError as exc:
+                # Missing/invalid file: disable this optional layer and fall
+                # back to the existing free-text keyword matching, rather
+                # than aborting the whole run -- see non-destructive
+                # requirement in claude_code_instructions_domain_complementarity_v3.md
+                # section 2. Unlike functional_complementarity_ruleset (the
+                # default ruleset ships in the repo and is always expected
+                # to load), this file is an optional, user-provided add-on.
+                warnings.append(f"domain family map disabled: {exc}")
+            else:
+                uniprot_bulk_export_path = getattr(scoring_config, "uniprot_bulk_export_path", None)
+                if uniprot_bulk_export_path is not None:
+                    uniprot_domain_map = load_uniprot_bulk_domain_map(uniprot_bulk_export_path)
 
     # STRING PPI evidence (Phase 6a) is available to both scoring models --
     # v2's external_ppi_evidence/genomic_context components (M2/M3) and
@@ -649,6 +678,8 @@ def run_interaction_scoring(config: Any, blast_classification: Any) -> Interacti
                 string_ppi_bundle=string_ppi_bundle,
                 coexpression_gse77738_bundle=coexpression_gse77738_bundle,
                 coexpression_gse64349_bundle=coexpression_gse64349_bundle,
+                domain_family_map=domain_family_map,
+                uniprot_domain_map=uniprot_domain_map,
                 collect_evidence_detail=collect_evidence_detail,
             )
         else:
@@ -1428,6 +1459,8 @@ def _rank_source_candidates_v2(
     string_ppi_bundle: StringPpiBundle | None = None,
     coexpression_gse77738_bundle: CoexpressionBundle | None = None,
     coexpression_gse64349_bundle: CoexpressionBundle | None = None,
+    domain_family_map: DomainFamilyMap | None = None,
+    uniprot_domain_map: dict[str, UniProtDomainInfo] | None = None,
     collect_evidence_detail: bool = False,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Evidence-based (scoring model v2) counterpart of _rank_source_candidates."""
@@ -1449,6 +1482,8 @@ def _rank_source_candidates_v2(
                 string_ppi_bundle=string_ppi_bundle,
                 coexpression_gse77738_bundle=coexpression_gse77738_bundle,
                 coexpression_gse64349_bundle=coexpression_gse64349_bundle,
+                domain_family_map=domain_family_map,
+                uniprot_domain_map=uniprot_domain_map,
             )
             pairs.append((candidate.protein_id, row, breakdown, interaction_breakdown))
 
@@ -1595,6 +1630,8 @@ def _score_pair_v2(
     string_ppi_bundle: StringPpiBundle | None = None,
     coexpression_gse77738_bundle: CoexpressionBundle | None = None,
     coexpression_gse64349_bundle: CoexpressionBundle | None = None,
+    domain_family_map: DomainFamilyMap | None = None,
+    uniprot_domain_map: dict[str, UniProtDomainInfo] | None = None,
 ) -> tuple[dict[str, Any], ScoreBreakdown, ScoreBreakdown]:
     """Score one query/candidate pair with the evidence-based engine.
 
@@ -1610,6 +1647,8 @@ def _score_pair_v2(
         string_ppi_bundle=string_ppi_bundle,
         coexpression_gse77738_bundle=coexpression_gse77738_bundle,
         coexpression_gse64349_bundle=coexpression_gse64349_bundle,
+        domain_family_map=domain_family_map,
+        uniprot_domain_map=uniprot_domain_map,
     )
     breakdown = score_candidate(components, engine_config)
     interaction_breakdown = _interaction_only_breakdown(components, engine_config)
@@ -1737,6 +1776,8 @@ def _build_evidence_components_v2(
     string_ppi_bundle: StringPpiBundle | None = None,
     coexpression_gse77738_bundle: CoexpressionBundle | None = None,
     coexpression_gse64349_bundle: CoexpressionBundle | None = None,
+    domain_family_map: DomainFamilyMap | None = None,
+    uniprot_domain_map: dict[str, UniProtDomainInfo] | None = None,
 ) -> tuple[list[EvidenceComponent], dict[str, Any]]:
     """Build the evidence components for one pair, reusing v5's raw signals."""
     components: list[EvidenceComponent] = []
@@ -1845,7 +1886,9 @@ def _build_evidence_components_v2(
             )
         )
 
-    dom_status, dom_value, dom_reason = _domain_complementarity_status_and_value(query, candidate, ruleset)
+    dom_status, dom_value, dom_reason = _domain_complementarity_status_and_value(
+        query, candidate, ruleset, domain_family_map=domain_family_map, uniprot_domain_map=uniprot_domain_map
+    )
     if dom_status is EvidenceStatus.AVAILABLE:
         components.append(
             EvidenceComponent.available(
@@ -2308,7 +2351,11 @@ def _co_occurrence_status_and_value(
 
 
 def _domain_complementarity_status_and_value(
-    query: dict[str, Any], candidate: ProteinRecord, ruleset: FunctionalComplementarityRuleset
+    query: dict[str, Any],
+    candidate: ProteinRecord,
+    ruleset: FunctionalComplementarityRuleset,
+    domain_family_map: DomainFamilyMap | None = None,
+    uniprot_domain_map: dict[str, UniProtDomainInfo] | None = None,
 ) -> tuple[EvidenceStatus, float | None, str]:
     """Evidence-status-aware counterpart of _domain_complementarity_score."""
     query_text = _record_text(query["record"], query["description"])
@@ -2323,6 +2370,20 @@ def _domain_complementarity_status_and_value(
         candidate, ruleset
     ):
         rule_note = "Pfam/CDD functional terms used; "
+
+    if domain_family_map is not None:
+        query_info = uniprot_domain_map.get(query["resolved_old_locus_tag"]) if uniprot_domain_map else None
+        candidate_info = uniprot_domain_map.get(candidate.old_locus_tag or "") if uniprot_domain_map else None
+        query_categories = domain_family_map.categories_for(query_info)
+        candidate_categories = domain_family_map.categories_for(candidate_info)
+        category_match = domain_family_map.find_category_match(query_categories, candidate_categories)
+        if category_match is not None:
+            left, right, note = category_match
+            return (
+                EvidenceStatus.AVAILABLE,
+                1.0,
+                f"domain family match (UniProt Pfam/InterPro): {left} x {right} ({note})",
+            )
 
     match = ruleset.find_match(query_terms, candidate_terms)
     if match is not None:

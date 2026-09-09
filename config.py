@@ -225,6 +225,12 @@ class InteractionScoringConfig:
     # imported; this is a plain-file bridge. See
     # analysis/pih_evidence_bridge.py.
     pih_evidence_bundle: Path | None = None
+    # Domain family map (UniProt Pfam/InterPro/SUPFAM-based domain
+    # complementarity, scoring_model: v2_evidence_based only). Both default
+    # to None (feature disabled, existing free-text keyword matching only)
+    # -- see claude_code_instructions_domain_complementarity_v3.md.
+    domain_family_map_path: Path | None = None
+    uniprot_bulk_export_path: Path | None = None
     evidence_detail_sheet: InteractionEvidenceDetailConfig = field(
         default_factory=InteractionEvidenceDetailConfig
     )
@@ -1139,6 +1145,20 @@ def _validate_interaction_scoring_section(raw: dict[object, object]) -> None:
             "must be a string path."
         )
 
+    domain_family_map_path = section.get("domain_family_map_path")
+    if domain_family_map_path is not None and not isinstance(domain_family_map_path, str):
+        raise ConfigError(
+            "config.yaml value 'interaction_scoring.domain_family_map_path' "
+            "must be a string path."
+        )
+
+    uniprot_bulk_export_path = section.get("uniprot_bulk_export_path")
+    if uniprot_bulk_export_path is not None and not isinstance(uniprot_bulk_export_path, str):
+        raise ConfigError(
+            "config.yaml value 'interaction_scoring.uniprot_bulk_export_path' "
+            "must be a string path."
+        )
+
     evidence_detail_sheet = section.get("evidence_detail_sheet", {})
     if evidence_detail_sheet is None:
         evidence_detail_sheet = {}
@@ -1371,6 +1391,8 @@ def _load_interaction_scoring(
             raw_scoring.get("functional_complementarity_ruleset")
         ),
         pih_evidence_bundle=_optional_path(raw_scoring.get("pih_evidence_bundle")),
+        domain_family_map_path=_optional_path(raw_scoring.get("domain_family_map_path")),
+        uniprot_bulk_export_path=_optional_path(raw_scoring.get("uniprot_bulk_export_path")),
         evidence_detail_sheet=evidence_detail_sheet,
         word_report=word_report,
         ranking_metric=str(

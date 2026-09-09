@@ -1,0 +1,33 @@
+version: v1
+categories:
+  electron_carrier:
+    pfam: [PF12724]
+    interpro: [IPR026816, IPR029039]
+    supfam: [SSF52218]
+    note: "flavodoxin/flavoprotein様の電子伝達体。MA_0361/MA_0363で確認済み(2026-09-09)。ferredoxin/thioredoxin系のPfam ID(PF00111, PF13183, PF00085等)は今後確認次第追加。"
+  sulfur_carrier:
+    pfam: []
+    interpro: []
+    supfam: []
+    note: "TusA/DsrE/DsrF/MoaD/ThiS系。Pfam IDは未確認、今後同じ手順(UniProtバルクJSONから遺伝子名で検索)で埋める。"
+  atp_dependent_activator:
+    pfam: [PF24167]
+    interpro: [IPR055834, IPR014729]
+    supfam: [SSF52402]
+    note: "HUP/PP-loop ATPaseドメイン(Adenine nucleotide alpha hydrolases-like)。MA_4115で確認済み(2026-09-09)。QueC/ThiI/MoeB/Asn_synthase等の同系ファミリーのPfam IDは今後追加。"
+  radical_sam:
+    pfam: []
+    interpro: []
+    supfam: []
+    note: "radical SAM酵素。既存rules(radical_sam_iron_sulfur等)の一般化用に予約、Pfam IDは未確認。"
+
+category_rules:
+  - left: atp_dependent_activator
+    right: electron_carrier
+    note: "ATP依存アデニル化酵素(HUP/PP-loopドメイン)と電子伝達体/フラボプロテイン様タンパク質"
+  - left: atp_dependent_activator
+    right: sulfur_carrier
+    note: "ATP依存アデニル化酵素(HUP/PP-loopドメイン)と硫黄キャリア"
+  - left: radical_sam
+    right: electron_carrier
+    note: "radical SAM酵素と電子伝達体(既存radical_sam_ferredoxinルールの一般化)"
