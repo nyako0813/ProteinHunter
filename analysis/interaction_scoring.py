@@ -1235,10 +1235,33 @@ def _resolve_query(query: dict[str, str], index: int, records: dict[str, Protein
     query_id = query["protein_id"] or query["old_locus_tag"] or f"query_{index}"
     if matched_record is not None:
         resolved_protein_id = matched_record.protein_id
-        resolved_old_locus_tag = matched_record.old_locus_tag or ""
         description = matched_record.description
         status = "resolved"
-        notes = "resolved from target records"
+        if matched_record.old_locus_tag:
+            # Normal case: the target FASTA/GFF carried an old_locus_tag for
+            # this record.
+            resolved_old_locus_tag = matched_record.old_locus_tag
+            notes = "resolved from target records"
+        elif query["old_locus_tag"]:
+            # Some target FASTAs (this project has hit at least one -- see
+            # claude/implementation_status_scoring_v2.md) carry no
+            # old_locus_tag on any record at all, even though the query
+            # resolved fine by protein_id/sequence. STRING PPI data for a
+            # species is indexed by old_locus_tag (MA_#### form), so without
+            # one, every STRING lookup for this query is silently MISSING
+            # for every candidate pair -- not because STRING lacks data, but
+            # because there is no MA_#### tag to look it up by. The
+            # query_proteins.old_locus_tag config field exists for exactly
+            # this case: fall back to it when the record itself has none.
+            # This field stays optional (not every query has a known
+            # old_locus_tag) -- when both are empty, resolved_old_locus_tag
+            # is simply "" as before, and STRING evidence for this query
+            # stays MISSING, same as today.
+            resolved_old_locus_tag = query["old_locus_tag"]
+            notes = "resolved from target records (old_locus_tag from config; not present on the target record itself)"
+        else:
+            resolved_old_locus_tag = ""
+            notes = "resolved from target records"
     elif sequence:
         resolved_protein_id = query["protein_id"]
         resolved_old_locus_tag = query["old_locus_tag"]
@@ -2207,12 +2230,19 @@ def _coexpression_status_and_value(
     absent from this dataset's gene list, or has zero-variance expression
     across the retained samples (correlation undefined) -- see
     CoexpressionBundle.lookup. Otherwise AVAILABLE; ``normalized_value`` is
-    the pair's correlation expressed as a percentile rank within the query
-    gene's own background correlation distribution for this dataset, not the
-    raw correlation itself -- see claude/phase6b_coexpression_design.md for
-    why a fixed linear map of Pearson r is not used (GSE64349's small sample
-    count badly inflates its background gene-pair correlation, making a raw
-    r=0.7 mean something very different there than in GSE77738).
+    the pair's correlation expressed as a **mutual rank**: the geometric
+    mean of its percentile within the query gene's own background
+    correlation distribution and its percentile within the candidate gene's
+    own background distribution, not the raw correlation itself and not a
+    one-sided percentile either -- see
+    claude/coexpression_mutual_rank_normalization.md for why a one-sided
+    percentile alone still systematically favors coexpression "hub" genes
+    (highly correlated with most of the genome for reasons unrelated to the
+    query), and claude/phase6b_coexpression_design.md for the earlier,
+    still-relevant finding that a fixed linear map of Pearson r is not used
+    at all (GSE64349's small sample count badly inflates its background
+    gene-pair correlation, making a raw r=0.7 mean something very different
+    there than in GSE77738).
     """
     if bundle is None:
         return EvidenceStatus.NOT_RUN, None, "GEO coexpression evidence is disabled in configuration"
@@ -2227,7 +2257,9 @@ def _coexpression_status_and_value(
         EvidenceStatus.AVAILABLE,
         pair.percentile,
         f"{dataset_label} coexpression: r={pair.correlation:.2f}, "
-        f"percentile={pair.percentile:.2f} (n={bundle.n_samples} samples)",
+        f"mutual_percentile={pair.percentile:.2f} "
+        f"(query_side={pair.query_percentile:.2f}, candidate_side={pair.candidate_percentile:.2f}, "
+        f"n={bundle.n_samples} samples)",
     )
 
 

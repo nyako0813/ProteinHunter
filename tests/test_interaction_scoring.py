@@ -258,6 +258,67 @@ def test_resolve_cdd_annotation_targets_deduplicates_query_already_in_a_bucket()
 
 
 # ---------------------------------------------------------------------------
+# _resolve_query old_locus_tag fallback tests
+# ---------------------------------------------------------------------------
+
+
+def test_resolved_old_locus_tag_falls_back_to_configured_value() -> None:
+    """When the matched target record has no old_locus_tag (e.g. a target
+    FASTA that carries none for any record), the query_proteins.old_locus_tag
+    config value should be used instead, so STRING lookups (indexed by
+    old_locus_tag) have something to match against."""
+    query_record = record("query_protein", old_locus_tag="")
+    cls = build_classification(all_records={"query_protein": query_record})
+    cfg = interaction_config(
+        enabled=True,
+        query_proteins=(InteractionQueryConfig("query_protein", "MA_4115", ""),),
+        candidate_sources=all_sources_disabled(),
+    )
+
+    result = run_interaction_scoring(cfg, cls)
+
+    assert result is not None
+    assert result.query_rows[0]["resolved_old_locus_tag"] == "MA_4115"
+    assert "config" in result.query_rows[0]["notes"]
+
+
+def test_resolved_old_locus_tag_prefers_target_record_over_configured_value() -> None:
+    """The target record's own old_locus_tag is authoritative data and must
+    win over a (possibly stale or mistaken) manually configured value."""
+    query_record = record("query_protein", old_locus_tag="MA_0001")
+    cls = build_classification(all_records={"query_protein": query_record})
+    cfg = interaction_config(
+        enabled=True,
+        query_proteins=(InteractionQueryConfig("query_protein", "MA_9999", ""),),
+        candidate_sources=all_sources_disabled(),
+    )
+
+    result = run_interaction_scoring(cfg, cls)
+
+    assert result is not None
+    assert result.query_rows[0]["resolved_old_locus_tag"] == "MA_0001"
+
+
+def test_resolved_old_locus_tag_stays_empty_when_neither_source_has_it() -> None:
+    """old_locus_tag remains optional: with no record tag and no config
+    value, resolution should still succeed with an empty old_locus_tag,
+    exactly as before this fallback was added."""
+    query_record = record("query_protein", old_locus_tag="")
+    cls = build_classification(all_records={"query_protein": query_record})
+    cfg = interaction_config(
+        enabled=True,
+        query_proteins=(InteractionQueryConfig("query_protein", "", ""),),
+        candidate_sources=all_sources_disabled(),
+    )
+
+    result = run_interaction_scoring(cfg, cls)
+
+    assert result is not None
+    assert result.query_rows[0]["resolved_old_locus_tag"] == ""
+    assert result.query_rows[0]["resolution_status"] == "resolved"
+
+
+# ---------------------------------------------------------------------------
 # resolve_protein_hunter_scores tests (M1: protein_hunter_score scope extension)
 # ---------------------------------------------------------------------------
 

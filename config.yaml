@@ -285,8 +285,8 @@ interaction_scoring:
   # final_score_tier columns keep their original values either way -- only
   # candidate_rank/row order change.
   #ranking_metric: interaction_priority_score
-  domain_family_map_path: null   # 例: config/domain_family_map.v1.yaml
-  uniprot_bulk_export_path: null # 例: data/databases/uniprot/uniprotkb_methanosarcina_acetivorans.json
+  domain_family_map_path: config/domain_family_map.v1.yaml
+  uniprot_bulk_export_path: data/databases/uniprot/uniprotkb_methanosarcina_acetivorans.json
 
   # Optional NCBI taxonomy id for STRING (string-db.org) PPI evidence
   # (Phase 6a, used only by scoring_model: v2_evidence_based; see

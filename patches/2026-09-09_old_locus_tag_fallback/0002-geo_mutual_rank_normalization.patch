@@ -1,0 +1,546 @@
+From f86eed8f3c0d49f3a27e81bb847150865e3c1f4b Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 5 Sep 2026 15:49:38 +0000
+Subject: [PATCH] Normalize GEO coexpression scores with Mutual Rank instead of
+ a one-sided percentile
+
+A live run against MA_4115 (351 candidates, after the query old_locus_tag
+fallback fix made STRING/GEO evidence actually reach this query) found
+coexpression_gse77738/coexpression_gse64349 scoring roughly half of all
+candidates above the 0.7 percentile -- a properly discriminating signal
+should center near 0.5. The two datasets' percentiles also correlated at
+r=0.549 across 291 shared candidates despite being independent
+experiments, too much agreement to be query-specific signal. STRING's own
+string_cooccurrence/string_neighborhood, by contrast, stayed properly
+sparse (median 0) over the same candidate set.
+
+Root cause: normalized_value was each pair's correlation percentile-ranked
+only against the QUERY gene's own background distribution. That answers
+"does the query find this candidate unusually correlated?" but never asks
+the symmetric question "does the candidate find the query unusually
+correlated?" -- so a candidate that is simply broadly correlated with much
+of the genome (a coexpression "hub", commonly just a highly and precisely
+measured gene, for reasons that have nothing to do with the query) still
+scores high from the query's side alone.
+
+Fix: normalized_value is now each pair's Mutual Rank -- the geometric mean
+of the correlation's percentile from the query's side and from the
+candidate's own side (the same idea CoNekT/ATTED-II-style coexpression
+network tools use, adapted to already-percentile-ranked values here). A
+hub's own background is elevated too, so its candidate-side percentile
+deflates even when its query-side percentile looks fine; a truly specific
+partner keeps a high percentile on both sides. This is a normalization
+requested explicitly in place of exclusion: GSE77738 stays in the score
+(Phase 6b's separate, still-valid decision to exclude it specifically from
+interaction_score's sum is unaffected).
+
+Implementation:
+- analysis/coexpression_bridge.py: split the old CoexpressionPairValue into
+  an internal _OneSidedCoexpression (unchanged on-disk cache shape) and a
+  new public CoexpressionPairValue carrying query_percentile/
+  candidate_percentile/percentile (their geometric mean). CoexpressionBundle
+  now retains the z-score matrix so lookup() can derive a candidate's own
+  background on demand, memoized in-process only (not persisted to the
+  JsonCache -- candidates number in the hundreds per run, unlike the
+  handful of configured queries the disk cache is sized for; the
+  matrix-vector product itself is cheap enough not to need persisting).
+  Existing on-disk cache files from before this change keep working
+  unchanged.
+- analysis/interaction_scoring.py: explanation text now reports mutual/
+  query-side/candidate-side percentiles together for auditability.
+- tests/test_coexpression_bridge.py: new
+  test_gse77738_mutual_rank_deflates_hub_genes constructs a synthetic
+  hub-vs-specific-partner dataset and checks the hub's mutual rank drops
+  below its own one-sided percentile and below the true partner's.
+- claude/coexpression_mutual_rank_normalization.md records the real-data
+  finding, root cause, and design decision.
+
+Also noted (not fixed here, out of scope): both coexpression loaders
+unconditionally re-read/re-download their source file before ever checking
+whether a query's result is already cached, defeating the cache when the
+source file is absent -- a pre-existing, independent bug already caught by
+tests/test_coexpression_bridge.py::test_result_is_cached_and_reused_without_reparsing
+and tests/test_interaction_scoring.py::test_coexpression_gse77738_reuses_cache_across_runs
+(both fail identically on unmodified main, confirmed before this commit).
+
+Full suite: 503 passed, the same 2 pre-existing failures above (unrelated
+to this change) still failing.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01X6s5iGG566Cc6XqL4sTs3L
+---
+ analysis/coexpression_bridge.py               | 133 ++++++++++++++++--
+ analysis/interaction_scoring.py               |  23 ++-
+ .../coexpression_mutual_rank_normalization.md | 122 ++++++++++++++++
+ tests/test_coexpression_bridge.py             |  61 ++++++++
+ 4 files changed, 318 insertions(+), 21 deletions(-)
+ create mode 100644 claude/coexpression_mutual_rank_normalization.md
+
+diff --git a/analysis/coexpression_bridge.py b/analysis/coexpression_bridge.py
+index 85b0673..12bbc85 100644
+--- a/analysis/coexpression_bridge.py
++++ b/analysis/coexpression_bridge.py
+@@ -15,6 +15,29 @@ badly inflates its background gene-pair correlation, so ``normalized_value``
+ is instead each pair's percentile rank within its own query gene's
+ background correlation distribution).
+ 
++See ``claude/coexpression_mutual_rank_normalization.md`` for a second,
++later finding along the same lines: even the percentile-rank fix above is
++one-sided (ranked only against the *query* gene's background), so a
++candidate gene that is simply highly and precisely measured -- a
++coexpression "hub" broadly correlated with most of the genome, for reasons
++that have nothing to do with the query -- still lands at a high percentile.
++A live run against MA_4115 found roughly half of all 351 candidates scoring
++above the 0.7 percentile on GSE77738 alone (a properly discriminating
++signal should center near 0.5 with most pairs far from the extremes), and a
++Pearson correlation of 0.55 between GSE77738's and GSE64349's *independent*
++percentiles for the same 291 candidates -- too much cross-dataset agreement
++to be query-specific signal, and consistent with a shared "hub" property of
++those genes rather than a real relationship to the query. ``normalized_value``
++is therefore now each pair's **mutual rank**: the geometric mean of the
++correlation's percentile from the query's side and from the candidate's own
++side (a gene that is highly correlated with nearly everything has its own
++background shifted high too, which deflates exactly this case) -- the same
++idea CoNekT/ATTED-II-style coexpression network tools call "Mutual Rank",
++adapted here to already-percentile-ranked values. This is a normalization,
++not an exclusion: GSE77738 stays in the score (see the module-level note
++above about the *other*, earlier finding that led here), it is just no
++longer scored one-sided.
++
+ Data license: GEO is an NCBI/NIH public database with no login, fee, or
+ reuse restriction; there is no license text comparable to STRING's CC BY 4.0
+ to enforce programmatically. Crediting the original studies by PMID
+@@ -25,9 +48,10 @@ license requirement -- see ``output/excel.py``'s Index sheet.
+ from __future__ import annotations
+ 
+ import gzip
++import math
+ import re
+ import shutil
+-from dataclasses import dataclass
++from dataclasses import dataclass, field
+ from pathlib import Path
+ 
+ import numpy as np
+@@ -106,6 +130,19 @@ def _to_old_locus_tag(gene_locus: object) -> str | None:
+     return f"MA_{match.group(1)}"
+ 
+ 
++@dataclass(slots=True, frozen=True)
++class _OneSidedCoexpression:
++    """Internal: one gene's correlation with another, ranked only within the
++    FIRST gene's own background distribution. This is the shape actually
++    persisted to the on-disk JsonCache (keyed by that first gene) -- see
++    CoexpressionPairValue, the public, symmetrized value ``lookup()``
++    actually returns, built from two of these (query-side and
++    candidate-side) on demand."""
++
++    correlation: float
++    percentile: float
++
++
+ @dataclass(slots=True, frozen=True)
+ class CoexpressionPairValue:
+     """One query/candidate pair's coexpression evidence from one GEO dataset."""
+@@ -113,11 +150,25 @@ class CoexpressionPairValue:
+     correlation: float
+     """Pearson correlation of log2(RPKM+1) across the dataset's retained samples."""
+ 
++    query_percentile: float
++    """This pair's correlation, as a 0.0-1.0 rank within the QUERY gene's own
++    background correlation distribution (against every other known gene)."""
++
++    candidate_percentile: float
++    """The same correlation value, as a 0.0-1.0 rank within the CANDIDATE
++    gene's own background distribution instead. A gene that is simply
++    correlated with most of the genome (a coexpression "hub", often just a
++    highly and precisely measured gene, for reasons unrelated to the query)
++    has its own background shifted high too, so this side deflates exactly
++    that case rather than rewarding it."""
++
+     percentile: float
+-    """This pair's correlation, as a 0.0-1.0 rank within the query gene's own
+-    background correlation distribution (against every other known gene in
+-    this dataset). See the module docstring for why a fixed linear map of
+-    ``correlation`` is not used instead."""
++    """The actual score: the geometric mean of ``query_percentile`` and
++    ``candidate_percentile`` (a "Mutual Rank", see the module docstring).
++    High only when both sides agree this pair is unusually correlated
++    relative to their own typical partners -- this is what
++    ``normalized_value``/the Excel explanation text use, not either
++    one-sided percentile alone."""
+ 
+ 
+ @dataclass(slots=True, frozen=True)
+@@ -126,13 +177,26 @@ class CoexpressionBundle:
+ 
+     dataset_id: str
+     known_tags: frozenset[str]
+-    pairs_by_query: dict[str, dict[str, CoexpressionPairValue]]
++    pairs_by_query: dict[str, dict[str, _OneSidedCoexpression]]
+     warnings: tuple[str, ...]
+     n_samples: int = 0
+     """Number of retained (post-filtering) samples the correlations were
+     computed from -- exposed for explanation text and testing, since this
+     dataset's small, hand-curated sample counts are exactly what motivated
+     the percentile-based normalization (see the module docstring)."""
++    _gene_order: tuple[str, ...] = ()
++    _gene_index: dict[str, int] = field(default_factory=dict)
++    _z_scores: np.ndarray = field(default_factory=lambda: np.zeros((0, 0)))
++    """Retained purely so ``lookup()`` can derive a candidate gene's own
++    background distribution on demand (see ``_percentile_from_gene_side``).
++    Empty for ``_empty_bundle`` and for datasets that failed to load."""
++    _background_cache: dict[str, np.ndarray] = field(default_factory=dict)
++    """Per-gene sorted background correlations, memoized in-process only
++    (never written to the on-disk JsonCache): the matrix-vector product
++    behind it is microseconds, and persisting one full background per
++    *candidate* gene -- there can be hundreds per run, unlike the handful of
++    configured query genes the on-disk cache is sized for -- would bloat
++    that cache file several-hundred-fold for no real benefit."""
+ 
+     def lookup(self, query_old_locus_tag: str, candidate_old_locus_tag: str) -> CoexpressionPairValue | None:
+         """Return coexpression evidence for one pair, or None when unavailable.
+@@ -151,7 +215,45 @@ class CoexpressionBundle:
+             return None
+         if query_old_locus_tag not in self.known_tags or candidate_old_locus_tag not in self.known_tags:
+             return None
+-        return self.pairs_by_query.get(query_old_locus_tag, {}).get(candidate_old_locus_tag)
++        one_sided = self.pairs_by_query.get(query_old_locus_tag, {}).get(candidate_old_locus_tag)
++        if one_sided is None:
++            return None
++
++        candidate_percentile = self._percentile_from_gene_side(candidate_old_locus_tag, one_sided.correlation)
++        if candidate_percentile is None:
++            # Not expected in practice -- candidate_old_locus_tag was just
++            # confirmed correlatable above, from the query's side -- but
++            # degrade to the one-sided percentile rather than losing the
++            # pair if it ever happens.
++            candidate_percentile = one_sided.percentile
++
++        mutual = math.sqrt(max(one_sided.percentile, 0.0) * max(candidate_percentile, 0.0))
++        return CoexpressionPairValue(
++            correlation=one_sided.correlation,
++            query_percentile=one_sided.percentile,
++            candidate_percentile=candidate_percentile,
++            percentile=mutual,
++        )
++
++    def _percentile_from_gene_side(self, gene_tag: str, value: float) -> float | None:
++        """Percentile rank of ``value`` within ``gene_tag``'s own background
++        correlation distribution (every other known gene, computed from
++        ``gene_tag``'s side instead of the query's). Returns None when
++        ``gene_tag`` has no usable expression profile (absent from the
++        dataset, or zero-variance)."""
++        idx = self._gene_index.get(gene_tag)
++        if idx is None:
++            return None
++        sorted_background = self._background_cache.get(gene_tag)
++        if sorted_background is None:
++            row_correlations = (self._z_scores @ self._z_scores[idx]) / self.n_samples
++            mask = np.ones(len(self._gene_order), dtype=bool)
++            mask[idx] = False
++            sorted_background = np.sort(row_correlations[mask])
++            self._background_cache[gene_tag] = sorted_background
++        if len(sorted_background) == 0:
++            return None
++        return float(np.searchsorted(sorted_background, value, side="right")) / len(sorted_background)
+ 
+ 
+ def _empty_bundle(dataset_id: str) -> CoexpressionBundle:
+@@ -251,7 +353,7 @@ def _build_bundle_from_matrix(
+     n_samples = values.shape[1]
+     gene_index = {gene: i for i, gene in enumerate(gene_order)}
+ 
+-    pairs_by_query: dict[str, dict[str, CoexpressionPairValue]] = {}
++    pairs_by_query: dict[str, dict[str, _OneSidedCoexpression]] = {}
+     for query_tag in dict.fromkeys(tag for tag in query_old_locus_tags if tag):
+         cached = cache.get(cache_namespace, query_tag)
+         if isinstance(cached, dict):
+@@ -274,13 +376,13 @@ def _build_bundle_from_matrix(
+         other_correlations = correlations[other_mask]
+         sorted_others = np.sort(other_correlations)
+ 
+-        pairs: dict[str, CoexpressionPairValue] = {}
++        pairs: dict[str, _OneSidedCoexpression] = {}
+         for gene, idx in gene_index.items():
+             if gene == query_tag:
+                 continue
+             r = float(correlations[idx])
+             percentile = float(np.searchsorted(sorted_others, r, side="right")) / len(sorted_others)
+-            pairs[gene] = CoexpressionPairValue(correlation=r, percentile=percentile)
++            pairs[gene] = _OneSidedCoexpression(correlation=r, percentile=percentile)
+ 
+         cache.set(cache_namespace, query_tag, _encode_pairs_for_cache(pairs))
+         pairs_by_query[query_tag] = pairs
+@@ -291,20 +393,23 @@ def _build_bundle_from_matrix(
+         pairs_by_query=pairs_by_query,
+         warnings=tuple(warnings),
+         n_samples=n_samples,
++        _gene_order=tuple(gene_order),
++        _gene_index=dict(gene_index),
++        _z_scores=z_scores,
+     )
+ 
+ 
+-def _encode_pairs_for_cache(pairs: dict[str, CoexpressionPairValue]) -> dict[str, dict[str, float]]:
++def _encode_pairs_for_cache(pairs: dict[str, _OneSidedCoexpression]) -> dict[str, dict[str, float]]:
+     return {tag: {"correlation": v.correlation, "percentile": v.percentile} for tag, v in pairs.items()}
+ 
+ 
+-def _decode_cached_pairs(cached: dict) -> dict[str, CoexpressionPairValue]:
+-    decoded: dict[str, CoexpressionPairValue] = {}
++def _decode_cached_pairs(cached: dict) -> dict[str, _OneSidedCoexpression]:
++    decoded: dict[str, _OneSidedCoexpression] = {}
+     for tag, value in cached.items():
+         if not isinstance(value, dict):
+             continue
+         try:
+-            decoded[tag] = CoexpressionPairValue(
++            decoded[tag] = _OneSidedCoexpression(
+                 correlation=float(value.get("correlation", 0.0)),
+                 percentile=float(value.get("percentile", 0.0)),
+             )
+diff --git a/analysis/interaction_scoring.py b/analysis/interaction_scoring.py
+index 4317c34..3717e43 100644
+--- a/analysis/interaction_scoring.py
++++ b/analysis/interaction_scoring.py
+@@ -2187,12 +2187,19 @@ def _coexpression_status_and_value(
+     absent from this dataset's gene list, or has zero-variance expression
+     across the retained samples (correlation undefined) -- see
+     CoexpressionBundle.lookup. Otherwise AVAILABLE; ``normalized_value`` is
+-    the pair's correlation expressed as a percentile rank within the query
+-    gene's own background correlation distribution for this dataset, not the
+-    raw correlation itself -- see claude/phase6b_coexpression_design.md for
+-    why a fixed linear map of Pearson r is not used (GSE64349's small sample
+-    count badly inflates its background gene-pair correlation, making a raw
+-    r=0.7 mean something very different there than in GSE77738).
++    the pair's correlation expressed as a **mutual rank**: the geometric
++    mean of its percentile within the query gene's own background
++    correlation distribution and its percentile within the candidate gene's
++    own background distribution, not the raw correlation itself and not a
++    one-sided percentile either -- see
++    claude/coexpression_mutual_rank_normalization.md for why a one-sided
++    percentile alone still systematically favors coexpression "hub" genes
++    (highly correlated with most of the genome for reasons unrelated to the
++    query), and claude/phase6b_coexpression_design.md for the earlier,
++    still-relevant finding that a fixed linear map of Pearson r is not used
++    at all (GSE64349's small sample count badly inflates its background
++    gene-pair correlation, making a raw r=0.7 mean something very different
++    there than in GSE77738).
+     """
+     if bundle is None:
+         return EvidenceStatus.NOT_RUN, None, "GEO coexpression evidence is disabled in configuration"
+@@ -2207,7 +2214,9 @@ def _coexpression_status_and_value(
+         EvidenceStatus.AVAILABLE,
+         pair.percentile,
+         f"{dataset_label} coexpression: r={pair.correlation:.2f}, "
+-        f"percentile={pair.percentile:.2f} (n={bundle.n_samples} samples)",
++        f"mutual_percentile={pair.percentile:.2f} "
++        f"(query_side={pair.query_percentile:.2f}, candidate_side={pair.candidate_percentile:.2f}, "
++        f"n={bundle.n_samples} samples)",
+     )
+ 
+ 
+diff --git a/claude/coexpression_mutual_rank_normalization.md b/claude/coexpression_mutual_rank_normalization.md
+new file mode 100644
+index 0000000..a3b862b
+--- /dev/null
++++ b/claude/coexpression_mutual_rank_normalization.md
+@@ -0,0 +1,122 @@
++# GEO共発現スコアのMutual Rank正規化(coexpression_gse77738/gse64349)
++
++2026-09-05、MA_4115クエリでの実データ確認を発端に実装した記録。
++
++## 背景・きっかけ
++
++`consider_cross_species_matches`スイッチ対応の一環で、クエリ(MA_4115)の
++`resolved_old_locus_tag`が空になっていた不具合(target FASTAにold_locus_tag
++情報が存在しないデータセットで、protein_id解決時にold_locus_tagが引き継がれ
++ない問題)を修正し、`query_proteins[].old_locus_tag`をフォールバックとして
++使うようにした(別コミット)。この修正によりSTRING/GEO共発現の両方が初めて
++MA_4115クエリに対して実際に機能するようになったが、その結果順位が大きく
++入れ替わり、ユーザーから「STRINGは疎(正しく機能)なのに対し、GEO共発現の
++値が広範囲に高すぎるのではないか」という指摘があった。
++
++## 実データでの確認
++
++MA_4115クエリ、351候補(interaction_scoring評価対象)で集計:
++
++| 指標 | 中央値 | 平均 | 0.7超の割合 |
++|---|---:|---:|---:|
++| `coexpression_gse77738`(既存の一方向percentile) | 0.663 | 0.621 | 47.7% |
++| `coexpression_gse64349`(既存の一方向percentile) | 0.648 | 0.605 | 42.4% |
++| `string_cooccurrence`(参考、STRING pscore) | 0.0 | 0.073 | 0.0% |
++
++無シグナルなら中央値0.5付近に分布するはずが、GSE77738/GSE64349はいずれも
++半数近くが0.7超という明らかな底上げが見られた。一方STRING側は健全(疎)に
++機能していた。さらに、GSE77738とGSE64349は独立したデータセットにも
++関わらず、両方に値を持つ291候補間でPearson r=0.549(両方0.7超が33.7%、
++両方0.3未満が5.8%)という強い相関があり、「クエリ固有の共発現シグナル」
++というよりも「多くの候補に共通する何らかの性質(coexpressionハブ、または
++測定精度由来のバイアス)」が両データセットに共通して乗っていることを示唆
++していた。
++
++これはPhase 6b(`claude/phase6b_coexpression_design.md`)で既に指摘されていた
++「GSE64349の小標本による背景相関インフレ」および「GSE77738のAlphaFold3
++陰性セットでの逆転」と同根だが、既存の一方向(クエリ側のみ)percentile-rank
++正規化だけでは解消しきれていなかったことが、MA_4115の実データで改めて
++定量的に確認された形。
++
++## ユーザーの要望
++
++「除外とまではいかないまでも、スコアを正規化する必要はあるように思う」との
++方針。既存のweight調整(`coexpression_gse64349`の1/3重み)や`interaction_score`
++からの`coexpression_gse77738`除外(PR #11)とは別に、スコアそのものの計算式を
++見直す方向で対応した。
++
++## 原因分析
++
++既存の実装(`analysis/coexpression_bridge.py::_build_bundle_from_matrix`)は、
++相関値をクエリ遺伝子自身の背景分布(クエリ対他の全遺伝子)に対する
++percentile rankに変換していた。これは「クエリから見てこの候補は他の遺伝子
++より際立って相関が高いか」だけを見ており、「候補から見てクエリは他の遺伝子
++より際立って相関が高いか」を見ていない。そのため、単に多くの遺伝子と広く
++相関する遺伝子(coexpressionの「ハブ」。実際には成長期に伴う発現量変化を
++強く受ける遺伝子や、測定精度が高くノイズが少ない高発現遺伝子である場合が
++多い)が、クエリとの関係とは無関係に高スコアを得てしまう。
++
++## 対応: Mutual Rank正規化
++
++`normalized_value`を、クエリ側percentileと候補側percentile(候補遺伝子自身の
++背景分布に対する、同じ相関値のpercentile)の幾何平均に変更した。
++CoNekT/ATTED-IIなど共発現ネットワーク解析ツールが標準的に採用している
++"Mutual Rank"の考え方を、既にpercentile化された値に適用したもの。
++
++- 真にクエリ特異的なパートナー(候補自身は他の遺伝子とあまり相関しない)は、
++  候補側から見てもクエリとの相関が際立つため、両側percentileが高く保たれる。
++- ハブ遺伝子(候補が多くの遺伝子と広く相関する)は、候補自身の背景分布も
++  底上げされているため、候補側percentileは相対的に下がり、結果として
++  mutual rankも下がる。
++
++除外ではなく正規化なので、GSE77738/GSE64349とも計算対象からは外していない
++(Phase 6bで`interaction_score`から除外されたGSE77738の扱いは無変更)。
++
++### 実装
++
++- `analysis/coexpression_bridge.py`:
++  - 内部専用の`_OneSidedCoexpression`(旧`CoexpressionPairValue`相当、
++    ディスクキャッシュの保存形式は無変更)と、公開用の新しい
++    `CoexpressionPairValue`(`query_percentile`/`candidate_percentile`/
++    `percentile`(mutual)の3値を保持)に分離。
++  - `CoexpressionBundle`に相関行列(`_z_scores`/`_gene_index`/`_gene_order`)を
++    保持するフィールドを追加し、`lookup()`が候補側の背景分布をオンデマンドで
++    計算できるようにした。候補ごとの背景分布はプロセス内メモリのみで
++    メモ化し(`_background_cache`)、ディスクキャッシュ(JsonCache)には
++    書き込まない。理由: 候補は1クエリあたり数百件になり得るため、
++    クエリ用ディスクキャッシュと同じ方式で全候補分の背景分布(遺伝子ごと
++    ~数千エントリ)を永続化すると、キャッシュファイルが数百倍に膨れ上がる。
++    行列演算自体はマイクロ秒オーダーで安価なため、プロセスごとの再計算で
++    十分と判断した。
++  - 既存のディスクキャッシュ形式(`{correlation, percentile}`)は変更して
++    いないため、この修正適用後もユーザーの既存キャッシュファイルは
++    そのまま再利用される(再ダウンロード不要)。
++- `analysis/interaction_scoring.py::_coexpression_status_and_value`:
++  説明文(`explanation`)にmutual/query_side/candidate_sideの3値を全て表示する
++  ように変更(監査性のため)。
++
++### テスト
++
++`tests/test_coexpression_bridge.py`に、クエリ特異的パートナーとハブ遺伝子を
++明示的に作り分けた合成データセットで検証するテストを追加
++(`test_gse77738_mutual_rank_deflates_hub_genes`)。ハブは一方向percentileの
++時点で既にパートナーより低いが(0.6 vs 1.0)、mutual rank適用後はさらに差が
++開くこと(候補側percentile 0.4 vs 1.0、mutual 0.49 vs 1.0)を確認済み。
++既存テストは全てpassすることを確認(フルスイート503 passed、既存の2件の
++失敗はGSE77738キャッシュ再利用に関する別の既知の不具合で本変更とは無関係、
++下記参照)。
++
++## ついでに発見した別の不具合(今回は未対応)
++
++`load_gse77738_coexpression_bundle`/`load_gse64349_coexpression_bundle`は、
++ディスクキャッシュにクエリの結果が既に存在する場合でも、ソースファイル
++(`GSE77738_ReadCounts.xls`等)の存在チェック・読み込みを無条件に先に実行して
++しまう。ソースファイルが削除/未取得の状態だとオフライン環境で再ダウンロード
++を試みて失敗し、キャッシュが存在するにも関わらず空バンドルにフォールバック
++してしまう。`tests/test_coexpression_bridge.py::test_result_is_cached_and_reused_without_reparsing`
++と`tests/test_interaction_scoring.py::test_coexpression_gse77738_reuses_cache_across_runs`
++が既にこれを検出していた(本コミット適用前のmainでも同じく失敗することを
++確認済み)。今回のMutual Rank対応とは別の独立した不具合のため、今回は
++修正していない。対応する場合は、ソースファイル読み込みの前に、設定された
++全クエリタグがキャッシュに揃っているかを確認し、揃っていればファイル
++読み込み自体をスキップする形になる見込み。
+diff --git a/tests/test_coexpression_bridge.py b/tests/test_coexpression_bridge.py
+index 6f54d24..004f739 100644
+--- a/tests/test_coexpression_bridge.py
++++ b/tests/test_coexpression_bridge.py
+@@ -134,6 +134,67 @@ def test_gse77738_zero_variance_gene_is_unavailable_not_an_error(tmp_path: Path)
+     assert any("zero-variance" in w for w in bundle.warnings)
+ 
+ 
++def test_gse77738_mutual_rank_deflates_hub_genes(tmp_path: Path) -> None:
++    """A gene correlated with almost everything (a coexpression "hub") must
++    score lower than a gene specifically correlated with the query alone,
++    even though a one-sided (query-side-only) percentile would still rate
++    the hub fairly highly -- this is the whole point of the mutual-rank
++    normalization (see claude/coexpression_mutual_rank_normalization.md)."""
++    path = tmp_path / "coexpression" / "GSE77738_ReadCounts.xls"
++    path.parent.mkdir(parents=True, exist_ok=True)
++
++    # QUERY and PARTNER share a pattern ("specific") unrelated to the trend
++    # below, so PARTNER is correlated with QUERY specifically and with
++    # nothing else. HUB and the two filler genes all ride the same shared
++    # trend (an affine transform of it, so correlation among them is
++    # exactly 1.0), making HUB broadly correlated with most of the dataset
++    # for reasons that have nothing to do with the query.
++    specific = [5, 1, 4, 2, 6, 3]
++    trend = [1, 2, 3, 4, 5, 6]
++
++    gene_loci = ["MA0001", "MA0002", "MA0003", "MA0004", "MA0005", "MA0006"]
++    gene_names = ["-"] * 6
++    values = {
++        "MA0001": specific,  # query
++        "MA0002": specific,  # partner: tied to the query specifically
++        "MA0003": trend,  # hub: tied to a trend several other genes share
++        "MA0004": [v + 1 for v in trend],  # filler riding the same trend
++        "MA0005": [v * 2 for v in trend],  # filler riding the same trend
++        "MA0006": [v * 3 for v in trend],  # filler riding the same trend
++    }
++    data = {"Gene Locus": gene_loci, "Gene Name": gene_names}
++    for col_index, col in enumerate(_SAMPLE_COLUMNS):
++        data[col] = [values[gene][col_index] for gene in gene_loci]
++
++    df = pd.DataFrame(data)
++    with pd.ExcelWriter(path, engine="openpyxl") as writer:
++        df.to_excel(writer, sheet_name="Raw Read Counts", index=False)
++        df.to_excel(writer, sheet_name="RPKM Normalized Read Counts", index=False)
++
++    cache = JsonCache(tmp_path / "jsoncache")
++    bundle = load_gse77738_coexpression_bundle(True, ["MA_0001"], cache, tmp_path)
++
++    partner = bundle.lookup("MA_0001", "MA_0002")
++    hub = bundle.lookup("MA_0001", "MA_0003")
++    assert partner is not None and hub is not None
++
++    # The hub's one-sided, query-side percentile alone already trails the
++    # true specific partner's (0.6 vs 1.0, by construction)...
++    assert hub.query_percentile == pytest.approx(0.6, abs=1e-6)
++    assert partner.query_percentile == pytest.approx(1.0, abs=1e-6)
++    # ...but from the HUB's *own* side, correlating with the query is even
++    # less remarkable (it correlates just as strongly with the filler
++    # genes), while from the PARTNER's own side, the query is its one
++    # standout correlation -- the mutual rank must reflect that gap, not
++    # just the one-sided view.
++    assert hub.candidate_percentile == pytest.approx(0.4, abs=1e-6)
++    assert partner.candidate_percentile == pytest.approx(1.0, abs=1e-6)
++    assert hub.percentile == pytest.approx((0.6 * 0.4) ** 0.5, abs=1e-6)
++    assert partner.percentile == pytest.approx(1.0, abs=1e-6)
++    assert hub.percentile < hub.query_percentile
++    assert hub.percentile < partner.percentile
++
++
+ def test_gse64349_excludes_mutant_includes_parental_strain(tmp_path: Path) -> None:
+     """Delta-msrH samples must never influence the result; WWM82 (parental) samples must be pooled in."""
+     _seed_gse77738(tmp_path)  # needed to build the symbol->locus table
+-- 
+2.43.0
+

@@ -1,0 +1,169 @@
+From 94d6e0379ec069f71811e292677dde36233b6b71 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 5 Sep 2026 15:13:40 +0000
+Subject: [PATCH] Fall back to configured old_locus_tag when the target record
+ has none
+
+Some target FASTAs carry no old_locus_tag on any record (confirmed for
+the M. acetivorans GCF_000007345.1 dataset), so a query resolved by
+protein_id still ends up with resolved_old_locus_tag = "" even though
+resolution itself succeeded. STRING PPI data for a species is indexed
+by old_locus_tag (MA_#### form), so that empty tag silently makes every
+STRING lookup (string_cooccurrence, string_neighborhood) MISSING for
+every candidate paired with that query -- not because STRING has no
+data, but because there is no MA_#### tag to look it up by. Verified
+directly against STRING's own API for MA_4115: real cooccurrence/
+neighborhood scores exist there but never reached this project's output.
+
+query_proteins already has an old_locus_tag input field per entry; it
+was only ever used when resolving by old_locus_tag or by explicit
+sequence, never as a fallback after a protein_id match. _resolve_query
+now uses it as a fallback exactly when the matched target record's own
+old_locus_tag is empty, so:
+
+- a record's own old_locus_tag (from genome.gff) always wins when
+  present -- manually configured input never overrides real data
+- the field stays fully optional: with neither the record nor the
+  config carrying a tag, resolution is unchanged (resolved_old_locus_tag
+  stays "", same as before)
+- when used as a fallback, query_rows[].notes says so explicitly, for
+  auditability in 11_Raw_Audit
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01X6s5iGG566Cc6XqL4sTs3L
+---
+ analysis/interaction_scoring.py   | 27 +++++++++++++-
+ config.yaml                       |  4 ++
+ tests/test_interaction_scoring.py | 61 +++++++++++++++++++++++++++++++
+ 3 files changed, 90 insertions(+), 2 deletions(-)
+
+diff --git a/analysis/interaction_scoring.py b/analysis/interaction_scoring.py
+index d22e8b7..4317c34 100644
+--- a/analysis/interaction_scoring.py
++++ b/analysis/interaction_scoring.py
+@@ -1204,10 +1204,33 @@ def _resolve_query(query: dict[str, str], index: int, records: dict[str, Protein
+     query_id = query["protein_id"] or query["old_locus_tag"] or f"query_{index}"
+     if matched_record is not None:
+         resolved_protein_id = matched_record.protein_id
+-        resolved_old_locus_tag = matched_record.old_locus_tag or ""
+         description = matched_record.description
+         status = "resolved"
+-        notes = "resolved from target records"
++        if matched_record.old_locus_tag:
++            # Normal case: the target FASTA/GFF carried an old_locus_tag for
++            # this record.
++            resolved_old_locus_tag = matched_record.old_locus_tag
++            notes = "resolved from target records"
++        elif query["old_locus_tag"]:
++            # Some target FASTAs (this project has hit at least one -- see
++            # claude/implementation_status_scoring_v2.md) carry no
++            # old_locus_tag on any record at all, even though the query
++            # resolved fine by protein_id/sequence. STRING PPI data for a
++            # species is indexed by old_locus_tag (MA_#### form), so without
++            # one, every STRING lookup for this query is silently MISSING
++            # for every candidate pair -- not because STRING lacks data, but
++            # because there is no MA_#### tag to look it up by. The
++            # query_proteins.old_locus_tag config field exists for exactly
++            # this case: fall back to it when the record itself has none.
++            # This field stays optional (not every query has a known
++            # old_locus_tag) -- when both are empty, resolved_old_locus_tag
++            # is simply "" as before, and STRING evidence for this query
++            # stays MISSING, same as today.
++            resolved_old_locus_tag = query["old_locus_tag"]
++            notes = "resolved from target records (old_locus_tag from config; not present on the target record itself)"
++        else:
++            resolved_old_locus_tag = ""
++            notes = "resolved from target records"
+     elif sequence:
+         resolved_protein_id = query["protein_id"]
+         resolved_old_locus_tag = query["old_locus_tag"]
+diff --git a/config.yaml b/config.yaml
+index ebf7ad1..b073f9e 100644
+--- a/config.yaml
++++ b/config.yaml
+@@ -156,6 +156,10 @@ interaction_scoring:
+ #protein_idはncbiのWPから始まる個別番号
+ #どれか一つが入力されていれば機能する
+ #ただし、genome.gffに存在しない場合はsequenceやquery_fastaの入力が必要
++#old_locus_tagは任意入力(空欄でも動作する)。ただし、target FASTAに
++#old_locus_tagが含まれない生物種の場合、ここに入力しておかないとSTRING連携
++#(string_ppi_ncbi_taxon_id)がこのクエリに対して一切機能しない
++#(STRINGのMA_####形式の内部IDと突き合わせられないため)。
+   query_proteins:
+     - protein_id: ""
+       old_locus_tag: ""
+diff --git a/tests/test_interaction_scoring.py b/tests/test_interaction_scoring.py
+index 6941b55..26a38d9 100644
+--- a/tests/test_interaction_scoring.py
++++ b/tests/test_interaction_scoring.py
+@@ -252,6 +252,67 @@ def test_resolve_cdd_annotation_targets_deduplicates_query_already_in_a_bucket()
+     assert set(targets) == {"shared_protein"}
+ 
+ 
++# ---------------------------------------------------------------------------
++# _resolve_query old_locus_tag fallback tests
++# ---------------------------------------------------------------------------
++
++
++def test_resolved_old_locus_tag_falls_back_to_configured_value() -> None:
++    """When the matched target record has no old_locus_tag (e.g. a target
++    FASTA that carries none for any record), the query_proteins.old_locus_tag
++    config value should be used instead, so STRING lookups (indexed by
++    old_locus_tag) have something to match against."""
++    query_record = record("query_protein", old_locus_tag="")
++    cls = build_classification(all_records={"query_protein": query_record})
++    cfg = interaction_config(
++        enabled=True,
++        query_proteins=(InteractionQueryConfig("query_protein", "MA_4115", ""),),
++        candidate_sources=all_sources_disabled(),
++    )
++
++    result = run_interaction_scoring(cfg, cls)
++
++    assert result is not None
++    assert result.query_rows[0]["resolved_old_locus_tag"] == "MA_4115"
++    assert "config" in result.query_rows[0]["notes"]
++
++
++def test_resolved_old_locus_tag_prefers_target_record_over_configured_value() -> None:
++    """The target record's own old_locus_tag is authoritative data and must
++    win over a (possibly stale or mistaken) manually configured value."""
++    query_record = record("query_protein", old_locus_tag="MA_0001")
++    cls = build_classification(all_records={"query_protein": query_record})
++    cfg = interaction_config(
++        enabled=True,
++        query_proteins=(InteractionQueryConfig("query_protein", "MA_9999", ""),),
++        candidate_sources=all_sources_disabled(),
++    )
++
++    result = run_interaction_scoring(cfg, cls)
++
++    assert result is not None
++    assert result.query_rows[0]["resolved_old_locus_tag"] == "MA_0001"
++
++
++def test_resolved_old_locus_tag_stays_empty_when_neither_source_has_it() -> None:
++    """old_locus_tag remains optional: with no record tag and no config
++    value, resolution should still succeed with an empty old_locus_tag,
++    exactly as before this fallback was added."""
++    query_record = record("query_protein", old_locus_tag="")
++    cls = build_classification(all_records={"query_protein": query_record})
++    cfg = interaction_config(
++        enabled=True,
++        query_proteins=(InteractionQueryConfig("query_protein", "", ""),),
++        candidate_sources=all_sources_disabled(),
++    )
++
++    result = run_interaction_scoring(cfg, cls)
++
++    assert result is not None
++    assert result.query_rows[0]["resolved_old_locus_tag"] == ""
++    assert result.query_rows[0]["resolution_status"] == "resolved"
++
++
+ # ---------------------------------------------------------------------------
+ # resolve_protein_hunter_scores tests (M1: protein_hunter_score scope extension)
+ # ---------------------------------------------------------------------------
+-- 
+2.43.0
+

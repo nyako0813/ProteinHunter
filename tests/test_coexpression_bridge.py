@@ -134,6 +134,67 @@ def test_gse77738_zero_variance_gene_is_unavailable_not_an_error(tmp_path: Path)
     assert any("zero-variance" in w for w in bundle.warnings)
 
 
+def test_gse77738_mutual_rank_deflates_hub_genes(tmp_path: Path) -> None:
+    """A gene correlated with almost everything (a coexpression "hub") must
+    score lower than a gene specifically correlated with the query alone,
+    even though a one-sided (query-side-only) percentile would still rate
+    the hub fairly highly -- this is the whole point of the mutual-rank
+    normalization (see claude/coexpression_mutual_rank_normalization.md)."""
+    path = tmp_path / "coexpression" / "GSE77738_ReadCounts.xls"
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    # QUERY and PARTNER share a pattern ("specific") unrelated to the trend
+    # below, so PARTNER is correlated with QUERY specifically and with
+    # nothing else. HUB and the two filler genes all ride the same shared
+    # trend (an affine transform of it, so correlation among them is
+    # exactly 1.0), making HUB broadly correlated with most of the dataset
+    # for reasons that have nothing to do with the query.
+    specific = [5, 1, 4, 2, 6, 3]
+    trend = [1, 2, 3, 4, 5, 6]
+
+    gene_loci = ["MA0001", "MA0002", "MA0003", "MA0004", "MA0005", "MA0006"]
+    gene_names = ["-"] * 6
+    values = {
+        "MA0001": specific,  # query
+        "MA0002": specific,  # partner: tied to the query specifically
+        "MA0003": trend,  # hub: tied to a trend several other genes share
+        "MA0004": [v + 1 for v in trend],  # filler riding the same trend
+        "MA0005": [v * 2 for v in trend],  # filler riding the same trend
+        "MA0006": [v * 3 for v in trend],  # filler riding the same trend
+    }
+    data = {"Gene Locus": gene_loci, "Gene Name": gene_names}
+    for col_index, col in enumerate(_SAMPLE_COLUMNS):
+        data[col] = [values[gene][col_index] for gene in gene_loci]
+
+    df = pd.DataFrame(data)
+    with pd.ExcelWriter(path, engine="openpyxl") as writer:
+        df.to_excel(writer, sheet_name="Raw Read Counts", index=False)
+        df.to_excel(writer, sheet_name="RPKM Normalized Read Counts", index=False)
+
+    cache = JsonCache(tmp_path / "jsoncache")
+    bundle = load_gse77738_coexpression_bundle(True, ["MA_0001"], cache, tmp_path)
+
+    partner = bundle.lookup("MA_0001", "MA_0002")
+    hub = bundle.lookup("MA_0001", "MA_0003")
+    assert partner is not None and hub is not None
+
+    # The hub's one-sided, query-side percentile alone already trails the
+    # true specific partner's (0.6 vs 1.0, by construction)...
+    assert hub.query_percentile == pytest.approx(0.6, abs=1e-6)
+    assert partner.query_percentile == pytest.approx(1.0, abs=1e-6)
+    # ...but from the HUB's *own* side, correlating with the query is even
+    # less remarkable (it correlates just as strongly with the filler
+    # genes), while from the PARTNER's own side, the query is its one
+    # standout correlation -- the mutual rank must reflect that gap, not
+    # just the one-sided view.
+    assert hub.candidate_percentile == pytest.approx(0.4, abs=1e-6)
+    assert partner.candidate_percentile == pytest.approx(1.0, abs=1e-6)
+    assert hub.percentile == pytest.approx((0.6 * 0.4) ** 0.5, abs=1e-6)
+    assert partner.percentile == pytest.approx(1.0, abs=1e-6)
+    assert hub.percentile < hub.query_percentile
+    assert hub.percentile < partner.percentile
+
+
 def test_gse64349_excludes_mutant_includes_parental_strain(tmp_path: Path) -> None:
     """Delta-msrH samples must never influence the result; WWM82 (parental) samples must be pooled in."""
     _seed_gse77738(tmp_path)  # needed to build the symbol->locus table

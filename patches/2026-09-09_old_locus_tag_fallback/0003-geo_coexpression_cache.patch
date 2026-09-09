@@ -1,0 +1,269 @@
+From 000210d02f4db7d172e7e305dbfc5b4aea406ff0 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 5 Sep 2026 16:00:28 +0000
+Subject: [PATCH] Cache GEO coexpression correlation matrix to skip source file
+ reads
+
+load_gse77738_coexpression_bundle/load_gse64349_coexpression_bundle
+unconditionally checked for/downloaded/parsed the GEO source file before
+ever consulting the per-query disk cache, so a query that was already
+fully cached would still fail (or silently degrade to an empty bundle)
+whenever the source file was missing -- e.g. deleted after first use, or
+an offline environment.
+
+Cache each dataset's whole correlation matrix once (a single per-dataset
+object, not per-candidate, unlike the in-process-only per-candidate
+backgrounds behind Mutual Rank) alongside the existing per-query pairs.
+A new _try_fully_cached_bundle short-circuits both loaders when the
+matrix and every currently requested query tag are already cached,
+skipping the source file entirely; otherwise it falls through to the
+existing read path unchanged.
+
+Fixes the two known-failing tests
+(test_result_is_cached_and_reused_without_reparsing,
+test_coexpression_gse77738_reuses_cache_across_runs) flagged as a
+separate, unfixed issue in the prior Mutual Rank commit. Existing
+on-disk cache files are unaffected (per-query cache format unchanged).
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01X6s5iGG566Cc6XqL4sTs3L
+---
+ analysis/coexpression_bridge.py               | 122 ++++++++++++++++++
+ .../coexpression_mutual_rank_normalization.md |  56 +++++++-
+ 2 files changed, 173 insertions(+), 5 deletions(-)
+
+diff --git a/analysis/coexpression_bridge.py b/analysis/coexpression_bridge.py
+index 12bbc85..f908e56 100644
+--- a/analysis/coexpression_bridge.py
++++ b/analysis/coexpression_bridge.py
+@@ -38,6 +38,18 @@ not an exclusion: GSE77738 stays in the score (see the module-level note
+ above about the *other*, earlier finding that led here), it is just no
+ longer scored one-sided.
+ 
++See ``claude/coexpression_mutual_rank_normalization.md`` also for a third,
++related fix: both loader functions used to check the on-disk per-query
++cache only *after* unconditionally checking for/downloading/parsing the
++GEO source file, so a query that was already fully cached would still fail
++(or silently degrade to an empty bundle) whenever that source file was
++missing -- e.g. deleted after first use, or an offline environment. Each
++dataset's whole correlation matrix (a single, small, per-dataset object --
++not one per candidate, unlike the per-gene backgrounds behind Mutual Rank
++above) is now cached once alongside the existing per-query pairs, so a run
++whose query genes have all been scored before can be answered entirely
++from cache; see ``_try_fully_cached_bundle``.
++
+ Data license: GEO is an NCBI/NIH public database with no login, fee, or
+ reuse restriction; there is no license text comparable to STRING's CC BY 4.0
+ to enforce programmatically. Crediting the original studies by PMID
+@@ -353,6 +365,11 @@ def _build_bundle_from_matrix(
+     n_samples = values.shape[1]
+     gene_index = {gene: i for i, gene in enumerate(gene_order)}
+ 
++    # Cache the dataset-level matrix itself (once per dataset, not per
++    # query/candidate) so a future run can be answered entirely from cache
++    # -- see _try_fully_cached_bundle.
++    _cache_matrix(cache, cache_namespace, gene_order, z_scores, n_samples)
++
+     pairs_by_query: dict[str, dict[str, _OneSidedCoexpression]] = {}
+     for query_tag in dict.fromkeys(tag for tag in query_old_locus_tags if tag):
+         cached = cache.get(cache_namespace, query_tag)
+@@ -418,6 +435,103 @@ def _decode_cached_pairs(cached: dict) -> dict[str, _OneSidedCoexpression]:
+     return decoded
+ 
+ 
++def _matrix_cache_namespace(cache_namespace: str) -> str:
++    """A dedicated namespace for the dataset-level correlation matrix.
++
++    Kept separate from ``cache_namespace`` (which holds one entry per
++    *query* gene) because this holds exactly one entry for the whole
++    dataset -- a single ~1-2MB blob for GSE77738/GSE64349's gene counts,
++    unlike the per-candidate backgrounds in ``CoexpressionBundle._background_cache``
++    which are deliberately NOT persisted (see that field's docstring).
++    """
++    return f"{cache_namespace}_matrix"
++
++
++def _cache_matrix(cache: JsonCache, cache_namespace: str, gene_order: list[str], z_scores: np.ndarray, n_samples: int) -> None:
++    """Persist the dataset's full correlation matrix so a future run can
++    rebuild a bundle -- including candidate-side Mutual Rank percentiles --
++    without re-reading the GEO source file at all, as long as every
++    requested query gene's pairs are already cached too (see
++    ``_try_fully_cached_bundle``)."""
++    cache.set(
++        _matrix_cache_namespace(cache_namespace),
++        "matrix",
++        {"gene_order": gene_order, "z_scores": z_scores.tolist(), "n_samples": n_samples},
++    )
++
++
++def _load_cached_matrix(cache: JsonCache, cache_namespace: str) -> tuple[list[str], np.ndarray, int] | None:
++    """Load a previously cached correlation matrix, or None if absent/malformed."""
++    cached = cache.get(_matrix_cache_namespace(cache_namespace), "matrix")
++    if not isinstance(cached, dict):
++        return None
++    try:
++        gene_order = [str(g) for g in cached["gene_order"]]
++        z_scores = np.array(cached["z_scores"], dtype=float)
++        n_samples = int(cached["n_samples"])
++    except (KeyError, TypeError, ValueError):
++        return None
++    if z_scores.ndim != 2 or z_scores.shape[0] != len(gene_order) or z_scores.shape[1] != n_samples:
++        return None
++    return gene_order, z_scores, n_samples
++
++
++def _try_fully_cached_bundle(
++    dataset_id: str,
++    query_old_locus_tags: list[str],
++    cache: JsonCache,
++    cache_namespace: str,
++) -> CoexpressionBundle | None:
++    """Build a complete bundle purely from the on-disk cache, without ever
++    touching the GEO source file (no existence check, no download attempt,
++    no ``pd.read_excel``).
++
++    Returns None -- meaning "fall through to the normal file-read path" --
++    when the dataset's correlation matrix has not been cached yet, or when
++    any of the currently requested query genes has not been scored (and
++    thus cached) before. This is deliberately conservative: it never
++    returns a bundle missing evidence for a query the caller asked about.
++
++    This is the fix for the bug where a query already fully answered by the
++    cache would still trigger a source-file existence check/re-download
++    attempt first -- and, if that file was unavailable (e.g. deleted, or an
++    offline environment), fail or silently degrade to an empty bundle even
++    though the cache had everything needed. See
++    ``claude/coexpression_mutual_rank_normalization.md``.
++    """
++    matrix = _load_cached_matrix(cache, cache_namespace)
++    if matrix is None:
++        return None
++    gene_order, z_scores, n_samples = matrix
++    gene_index = {gene: i for i, gene in enumerate(gene_order)}
++
++    known_tags: set[str] = set(gene_order)
++    pairs_by_query: dict[str, dict[str, _OneSidedCoexpression]] = {}
++    for query_tag in dict.fromkeys(tag for tag in query_old_locus_tags if tag):
++        cached_pairs = cache.get(cache_namespace, query_tag)
++        if not isinstance(cached_pairs, dict):
++            # A query never scored (and thus never cached) before -- the
++            # matrix alone cannot answer it, so give up on the shortcut
++            # entirely rather than return a bundle silently missing this
++            # query's evidence.
++            return None
++        decoded = _decode_cached_pairs(cached_pairs)
++        pairs_by_query[query_tag] = decoded
++        known_tags.add(query_tag)
++        known_tags.update(decoded)
++
++    return CoexpressionBundle(
++        dataset_id=dataset_id,
++        known_tags=frozenset(known_tags),
++        pairs_by_query=pairs_by_query,
++        warnings=(),
++        n_samples=n_samples,
++        _gene_order=tuple(gene_order),
++        _gene_index=gene_index,
++        _z_scores=z_scores,
++    )
++
++
+ def load_gse77738_coexpression_bundle(
+     enabled: bool,
+     query_old_locus_tags: list[str],
+@@ -435,6 +549,10 @@ def load_gse77738_coexpression_bundle(
+     if not enabled:
+         return _empty_bundle(dataset_id)
+ 
++    fully_cached = _try_fully_cached_bundle(dataset_id, query_old_locus_tags, cache, "coexpression_gse77738")
++    if fully_cached is not None:
++        return fully_cached
++
+     warnings: list[str] = []
+     readcounts_path = Path(cache_dir) / "coexpression" / "GSE77738_ReadCounts.xls"
+     try:
+@@ -492,6 +610,10 @@ def load_gse64349_coexpression_bundle(
+     if not enabled:
+         return _empty_bundle(dataset_id)
+ 
++    fully_cached = _try_fully_cached_bundle(dataset_id, query_old_locus_tags, cache, "coexpression_gse64349")
++    if fully_cached is not None:
++        return fully_cached
++
+     warnings: list[str] = []
+     coexpression_dir = Path(cache_dir) / "coexpression"
+     table1_path = coexpression_dir / "GSE64349_TableS1_GEO.xlsx"
+diff --git a/claude/coexpression_mutual_rank_normalization.md b/claude/coexpression_mutual_rank_normalization.md
+index a3b862b..ad2be90 100644
+--- a/claude/coexpression_mutual_rank_normalization.md
++++ b/claude/coexpression_mutual_rank_normalization.md
+@@ -106,7 +106,7 @@ CoNekT/ATTED-IIなど共発現ネットワーク解析ツールが標準的に
+ 失敗はGSE77738キャッシュ再利用に関する別の既知の不具合で本変更とは無関係、
+ 下記参照)。
+ 
+-## ついでに発見した別の不具合(今回は未対応)
++## ついでに発見した別の不具合(追記: 2026-09-05に対応済み)
+ 
+ `load_gse77738_coexpression_bundle`/`load_gse64349_coexpression_bundle`は、
+ ディスクキャッシュにクエリの結果が既に存在する場合でも、ソースファイル
+@@ -116,7 +116,53 @@ CoNekT/ATTED-IIなど共発現ネットワーク解析ツールが標準的に
+ してしまう。`tests/test_coexpression_bridge.py::test_result_is_cached_and_reused_without_reparsing`
+ と`tests/test_interaction_scoring.py::test_coexpression_gse77738_reuses_cache_across_runs`
+ が既にこれを検出していた(本コミット適用前のmainでも同じく失敗することを
+-確認済み)。今回のMutual Rank対応とは別の独立した不具合のため、今回は
+-修正していない。対応する場合は、ソースファイル読み込みの前に、設定された
+-全クエリタグがキャッシュに揃っているかを確認し、揃っていればファイル
+-読み込み自体をスキップする形になる見込み。
++確認済み)。当初はMutual Rank対応とは別の独立した不具合として修正を見送って
++いたが、ユーザーからの追加依頼(「キャッシュ関連の調査もお願いします」)を
++受けて調査・修正した。
++
++### 原因(補足)
++
++キャッシュ判定自体は`_build_bundle_from_matrix`のクエリごとのループ内で
++行われていたが、そのループに到達する前に、両ローダー関数がソースファイルの
++`.exists()`チェック→(無ければ)ダウンロード→`pd.read_excel(...)`を無条件に
++実行していたため、キャッシュが完全に揃っているケースでもソースファイルへの
++依存が残っていた。
++
++さらに、今回のMutual Rank対応で候補側percentileの計算に相関行列
++(`_z_scores`/`_gene_index`)そのものが必要になった点も考慮が必要だった。
++この行列はクエリ単位ではなくデータセット単位で1つだけの、比較的小さい
++オブジェクト(GSE77738で遺伝子数×サンプル数 ≒ 4540×13 ≒ 数万要素、JSON化
++してもおよそ1-2MB程度)であり、候補ごとの背景分布(`_background_cache`、
++候補は1クエリあたり数百件になり得るため意図的にプロセス内メモリのみに
++留めている)とは性質が異なる。そのため、この行列だけは既存の
++クエリ単位キャッシュとは別の専用ネームスペース
++(`{cache_namespace}_matrix`)に1エントリとして永続化することにした。
++
++### 対応
++
++- `analysis/coexpression_bridge.py`に以下を追加:
++  - `_cache_matrix` / `_load_cached_matrix`: データセット単位の相関行列
++    (`gene_order`/`z_scores`/`n_samples`)を専用ネームスペースに保存・復元。
++  - `_try_fully_cached_bundle`: 行列キャッシュと、設定された全クエリタグ分の
++    ディスクキャッシュが両方揃っている場合に限り、ソースファイルに一切
++    触れずに完全な`CoexpressionBundle`(Mutual Rankに必要な相関行列込み)を
++    再構築する。クエリのうち1つでも未キャッシュならNoneを返し、
++    呼び出し側は従来通りファイル読み込みにフォールバックする(中途半端な
++    バンドルを返さないための安全策)。
++  - 両ローダー関数の冒頭(`enabled`チェック直後)で`_try_fully_cached_bundle`
++    を呼び出し、成功すればソースファイルの存在チェック/ダウンロード/
++    読み込みを完全にスキップする。
++  - `_build_bundle_from_matrix`内で相関行列を計算した直後に`_cache_matrix`
++    を呼び出し、ファイル読み込みが発生した回は必ず行列キャッシュを更新する
++    (既存のクエリ単位キャッシュの保存形式・タイミングは無変更)。
++- 既存のディスクキャッシュ形式(クエリ単位の`{correlation, percentile}`)は
++  変更していないため、この修正適用後もユーザーの既存キャッシュファイルは
++  そのまま再利用される。
++
++### テスト
++
++`test_result_is_cached_and_reused_without_reparsing`と
++`test_coexpression_gse77738_reuses_cache_across_runs`が、追加コードなしで
++そのままpassするようになったことを確認(いずれもソースファイルを
++`unlink()`した後にキャッシュのみで再実行するテスト)。フルスイート
++505 passed(既知の失敗は解消、新規の失敗なし)。
+-- 
+2.43.0
+
