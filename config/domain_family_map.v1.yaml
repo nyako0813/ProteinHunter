@@ -2,24 +2,79 @@ version: v1
 categories:
   electron_carrier:
     pfam: [PF12724]
-    interpro: [IPR026816, IPR029039]
-    supfam: [SSF52218]
-    note: "flavodoxin/flavoprotein様の電子伝達体。MA_0361/MA_0363で確認済み(2026-09-09)。ferredoxin/thioredoxin系のPfam ID(PF00111, PF13183, PF00085等)は今後確認次第追加。"
-  sulfur_carrier:
-    pfam: []
-    interpro: []
-    supfam: []
-    note: "TusA/DsrE/DsrF/MoaD/ThiS系。Pfam IDは未確認、今後同じ手順(UniProtバルクJSONから遺伝子名で検索)で埋める。"
+    interpro: [IPR026816, IPR029039]   # 参考情報のみ、判定には使わない(2026-09-09: match_fields追加により無効化)
+    supfam: [SSF52218]                  # 同上
+    match_fields: [pfam]
+    note: "flavodoxin/flavoprotein様の電子伝達体。MA_0361/MA_0363で確認済み(2026-09-09)。interpro/supfamはFlavoprotein-like_sfという広い構造スーパーファミリーを指し無関係な酵素(NADPH依存FMN reductase等)まで拾うため、match_fields: [pfam]でPF12724のみに限定(2026-09-09監査で発見・修正)。"
+
   atp_dependent_activator:
     pfam: [PF24167]
-    interpro: [IPR055834, IPR014729]
-    supfam: [SSF52402]
-    note: "HUP/PP-loop ATPaseドメイン(Adenine nucleotide alpha hydrolases-like)。MA_4115で確認済み(2026-09-09)。QueC/ThiI/MoeB/Asn_synthase等の同系ファミリーのPfam IDは今後追加。"
+    interpro: [IPR055834, IPR014729]   # 参考情報のみ。match_fieldsによりpfamのみで判定。
+    supfam: [SSF52402]                  # 同上。
+    match_fields: [pfam]
+    note: >
+      HUP/PP-loop ATPaseドメイン。MA_4115で確認済み(2026-09-09)。
+      IPR014729/SSF52402はHUPスーパーファミリー全般(ThiI等の無関係な酵素も含む広い構造フォールド)を
+      指すため判定には使わず、match_fields: [pfam] でPF24167のみによる判定に限定する(2026-09-09改訂)。
+
+  sulfur_carrier:
+    pfam: [PF02597, PF21965]   # ThiS/MoaD(PF02597), SAMP2(PF21965)
+    interpro: [IPR003749, IPR052045]   # ThiS/MoaD-like, Sulfur_Carrier/Prot_Modifier
+    supfam: [SSF54285]   # MoaD/ThiS
+    note: "ubiquitin-fold型の硫黄キャリア/タンパク質修飾因子。実データ: MA_4086(moaD), MA_1713(MoaD様), MA_3300(SAMP2)。(2026-09-09追加)"
+
+  cysteine_desulfurase:
+    pfam: [PF00266]   # Aminotran_5
+    interpro: [IPR010240, IPR010970, IPR016454]   # 参考情報のみ、判定には使わない(2026-09-09: match_fields追加により無効化)
+    supfam: [SSF53383]                              # 同上
+    match_fields: [pfam]
+    note: "システイン脱硫酵素(IscS/SufS型)。実データ: MA_3264(iscS), MA_2718(iscS), MA_0236, MA_0808。interpro/supfamはPLP依存酵素全般という広いスーパーファミリーを指し、無関係なアミノトランスフェラーゼ・デカルボキシラーゼまで拾うため、match_fields: [pfam]でPF00266のみに限定(2026-09-09監査で発見・修正)。"
+
+  rhodanese_sulfurtransferase:
+    pfam: [PF00581]
+    interpro: [IPR001763]   # 参考情報のみ、判定には使わない(2026-09-09: match_fields追加により無効化)
+    supfam: [SSF52821]       # 同上
+    match_fields: [pfam]
+    note: "ロダネーゼ様硫黄転移ドメイン。実データ: MA_3178, MA_2500, MA_0746。interpro/supfamがA-type ATP synthase subunit A(MA_4158)を誤って拾うため、match_fields: [pfam]で限定(2026-09-09監査で発見・修正)。"
+
+  thif_moeb_activator:
+    pfam: [PF00899]   # ThiF
+    interpro: [IPR045886, IPR035985]   # ThiF/MoeB/HesA, Ubiquitin-activating_enz
+    supfam: [SSF69572]
+    note: "E1様活性化酵素(ThiS/MoaD/SAMPをアデニル化する側)。実データ: MA_0255。(2026-09-09新規)"
+
+  tusa_sulfur_relay:
+    pfam: [PF01206]   # TusA
+    interpro: [IPR001455]   # TusA-like
+    note: >
+      TusA型硫黄リレータンパク質(直接パースルフィド中継、非アデニル化)。
+      実データ: MA_0810(現状「UPF0033 domain-containing protein」、機能未確定)。(2026-09-09新規)
+
+  dsre_sulfur_relay:
+    pfam: [PF02635, PF04077]   # DsrE, DsrH(2026-09-09追加: MA_3928がMA_3926/3927と連続する3遺伝子オペロン構成のため)
+    interpro: [IPR027396, IPR003787, IPR007215]   # 参考情報のみ、判定には使わない(2026-09-09: match_fields追加により無効化)
+    match_fields: [pfam]
+    note: >
+      TusBCD/DsrEFH型硫黄リレータンパク質(TusAから硫黄を受け取る側)。
+      実データ: MA_3926, MA_3927, MA_3928(3遺伝子連続、TusBCD型オペロンの可能性)、MA_3072。いずれも現状「Uncharacterized protein」/「DsrH like protein」、機能未確定。
+      interpro/supfamがNADH dehydrogenase等の無関係タンパク質(MA_0809, MA_0398)を拾うため、match_fields: [pfam]で限定した上、
+      真の陽性であるMA_3928(DsrH, PF04077)をpfamリストに明示的に追加(2026-09-09監査で発見・修正)。
+
   radical_sam:
-    pfam: []
-    interpro: []
-    supfam: []
-    note: "radical SAM酵素。既存rules(radical_sam_iron_sulfur等)の一般化用に予約、Pfam IDは未確認。"
+    pfam: [PF04055]
+    note: >
+      radical SAM酵素。実データ40件ヒット、うちtRNA修飾関連: MA_0040(taw1), MA_1153(t(6)A37 methylthiotransferase),
+      MA_0826(hat)。既存ルールradical_sam×electron_carrierが参照していたが、これまで本カテゴリが空リストのため
+      一致しなかった不具合を修正(2026-09-09)。
+
+  iron_sulfur_cluster:
+    pfam: [PF00037]   # Fer4
+    exclusive: true
+    note: >
+      単独フェレドキシン限定(排他的一致)。実データ: MA_1485(Pfamヒットが[PF00037]のみ)は該当。
+      PF00037系Fer4ドメインはヘテロジスルフィド還元酵素・ABC輸送体・グルタミン酸合成酵素など大きな
+      多ドメイン複合体サブユニットにも広く出現する(計48件ヒット)ため、exclusive: trueにより、
+      Pfamヒット全体が[PF00037]の部分集合である候補のみに限定する。(2026-09-09新規)
 
 category_rules:
   - left: atp_dependent_activator
@@ -30,4 +85,25 @@ category_rules:
     note: "ATP依存アデニル化酵素(HUP/PP-loopドメイン)と硫黄キャリア"
   - left: radical_sam
     right: electron_carrier
-    note: "radical SAM酵素と電子伝達体(既存radical_sam_ferredoxinルールの一般化)"
+    note: "radical SAM酵素と電子伝達体(2026-09-09: radical_samカテゴリに実データを設定し機能するように修正)"
+  - left: radical_sam
+    right: iron_sulfur_cluster
+    note: "radical SAM酵素(自身も[4Fe-4S]クラスタを持つ)とFe-S電子伝達体(2026-09-09新規)"
+  - left: cysteine_desulfurase
+    right: sulfur_carrier
+    note: "システイン脱硫酵素(硫黄供与)と硫黄キャリアタンパク質(ThiS/MoaD/SAMP型)。IscS-IscU/SufS-SufE型相互作用の一般化(PLOS Biology 2010)。(2026-09-09新規)"
+  - left: cysteine_desulfurase
+    right: rhodanese_sulfurtransferase
+    note: "システイン脱硫酵素とロダネーゼ様硫黄転移タンパク質(持続的硫黄リレー)。(2026-09-09新規)"
+  - left: sulfur_carrier
+    right: thif_moeb_activator
+    note: "硫黄キャリア(ThiS/MoaD/SAMP型)とそれを活性化するE1様酵素(ThiF/MoeB型)。ThiS-ThiF複合体構造(PDB 1ZUD)、Urm1-Uba4系(EMBO J 2020)の一般化。(2026-09-09新規)"
+  - left: tusa_sulfur_relay
+    right: dsre_sulfur_relay
+    note: >
+      TusA型硫黄リレータンパク質とTusBCD/DsrEFH型受容タンパク質。大腸菌TusA-TusBCD-TusE系の複合体構造
+      (Structure誌2006)の一般化。M. acetivoransにもMA_0810(TusA型)とMA_3926/3927/3072(DsrE型)の
+      ホモログが存在するが、いずれも機能未確定。(2026-09-09新規)
+  - left: cysteine_desulfurase
+    right: tusa_sulfur_relay
+    note: "システイン脱硫酵素とTusA型硫黄リレータンパク質(IscSからTusAへの硫黄受け渡し)。(2026-09-09新規)"

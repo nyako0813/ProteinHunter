@@ -33,6 +33,8 @@ class DomainFamilyCategory:
     pfam: frozenset[str] = frozenset()
     interpro: frozenset[str] = frozenset()
     supfam: frozenset[str] = frozenset()
+    exclusive: bool = False
+    match_fields: frozenset[str] = frozenset({"pfam", "interpro", "supfam"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,11 +52,23 @@ class DomainFamilyMap:
 
         matched: set[str] = set()
         for category_id, category in self.categories.items():
-            if (
-                (info.pfam & category.pfam)
-                or (info.interpro & category.interpro)
-                or (info.supfam & category.supfam)
-            ):
+            if category.exclusive:
+                # Exclusive mode: match only when the candidate's ENTIRE pfam hit
+                # set is a subset of this category's pfam accessions (i.e. the
+                # candidate carries no other, unrelated Pfam domains). An empty
+                # candidate pfam set must NOT match -- the empty set is
+                # mathematically a subset of any set, but a protein with zero
+                # Pfam hits carries no positive evidence of belonging here.
+                if info.pfam and info.pfam <= category.pfam:
+                    matched.add(category_id)
+                continue
+
+            hit = (
+                ("pfam" in category.match_fields and bool(info.pfam & category.pfam))
+                or ("interpro" in category.match_fields and bool(info.interpro & category.interpro))
+                or ("supfam" in category.match_fields and bool(info.supfam & category.supfam))
+            )
+            if hit:
                 matched.add(category_id)
         return matched
 
@@ -96,6 +110,32 @@ def load_domain_family_map(path: str | Path) -> DomainFamilyMap:
     for category_id, raw_category in raw_categories.items():
         if not isinstance(raw_category, dict):
             raise ConfigError(f"'categories.{category_id}' in {resolved_path} must be a mapping.")
+
+        raw_exclusive = raw_category.get("exclusive", False)
+        if not isinstance(raw_exclusive, bool):
+            raise ConfigError(
+                f"'categories.{category_id}.exclusive' in {resolved_path} must be true or false."
+            )
+
+        raw_match_fields = raw_category.get("match_fields")
+        if raw_match_fields is None:
+            match_fields = frozenset({"pfam", "interpro", "supfam"})
+        else:
+            match_fields = frozenset(
+                _string_list(raw_match_fields, f"categories.{category_id}.match_fields", resolved_path)
+            )
+            unknown_fields = match_fields - {"pfam", "interpro", "supfam"}
+            if unknown_fields:
+                raise ConfigError(
+                    f"'categories.{category_id}.match_fields' in {resolved_path} "
+                    f"contains unknown field(s): {sorted(unknown_fields)} "
+                    "(allowed: pfam, interpro, supfam)."
+                )
+            if not match_fields:
+                raise ConfigError(
+                    f"'categories.{category_id}.match_fields' in {resolved_path} must not be empty."
+                )
+
         categories[str(category_id)] = DomainFamilyCategory(
             pfam=frozenset(_string_list(raw_category.get("pfam"), f"categories.{category_id}.pfam", resolved_path)),
             interpro=frozenset(
@@ -104,6 +144,8 @@ def load_domain_family_map(path: str | Path) -> DomainFamilyMap:
             supfam=frozenset(
                 _string_list(raw_category.get("supfam"), f"categories.{category_id}.supfam", resolved_path)
             ),
+            exclusive=raw_exclusive,
+            match_fields=match_fields,
         )
 
     raw_category_rules = raw.get("category_rules", [])
