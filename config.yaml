@@ -27,7 +27,7 @@ paths:
   gff: "./data/input/genome.gff"
 
   # Output Excel
-  output_excel: "./data/output/.xlsx"
+  output_excel: "./data/output/MA_4115_3.xlsx"
 
   # Output Word report (Phase 6-8 Stage 2). Optional -- when unset,
   # defaults to output_excel's directory/stem with a .docx extension
@@ -157,8 +157,8 @@ interaction_scoring:
 #どれか一つが入力されていれば機能する
 #ただし、genome.gffに存在しない場合はsequenceやquery_fastaの入力が必要
   query_proteins:
-    - protein_id: ""
-      old_locus_tag: ""
+    - protein_id: "WP_011024006.1"
+      old_locus_tag: "MA_4115"
       sequence: ""
 
   query_fasta: ""
@@ -199,7 +199,7 @@ interaction_scoring:
     negative_medium_hit: false
     negative_weak_hit: false
 
-  #max_candidates_per_query: 500
+  #max_candidates_per_query: 200
   include_sequences_in_excel: false
 
   # Scope of the optional Interaction_Evidence_Detail sheet (component-level
