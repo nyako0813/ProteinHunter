@@ -1279,6 +1279,118 @@ def test_string_neighborhood_not_run_when_taxon_id_unset() -> None:
     assert detail["category"] == "genomic_context"
 
 
+def test_rockhopper_operon_shares_genomic_context_category(tmp_path: Path) -> None:
+    """rockhopper_operon must appear under genomic_context and combine with the GFF-based component.
+
+    Uses the real, repo-committed data/cache/rockhopper_operons.json (Phase
+    6f M1, analysis/rockhopper_operon_bridge.py) rather than a seeded
+    fixture -- unlike STRING/coexpression, this cache is not a
+    per-test-configurable download location; it is the project's own
+    fixed, small, hand-curated dataset. MA_4546/MA_4550 (the Mcr
+    activation complex) are both ends of a real operon_groups entry in
+    that cache.
+    """
+    gff_file = tmp_path / "genome.gff"
+    gff_file.write_text(
+        "##gff-version 3\n"
+        "contig1\tRefSeq\tgene\t100\t400\t.\t+\t.\tID=query\n"
+        "contig1\tRefSeq\tgene\t500\t800\t.\t+\t.\tID=candidate\n",
+        encoding="utf-8",
+    )
+    records = {
+        "query": record("query", old_locus_tag="MA_4546", description="", positive_sources_hit=[]),
+        "candidate": record(
+            "candidate", old_locus_tag="MA_4550", description="", positive_sources_hit=[]
+        ),
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+        scoring_model="v2_evidence_based",
+        gff_file=gff_file,
+    )
+    cfg.interaction_scoring = replace(cfg.interaction_scoring, rockhopper_operon_enabled=True)
+
+    result = run_interaction_scoring(cfg, classification(records))
+
+    assert result is not None
+    detail_rows = {
+        r["component_name"]: r
+        for r in result.evidence_detail_rows
+        if r["candidate_protein_id"] == "candidate"
+    }
+    rockhopper = detail_rows["rockhopper_operon"]
+    assert rockhopper["status"] == "AVAILABLE"
+    assert rockhopper["category"] == "genomic_context"
+    assert rockhopper["normalized_value"] == pytest.approx(1.0)
+    assert "sample=" in rockhopper["explanation"]
+    # Shares its cap with the pipeline's own GFF-based genomic_context
+    # component (and string_neighborhood, when enabled) -- same cap value.
+    assert detail_rows["genomic_context"]["category_cap"] == rockhopper["category_cap"]
+
+
+def test_rockhopper_operon_not_run_when_disabled() -> None:
+    """Without rockhopper_operon_enabled, the component must be NOT_RUN, matching string_neighborhood."""
+    records = {
+        "query": record("query", old_locus_tag="MA_4546", positive_sources_hit=["A"]),
+        "candidate": record("candidate", old_locus_tag="MA_4550", positive_sources_hit=["A"]),
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+        scoring_model="v2_evidence_based",
+    )
+
+    result = run_interaction_scoring(cfg, classification(records))
+
+    assert result is not None
+    detail = next(
+        r
+        for r in result.evidence_detail_rows
+        if r["candidate_protein_id"] == "candidate" and r["component_name"] == "rockhopper_operon"
+    )
+    assert detail["status"] == "NOT_RUN"
+    assert detail["category"] == "genomic_context"
+
+
+def test_rockhopper_operon_missing_not_negative_for_known_false_negative_pair() -> None:
+    """The Mtp complex (MA_4164/MA_4165) is Rockhopper's documented false
+    negative (claude/phase6e_rockhopper_lk57_validation.md) -- it must
+    resolve to MISSING, never AVAILABLE with a zero/negative value, even
+    with the real cache enabled and both genes being real M. acetivorans
+    loci. This is the asymmetric-treatment design's core real-data check
+    (Phase 6f M4).
+    """
+    records = {
+        "query": record("query", old_locus_tag="MA_4164", positive_sources_hit=["A"]),
+        "candidate": record("candidate", old_locus_tag="MA_4165", positive_sources_hit=["A"]),
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+        scoring_model="v2_evidence_based",
+    )
+    cfg.interaction_scoring = replace(cfg.interaction_scoring, rockhopper_operon_enabled=True)
+
+    result = run_interaction_scoring(cfg, classification(records))
+
+    assert result is not None
+    detail = next(
+        r
+        for r in result.evidence_detail_rows
+        if r["candidate_protein_id"] == "candidate" and r["component_name"] == "rockhopper_operon"
+    )
+    assert detail["status"] == "MISSING"
+    assert detail["normalized_value"] is None
+    assert detail["category"] == "genomic_context"
+
+
 # ---------------------------------------------------------------------------
 # coexpression_gse77738: coexpression_evidence category (Phase 6b M2)
 # ---------------------------------------------------------------------------
@@ -3361,12 +3473,13 @@ def test_evidence_detail_v2_long_format_has_one_row_per_component() -> None:
     ]
     # source_classification, sequence_evidence, genomic_context, co_occurrence,
     # domain_complementarity, negative_hit_strength, string_cooccurrence,
-    # string_neighborhood, coexpression_gse77738, coexpression_gse64349 --
-    # always exactly ten from _build_evidence_components_v2, whether
-    # AVAILABLE or not -- plus three more from Final Score's own,
-    # separately-attached breakdown (protein_hunter_score, interaction_score,
-    # final_score_negative_penalty -- see _final_score_components).
-    assert len(detail_rows) == 13
+    # string_neighborhood, rockhopper_operon, coexpression_gse77738,
+    # coexpression_gse64349 -- always exactly eleven from
+    # _build_evidence_components_v2, whether AVAILABLE or not -- plus three
+    # more from Final Score's own, separately-attached breakdown
+    # (protein_hunter_score, interaction_score, final_score_negative_penalty
+    # -- see _final_score_components).
+    assert len(detail_rows) == 14
     assert {r["component_name"] for r in detail_rows} == {
         "source_classification",
         "sequence_evidence",
@@ -3376,6 +3489,7 @@ def test_evidence_detail_v2_long_format_has_one_row_per_component() -> None:
         "negative_hit_strength",
         "string_cooccurrence",
         "string_neighborhood",
+        "rockhopper_operon",
         "coexpression_gse77738",
         "coexpression_gse64349",
         "protein_hunter_score",

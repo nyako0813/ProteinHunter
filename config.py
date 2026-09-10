@@ -268,6 +268,15 @@ class InteractionScoringConfig:
     # default: enabling it downloads two GEO supplementary files (a few MB
     # each) on first use.
     geo_coexpression_enabled: bool = False
+    # Rockhopper-predicted-operon evidence (scoring_model: v2_evidence_based
+    # only; Phase 6f, see claude/phase6e_rockhopper_lk57_validation.md and
+    # patches/claude_code_instructions_rockhopper_implementation.md). Reads
+    # the pre-computed data/cache/rockhopper_operons.json cache (see
+    # analysis/rockhopper_operon_bridge.py) -- there is no live/on-the-fly
+    # Rockhopper execution at scoring time, so this is a single on/off flag
+    # rather than a path/id setting, matching geo_coexpression_enabled's
+    # pattern. False by default.
+    rockhopper_operon_enabled: bool = False
 
 
 VALID_INTERACTION_SCORING_MODELS: tuple[str, ...] = ("legacy_additive", "v2_evidence_based")
@@ -1225,6 +1234,13 @@ def _validate_interaction_scoring_section(raw: dict[object, object]) -> None:
             "must be true or false."
         )
 
+    rockhopper_operon_enabled = section.get("rockhopper_operon_enabled", False)
+    if not isinstance(rockhopper_operon_enabled, bool):
+        raise ConfigError(
+            "config.yaml value 'interaction_scoring.rockhopper_operon_enabled' "
+            "must be true or false."
+        )
+
 
 def _load_interaction_scoring(
     raw_scoring: object,
@@ -1407,6 +1423,7 @@ def _load_interaction_scoring(
             else None
         ),
         geo_coexpression_enabled=bool(raw_scoring.get("geo_coexpression_enabled", False)),
+        rockhopper_operon_enabled=bool(raw_scoring.get("rockhopper_operon_enabled", False)),
     )
 
 

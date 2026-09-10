@@ -42,6 +42,7 @@ from analysis.coexpression_bridge import (
     load_gse77738_coexpression_bundle,
 )
 from analysis.string_ppi_bridge import StringPpiBundle, load_string_ppi_bundle
+from analysis.rockhopper_operon_bridge import RockhopperOperonBundle, load_rockhopper_operon_bundle
 
 V2_SCORING_MODEL = "v2_evidence_based"
 
@@ -75,6 +76,18 @@ V2_COMPONENT_WEIGHTS: dict[str, float] = {
     # genomic_context itself, the same "average the two components evenly"
     # pattern source_classification+sequence_evidence already use).
     "string_neighborhood": 1.0,
+    # rockhopper_operon (Phase 6f, M2; see
+    # claude/phase6e_rockhopper_lk57_validation.md and
+    # patches/claude_code_instructions_rockhopper_implementation.md). Third
+    # component sharing genomic_context's category/cap, weighted evenly
+    # with genomic_context and string_neighborhood above -- PROVISIONAL,
+    # like every other weight in this dict; there is no calibration data
+    # yet to justify weighting it differently. Deliberately does NOT follow
+    # string_neighborhood's "evaluated, zero" pattern for the negative
+    # case: see _rockhopper_operon_status_and_value and
+    # RockhopperOperonBundle.lookup for why a Rockhopper non-merge resolves
+    # to MISSING, not AVAILABLE with normalized_value=0.0.
+    "rockhopper_operon": 1.0,
     # coexpression_evidence category (Phase 6b, see
     # claude/phase6b_coexpression_design.md). coexpression_gse77738 (M2) and
     # coexpression_gse64349 (M3) are deliberately NOT weighted evenly, unlike
@@ -566,6 +579,7 @@ def run_interaction_scoring(config: Any, blast_classification: Any) -> Interacti
     ruleset: FunctionalComplementarityRuleset | None = None
     pih_bundle: PihEvidenceBundle | None = None
     string_ppi_bundle: StringPpiBundle | None = None
+    rockhopper_operon_bundle: RockhopperOperonBundle | None = None
     domain_family_map: DomainFamilyMap | None = None
     uniprot_domain_map: dict[str, UniProtDomainInfo] | None = None
     # Loaded unconditionally (not gated to v2_evidence_based like ruleset/
@@ -623,6 +637,17 @@ def run_interaction_scoring(config: Any, blast_classification: Any) -> Interacti
         )
         warnings.extend(string_ppi_bundle.warnings)
 
+    # Rockhopper-predicted-operon evidence (Phase 6f, cache-only -- see
+    # analysis/rockhopper_operon_bridge.py and
+    # claude/phase6e_rockhopper_lk57_validation.md). Feeds both scoring
+    # models -- v2's genomic_context/rockhopper_operon component (M2) and
+    # legacy_additive's rockhopper_operon_score (M3) -- loaded unconditionally
+    # here (not gated to v2_evidence_based) same as STRING above, unlike
+    # coexpression's deliberate v2-only deferral.
+    if getattr(scoring_config, "rockhopper_operon_enabled", False):
+        rockhopper_operon_bundle = load_rockhopper_operon_bundle(True)
+        warnings.extend(rockhopper_operon_bundle.warnings)
+
     # Public GEO coexpression evidence (Phase 6b, see
     # claude/phase6b_coexpression_design.md). Unlike STRING, this is
     # v2_evidence_based only for now -- legacy_additive integration was
@@ -676,6 +701,7 @@ def run_interaction_scoring(config: Any, blast_classification: Any) -> Interacti
                 ruleset=ruleset,
                 pih_bundle=pih_bundle,
                 string_ppi_bundle=string_ppi_bundle,
+                rockhopper_operon_bundle=rockhopper_operon_bundle,
                 coexpression_gse77738_bundle=coexpression_gse77738_bundle,
                 coexpression_gse64349_bundle=coexpression_gse64349_bundle,
                 domain_family_map=domain_family_map,
@@ -1480,6 +1506,7 @@ def _rank_source_candidates_v2(
     ruleset: FunctionalComplementarityRuleset,
     pih_bundle: PihEvidenceBundle | None = None,
     string_ppi_bundle: StringPpiBundle | None = None,
+    rockhopper_operon_bundle: RockhopperOperonBundle | None = None,
     coexpression_gse77738_bundle: CoexpressionBundle | None = None,
     coexpression_gse64349_bundle: CoexpressionBundle | None = None,
     domain_family_map: DomainFamilyMap | None = None,
@@ -1503,6 +1530,7 @@ def _rank_source_candidates_v2(
                 query, candidate, candidate_source, scoring_config, feature_map, engine_config, ruleset,
                 pih_bundle=pih_bundle,
                 string_ppi_bundle=string_ppi_bundle,
+                rockhopper_operon_bundle=rockhopper_operon_bundle,
                 coexpression_gse77738_bundle=coexpression_gse77738_bundle,
                 coexpression_gse64349_bundle=coexpression_gse64349_bundle,
                 domain_family_map=domain_family_map,
@@ -1616,6 +1644,10 @@ def _evidence_detail_rows_v2(
 #: numbers. coexpression_gse64349 was checked the same way and did not show
 #: this reversal (0.848 positives vs. 0.601 negatives), so it stays in,
 #: unchanged, at its existing 1/3-of-gse77738 weight.
+#:
+#: Phase 6f adds "rockhopper_operon": a genuine query-candidate pair signal
+#: (same-predicted-operon membership) like string_neighborhood above, not a
+#: candidate-only property, so it belongs in interaction_score's scope.
 INTERACTION_SCORE_COMPONENT_NAMES: frozenset[str] = frozenset(
     {
         "genomic_context",
@@ -1623,6 +1655,7 @@ INTERACTION_SCORE_COMPONENT_NAMES: frozenset[str] = frozenset(
         "string_cooccurrence",
         "string_neighborhood",
         "coexpression_gse64349",
+        "rockhopper_operon",
     }
 )
 
@@ -1651,6 +1684,7 @@ def _score_pair_v2(
     ruleset: FunctionalComplementarityRuleset,
     pih_bundle: PihEvidenceBundle | None = None,
     string_ppi_bundle: StringPpiBundle | None = None,
+    rockhopper_operon_bundle: RockhopperOperonBundle | None = None,
     coexpression_gse77738_bundle: CoexpressionBundle | None = None,
     coexpression_gse64349_bundle: CoexpressionBundle | None = None,
     domain_family_map: DomainFamilyMap | None = None,
@@ -1668,6 +1702,7 @@ def _score_pair_v2(
     components, location_info = _build_evidence_components_v2(
         query, candidate, candidate_source, feature_map, ruleset, engine_config, pih_bundle=pih_bundle,
         string_ppi_bundle=string_ppi_bundle,
+        rockhopper_operon_bundle=rockhopper_operon_bundle,
         coexpression_gse77738_bundle=coexpression_gse77738_bundle,
         coexpression_gse64349_bundle=coexpression_gse64349_bundle,
         domain_family_map=domain_family_map,
@@ -1797,6 +1832,7 @@ def _build_evidence_components_v2(
     engine_config: ScoringEngineConfig,
     pih_bundle: PihEvidenceBundle | None = None,
     string_ppi_bundle: StringPpiBundle | None = None,
+    rockhopper_operon_bundle: RockhopperOperonBundle | None = None,
     coexpression_gse77738_bundle: CoexpressionBundle | None = None,
     coexpression_gse64349_bundle: CoexpressionBundle | None = None,
     domain_family_map: DomainFamilyMap | None = None,
@@ -1887,6 +1923,32 @@ def _build_evidence_components_v2(
                 string_neighborhood_status,
                 source="string_db",
                 explanation=string_neighborhood_reason,
+            )
+        )
+
+    rockhopper_status, rockhopper_value, rockhopper_reason = _rockhopper_operon_status_and_value(
+        query, candidate, rockhopper_operon_bundle
+    )
+    if rockhopper_status is EvidenceStatus.AVAILABLE:
+        components.append(
+            EvidenceComponent.available(
+                "rockhopper_operon",
+                "genomic_context",
+                rockhopper_value,
+                V2_COMPONENT_WEIGHTS["rockhopper_operon"],
+                raw_value=rockhopper_reason,
+                source="rockhopper",
+                explanation=rockhopper_reason,
+            )
+        )
+    else:
+        components.append(
+            EvidenceComponent.unavailable(
+                "rockhopper_operon",
+                "genomic_context",
+                rockhopper_status,
+                source="rockhopper",
+                explanation=rockhopper_reason,
             )
         )
 
@@ -2214,6 +2276,57 @@ def _string_neighborhood_status_and_value(
         EvidenceStatus.AVAILABLE,
         normalized,
         f"STRING neighborhood score: {scores.neighborhood}/1000",
+    )
+
+
+def _rockhopper_operon_status_and_value(
+    query: dict[str, Any], candidate: ProteinRecord, rockhopper_operon_bundle: RockhopperOperonBundle | None
+) -> tuple[EvidenceStatus, float | None, str]:
+    """Rockhopper-predicted-operon evidence for this pair (Phase 6f).
+
+    Shares the genomic_context category with the pipeline's own GFF-based
+    gene-distance component and string_neighborhood (see
+    V2_COMPONENT_WEIGHTS["rockhopper_operon"]): a third, methodologically
+    different signal for the same underlying question (are these two genes
+    part of one operon?) -- this one from direct RNA-seq transcript-unit
+    prediction rather than static gene coordinates or cross-species
+    conservation.
+
+    Deliberately asymmetric, unlike _string_neighborhood_status_and_value
+    above: a pair Rockhopper never grouped into the same predicted operon
+    resolves to MISSING here, never to AVAILABLE with normalized_value=0.0.
+    This is intentional, not an oversight -- see
+    RockhopperOperonBundle.lookup's docstring and
+    claude/phase6e_rockhopper_lk57_validation.md: Rockhopper has a
+    confirmed false-negative case (the Mtp complex, MA_4164/MA_4165, 70bp
+    gap) where two genes with adequate, comparable expression to
+    Rockhopper-detected operons were never merged across 3 read depths and
+    2 independent samples, most likely because of an internal
+    intergenic-gap cutoff tighter than this pipeline's own validated 150bp
+    _gene_neighborhood_v2 threshold. Treating "not merged" as evaluated-zero
+    (STRING's pattern) would systematically penalize exactly the
+    non-adjacent-operon-member gap-spanning cases this signal exists to
+    help detect (see the design rationale in
+    patches/claude_code_instructions_rockhopper_implementation.md section 2).
+    """
+    if rockhopper_operon_bundle is None:
+        return EvidenceStatus.NOT_RUN, None, "Rockhopper operon evidence is disabled in configuration"
+
+    query_tag = query["resolved_old_locus_tag"]
+    candidate_tag = candidate.old_locus_tag or ""
+    hit = rockhopper_operon_bundle.lookup(query_tag, candidate_tag)
+    if hit is None:
+        return (
+            EvidenceStatus.MISSING,
+            None,
+            "not grouped into the same predicted operon in any cached Rockhopper sample "
+            "(not treated as negative evidence -- see module docstring)",
+        )
+
+    return (
+        EvidenceStatus.AVAILABLE,
+        1.0,
+        f"Rockhopper: grouped into one predicted operon (sample={hit.sample}, condition={hit.condition})",
     )
 
 

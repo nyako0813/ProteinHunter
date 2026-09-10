@@ -5,13 +5,20 @@ signal, upgraded from the throwaway ``claude/genbank_to_ptt_rnt.py`` used in
 the Phase 6e investigation (see ``claude/phase6e_rockhopper_lk57_validation.md``
 for the validated findings this design is built on, and
 ``patches/claude_code_instructions_rockhopper_implementation.md`` for the
-authoritative Phase 6f spec). It is **not** the runtime lookup class the
-scoring engine imports -- that is a later milestone (M2), which may append a
-``RockhopperOperonBundle`` / ``load_rockhopper_operon_bundle`` to this same
-file. Nothing here is imported by ``interaction_scoring.py`` or
-``scoring_engine.py`` yet.
+authoritative Phase 6f spec).
 
-What this script does, end to end:
+The module has two halves:
+
+* **Generation-time** (M1, sections 1-5 below): converts a genome GenBank
+  flat file, acquires FASTQ, runs Rockhopper, and extracts
+  ``data/cache/rockhopper_operons.json`` from the results. Re-runnable by a
+  future developer; not imported by the scoring engine.
+* **Runtime lookup** (M2, section 6 below): :class:`RockhopperOperonBundle`
+  / :func:`load_rockhopper_operon_bundle`, which ``interaction_scoring.py``
+  imports to read the pre-built cache at scoring time -- no Rockhopper
+  execution happens on this path.
+
+What the generation half does, end to end:
 
 1. Convert a genome GenBank flat file to the ``.fna``/``.ptt``/``.rnt`` trio
    Rockhopper's ``-g`` option requires (same conversion as
@@ -71,6 +78,7 @@ under ``--workdir``).
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import subprocess
 import sys
@@ -585,7 +593,114 @@ def parse_operons_file(operons_path: Path, gene_index: GeneAnnotationIndex, samp
 
 
 # ==========================================================================
-# 6. Orchestration / CLI
+# 6. Runtime lookup (Phase 6f, M2): the rockhopper_operon evidence component
+# ==========================================================================
+
+
+@dataclass(slots=True, frozen=True)
+class RockhopperOperonHit:
+    """Which cached sample/condition first grouped a pair into one operon."""
+
+    sample: str
+    condition: str
+
+
+@dataclass(slots=True, frozen=True)
+class RockhopperOperonBundle:
+    """Runtime lookup over the pre-computed ``rockhopper_operon`` cache.
+
+    Built once from ``data/cache/rockhopper_operons.json`` (see
+    :func:`load_rockhopper_operon_bundle`) and reused for every pair in a
+    scoring run -- there is no on-the-fly Rockhopper execution here, per
+    this module's cache-once design (see the module docstring).
+
+    Per the Phase 6f spec's asymmetric-treatment decision
+    (``patches/claude_code_instructions_rockhopper_implementation.md``
+    section 2, grounded in the false-negative evidence documented in
+    ``claude/phase6e_rockhopper_lk57_validation.md``): a pair grouped into
+    the same predicted operon in *any* cached sample is a positive signal
+    (OR-aggregation across samples/conditions, spec section 3). A pair that
+    is never grouped together is deliberately **not** treated as negative
+    evidence -- callers must resolve a ``None`` result from :meth:`lookup`
+    to ``EvidenceStatus.MISSING``, never to "evaluated, score 0" the way
+    STRING's absent-from-links case is (contrast with
+    ``analysis/string_ppi_bridge.py::StringPpiBundle.lookup``) -- because
+    Rockhopper has a demonstrated false-negative case (the Mtp complex,
+    70bp gap) that a plain "not merged = zero" treatment would incorrectly
+    penalize.
+    """
+
+    pair_hits: dict[frozenset[str], RockhopperOperonHit]
+    n_samples: int
+    cache_path: Path
+    warnings: tuple[str, ...] = ()
+
+    def lookup(self, query_old_locus_tag: str, candidate_old_locus_tag: str) -> RockhopperOperonHit | None:
+        """Return the first cached sample where both genes are grouped into
+        the same predicted operon, or ``None`` if never co-grouped in any
+        sample. ``None`` must be treated as MISSING by callers, never as a
+        negative/zero signal -- see the class docstring.
+        """
+        if not query_old_locus_tag or not candidate_old_locus_tag:
+            return None
+        if query_old_locus_tag == candidate_old_locus_tag:
+            return None
+        key = frozenset((query_old_locus_tag, candidate_old_locus_tag))
+        return self.pair_hits.get(key)
+
+
+def _empty_rockhopper_operon_bundle(cache_path: Path, warnings: tuple[str, ...] = ()) -> RockhopperOperonBundle:
+    return RockhopperOperonBundle(pair_hits={}, n_samples=0, cache_path=cache_path, warnings=warnings)
+
+
+def load_rockhopper_operon_bundle(
+    enabled: bool, cache_path: Path = DEFAULT_CACHE_OUT
+) -> RockhopperOperonBundle:
+    """Load the pre-computed ``rockhopper_operon`` cache (M1's output).
+
+    Always returns a (possibly empty) :class:`RockhopperOperonBundle`, never
+    ``None`` -- ``enabled=False``, a missing cache file, or a malformed
+    cache file all degrade to an empty bundle (with a ``warnings`` entry for
+    the latter two) rather than raising, matching the never-raise
+    convention ``string_ppi_bridge.py``/``coexpression_bridge.py`` use.
+    Callers that need to distinguish "never loaded because the feature is
+    off" (NOT_RUN) from "loaded but this pair has no evidence" (MISSING)
+    do so at the call site by only calling this when their own config flag
+    is set and keeping the bundle variable ``None`` otherwise -- the same
+    split ``interaction_scoring.py`` already uses for STRING/coexpression.
+    """
+    if not enabled:
+        return _empty_rockhopper_operon_bundle(cache_path)
+
+    if not cache_path.exists():
+        return _empty_rockhopper_operon_bundle(
+            cache_path, warnings=(f"rockhopper_operon cache not found at {cache_path}",)
+        )
+
+    try:
+        entries = json.loads(cache_path.read_text())
+    except (OSError, ValueError) as exc:
+        return _empty_rockhopper_operon_bundle(
+            cache_path, warnings=(f"failed to read rockhopper_operon cache {cache_path}: {exc}",)
+        )
+
+    pair_hits: dict[frozenset[str], RockhopperOperonHit] = {}
+    for entry in entries:
+        hit = RockhopperOperonHit(sample=entry.get("sample", ""), condition=entry.get("condition", ""))
+        for group in entry.get("operon_groups", []):
+            for i in range(len(group)):
+                for j in range(i + 1, len(group)):
+                    key = frozenset((group[i], group[j]))
+                    # First sample in the cache wins (deterministic; OR-
+                    # aggregation only needs *a* positive sample, not a
+                    # preference among samples).
+                    pair_hits.setdefault(key, hit)
+
+    return RockhopperOperonBundle(pair_hits=pair_hits, n_samples=len(entries), cache_path=cache_path)
+
+
+# ==========================================================================
+# 7. Orchestration / CLI
 # ==========================================================================
 
 
@@ -650,8 +765,6 @@ def build_cache(
 
 
 def write_cache(entries: list[dict], cache_out: Path) -> None:
-    import json
-
     cache_out.parent.mkdir(parents=True, exist_ok=True)
     with open(cache_out, "w") as fh:
         json.dump(entries, fh, indent=2)
