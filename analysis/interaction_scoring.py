@@ -118,7 +118,7 @@ _NEGATIVE_HIT_STRENGTH_VALUES: dict[str, float] = {
 # left untouched) treated any pair within 5,000 bp as "close" and gave it
 # full credit. Checking actual M. acetivorans operons in this project's own
 # data/input/genome.gff (the Mcr activation complex gene cluster
-# MA_4546-MA_4550, the nifI1-nifI2-nifK-nifD operon, and the mtpA-mtpC
+# MA_4546-MA_4550, the nifI1-nifI2-nifD-nifK operon, and the mtpA-mtpC
 # pair -- all independently confirmed real complexes, see
 # claude/experimental_interactions_curation.md) found every adjacent-gene
 # intergenic gap between 2 bp and 70 bp. A 5,000 bp gap is roughly two
