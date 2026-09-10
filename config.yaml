@@ -310,6 +310,21 @@ interaction_scoring:
   # RNA-seq supplementary files from NCBI GEO on first use.
   geo_coexpression_enabled: true
 
+  # Rockhopper-predicted-operon evidence (Phase 6f, used by both scoring
+  # models -- v2_evidence_based's genomic_context/rockhopper_operon
+  # component and legacy_additive's rockhopper_operon_score; see
+  # claude/phase6e_rockhopper_lk57_validation.md). Unlike
+  # string_ppi_ncbi_taxon_id above, this is a plain on/off switch with no
+  # id/path to configure -- there is no live Rockhopper execution at
+  # scoring time, only a pre-computed, repo-committed cache
+  # (data/cache/rockhopper_operons.json, see
+  # analysis/rockhopper_operon_bridge.py) covering 4 representative
+  # growth conditions. A pair Rockhopper did not group into the same
+  # predicted operon is reported as MISSING (not evaluated), never as
+  # negative evidence -- see the design rationale in
+  # patches/claude_code_instructions_rockhopper_implementation.md.
+  rockhopper_operon_enabled: true
+
 
 # ----------------------------------------------------------
 # Cache
