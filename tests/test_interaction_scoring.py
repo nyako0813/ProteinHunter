@@ -1404,6 +1404,44 @@ def test_rockhopper_operon_shares_genomic_context_category(tmp_path: Path) -> No
     assert detail_rows["genomic_context"]["category_cap"] == rockhopper["category_cap"]
 
 
+def test_rockhopper_operon_available_for_nif_non_adjacent_pair() -> None:
+    """The Nif complex's non-adjacent pair (NifI1=MA_3896, nifK=MA_3899, two
+    genes apart) is the original motivating case for evaluating Rockhopper
+    at all (see patches/claude_code_instructions_rockhopper_implementation.md
+    section "位置づけ・重要な前提"): a
+    query-candidate pair too far apart for the pipeline's own adjacent-pair
+    _gene_neighborhood_v2 threshold to bridge, but genuinely part of one
+    operon. Rockhopper's real cache groups all 5 Nif-region genes
+    (including this non-adjacent pair) into one predicted operon -- this
+    must resolve to AVAILABLE, not MISSING, confirming the gap-bridging
+    case actually works end to end.
+    """
+    records = {
+        "query": record("query", old_locus_tag="MA_3896", positive_sources_hit=["A"]),
+        "candidate": record("candidate", old_locus_tag="MA_3899", positive_sources_hit=["A"]),
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+        scoring_model="v2_evidence_based",
+    )
+    cfg.interaction_scoring = replace(cfg.interaction_scoring, rockhopper_operon_enabled=True)
+
+    result = run_interaction_scoring(cfg, classification(records))
+
+    assert result is not None
+    detail = next(
+        r
+        for r in result.evidence_detail_rows
+        if r["candidate_protein_id"] == "candidate" and r["component_name"] == "rockhopper_operon"
+    )
+    assert detail["status"] == "AVAILABLE"
+    assert detail["normalized_value"] == pytest.approx(1.0)
+    assert detail["category"] == "genomic_context"
+
+
 def test_rockhopper_operon_not_run_when_disabled() -> None:
     """Without rockhopper_operon_enabled, the component must be NOT_RUN, matching string_neighborhood."""
     records = {

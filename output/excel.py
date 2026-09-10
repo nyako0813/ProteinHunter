@@ -147,6 +147,7 @@ SCORE_BREAKDOWN_COLUMNS: tuple[str, ...] = (
     "interaction_evidence_score",
     "alphafold_readiness_score",
     "string_ppi_score",
+    "rockhopper_operon_score",
     "interaction_priority_score",
     "interaction_score",
     "final_score",
@@ -228,8 +229,9 @@ INDEX_ROWS_V2: tuple[tuple[str, str, str, str], ...] = (
     (
         SHEET_GENOMIC_CONTEXT,
         "scoring_model: v2_evidence_based only",
-        "genomic_context (+ STRING neighborhood) component-level detail",
-        "inspect the raw gene-neighborhood/STRING-neighborhood evidence",
+        "genomic_context (+ STRING neighborhood + Rockhopper predicted-operon evidence) "
+        "component-level detail",
+        "inspect the raw gene-neighborhood/STRING-neighborhood/Rockhopper-operon evidence",
     ),
     (
         SHEET_INTERACTION_EVIDENCE,
@@ -347,8 +349,9 @@ INTERACTION_SCORE_EXPLANATIONS: tuple[tuple[str, str], ...] = (
     (
         "interaction_score",
         "Query-specific evidence only, re-normalized to 0-100: genomic_context "
-        "(+ STRING's neighborhood channel) + domain_complementarity + external_ppi_evidence "
-        "(STRING's cooccurrence channel) + coexpression_evidence (GSE64349 measured transcript "
+        "(+ STRING's neighborhood channel + Rockhopper predicted-operon evidence) + "
+        "domain_complementarity + external_ppi_evidence (STRING's cooccurrence channel) + "
+        "coexpression_evidence (GSE64349 measured transcript "
         "coexpression only -- GSE77738 is computed and still shown in "
         "Interaction_Evidence_Detail, but excluded from this sum; a real-data check found it "
         "scored AlphaFold3-confirmed non-interacting pairs higher, on average, than curated true "
@@ -359,7 +362,10 @@ INTERACTION_SCORE_EXPLANATIONS: tuple[tuple[str, str], ...] = (
         "equivalent blended sum (always a number, 0 when there is no evidence, since legacy has "
         "no 'missing vs. evaluated-zero' concept; legacy_additive does not yet include "
         "coexpression_evidence -- v2_evidence_based only, see "
-        "claude/phase6b_coexpression_design.md). Deliberately excludes source_classification, "
+        "claude/phase6b_coexpression_design.md). Rockhopper's own evidence (rockhopper_operon / "
+        "rockhopper_operon_score, Phase 6f) is deliberately asymmetric: a pair Rockhopper did "
+        "not group into one predicted operon is MISSING/0, never negative -- see "
+        "claude/phase6e_rockhopper_lk57_validation.md. Deliberately excludes source_classification, "
         "sequence_evidence, and co_occurrence, which mainly reflect the candidate's own "
         "conservation profile rather than evidence specific to this query pair. Reference only -- "
         "does not affect interaction_priority_score, candidate_rank, or sheet sort order (unless "
@@ -402,6 +408,19 @@ INTERACTION_SCORE_EXPLANATIONS: tuple[tuple[str, str], ...] = (
         "one 0-weights.external_ppi point score. 0 when interaction_scoring.string_ppi_ncbi_taxon_id "
         "is unset or STRING has no data for this pair -- reference only, folded into both "
         "interaction_priority_score and interaction_score.",
+    ),
+    (
+        "rockhopper_operon_score",
+        "legacy_additive only (blank for v2_evidence_based, which reports this as its own "
+        "rockhopper_operon row in Interaction_Evidence_Detail instead). Full "
+        "weights.rockhopper_operon points when Rockhopper grouped this pair into the same "
+        "predicted operon in at least one pre-computed sample (see "
+        "analysis/rockhopper_operon_bridge.py), otherwise 0 -- 0 when Rockhopper did not merge "
+        "the pair is NOT the same as negative evidence, it only means legacy_additive's "
+        "no-MISSING-concept model collapses 'not evaluated' and 'evaluated, no match' into the "
+        "same 0, same as every other legacy sub-score. 0 also when "
+        "interaction_scoring.rockhopper_operon_enabled is unset. Reference only, folded into "
+        "both interaction_priority_score and interaction_score.",
     ),
     (
         "candidate_source",
@@ -477,6 +496,16 @@ INTERACTION_SCORE_NOTES: tuple[str, ...] = (
     "GSE77738 (PMID 27852217) and GSE64349 (PMID 25691524), public NIH data with no "
     "reuse restriction; citing these studies when the values are published or "
     "redistributed is standard scientific courtesy, not a license requirement.",
+    "rockhopper_operon/rockhopper_operon_score are derived from operon predictions made "
+    "by Rockhopper (https://cs.wellesley.edu/~btjaden/Rockhopper/), a freely available "
+    "academic tool with no separate redistribution license stated for the tool or its "
+    "output; citing Tjaden, \"A computational system for identifying operons based on "
+    "RNA-seq data\", Methods, 176:62-70, 2019 (PMC6776731) when these values are "
+    "published or redistributed is standard scientific courtesy, not a license "
+    "requirement. A pair Rockhopper did not group into the same predicted operon is "
+    "reported as MISSING (not evaluated), never as negative evidence -- see "
+    "claude/phase6e_rockhopper_lk57_validation.md for the false-negative case (the Mtp "
+    "complex) that motivated this asymmetric treatment.",
 )
 
 

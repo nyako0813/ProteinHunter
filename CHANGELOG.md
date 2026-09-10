@@ -2,6 +2,81 @@
 
 ProteinHunter_v5 の変更履歴です。
 
+## 未リリース: Rockhopperオペロン予測証拠の統合(Phase 6f)
+
+Rockhopper(ゲノム配列+RNA-seqリードから直接オペロン構造を予測する
+Javaツール)由来の証拠を`genomic_context`カテゴリに追加する対応。
+実装前にPhase 6eとして単一サンプル・複数サンプル(LK57/LK51、酢酸条件)
+での検証を行い、既知の3複合体(Mcr活性化複合体・Nif複合体・Mtp複合体)を
+ベンチマークにした結果、Mcr/Nifは正しく1オペロンとして検出できたが、
+Mtp(遺伝子間gap 70bp)は発現量が十分でも3段階のリード数・2サンプルの
+いずれでも検出できなかった。詳細は`claude/phase6e_rockhopper_lk57_validation.md`
+参照。
+
+### Added
+
+- `analysis/rockhopper_operon_bridge.py`: 新設。生成側(GenBank→`.ptt`/`.rnt`
+  変換、ENA経由のFASTQ取得、Rockhopper実行、`_operons.txt`から
+  `old_locus_tag`ベースのオペロングループを抽出)と実行時側
+  (`RockhopperOperonBundle`/`load_rockhopper_operon_bundle`、
+  事前計算済みキャッシュを読むだけでRockhopperは一切起動しない)の
+  両方を持つ。GSE77738(酢酸=LK57、メタノール=LK21、トリメチルアミン=LK27)
+  ・GSE64349(ジメチルスルフィド=AF2)の代表4サンプルを実行し、
+  `data/cache/rockhopper_operons.json`(コミット対象、約136KB)を生成。
+  生FASTQ・Rockhopper本体・JREは`.gitignore`済みの`data/temp/`配下。
+- `analysis/interaction_scoring.py`:
+  - v2: 新コンポーネント`rockhopper_operon`を、既存の`genomic_context`
+    カテゴリ(string_neighborhoodと同じ枠)に追加。`interaction_score`にも
+    算入(`INTERACTION_SCORE_COMPONENT_NAMES`に追加)。
+  - legacy: `scoring_weights.rockhopper_operon`(暫定15.0)で正規化した
+    `rockhopper_operon_score`を`interaction_priority_score`と
+    `interaction_score`双方に算入。string_neighborhoodとは異なり
+    (`external_ppi`に統合)、Rockhopperは独自のweight/scoreフィールドを
+    新設(Phase 6f指示書の明示的な要求により、coexpressionのlegacy統合
+    先送りとは異なる方針)。
+  - **非対称設計(最重要の設計判断)**: ペアがRockhopperの予測で
+    同一オペロンに含まれる→陽性シグナルとして加点。含まれない→
+    `MISSING`として扱い、STRINGのcooccurrence/neighborhoodのような
+    「評価済みゼロ」(`AVAILABLE, normalized_value=0.0`)とは意図的に
+    異なる扱いとした。Phase 6eの検証でMtpという確認済みの偽陰性例が
+    あるため、「マージされなかった」を陰性の証拠として使うのは誤りと
+    判断したため。legacy_additiveにはMISSING概念自体が無いため、この
+    非対称性は自然に「0点」へ収束する(未評価も陰性も同じ0点という、
+    他のlegacyサブスコアと同じ扱い)。
+  - 複数サンプルでOR集約(いずれか1サンプルでも同一オペロンとして
+    検出されれば陽性)。
+- `config.py`: `interaction_scoring.rockhopper_operon_enabled`(既定false)。
+  STRINGのtaxid指定とは異なり単一ON/OFFスイッチ(キャッシュの場所・
+  対象サンプルは設定不可、coexpressionの`geo_coexpression_enabled`と
+  同じパターン)。`scoring_weights.rockhopper_operon`(暫定15.0)も追加。
+- `output/excel.py`: Indexシートの列説明・注記にRockhopperの帰属表示
+  (Tjaden, *Methods*, 176:62-70, 2019, PMC6776731)を追加。STRING/GEOと
+  同様、公開されている学術ツールの引用は慣習であり、ライセンス上の
+  義務ではない旨を明記。
+- `analysis/interaction_scoring.py`の`_gene_neighborhood_v2`しきい値
+  コメントに残っていた「MA_3898=NifK、MA_3899=NifD」の誤りを、Phase 6eの
+  調査で判明した正しい「MA_3898=nifD、MA_3899=nifK」に訂正。
+- 実データ検証: 実際にコミット済みの`data/cache/rockhopper_operons.json`
+  を使い、Mcr活性化複合体(MA_4546/MA_4550)とNif複合体の非隣接ペア
+  (NifI1=MA_3896/nifK=MA_3899、2遺伝子離れている)が`AVAILABLE`として
+  正しく検出され、Mtp複合体(MA_4164/MA_4165)が`MISSING`(陰性ではなく)
+  として正しく扱われることをテストで確認。
+- テスト15件追加(`tests/test_rockhopper_operon_bridge.py`新設9件、
+  `tests/test_interaction_scoring.py`に6件)。
+
+### Notes
+
+- Mtp未検出の原因は、条件依存の発現不足ではなく、Rockhopper内部の
+  近接カットオフ(遺伝子間gapがおよそ30〜70bpを超えると同一転写単位と
+  判定されなくなる)による手法的な見落としの可能性が高いと判明済み
+  (`claude/phase6e_rockhopper_lk57_validation.md`)。正確なカットオフ値の
+  特定は不要 -- 非対称設計により、正確な値を知らなくても正しく動作する。
+- M1で生成した4サンプルの`_operons.txt`は、入力FASTQ・アライメント率が
+  明確に異なるにもかかわらず完全に同一だった(条件依存の違いは今回の
+  代表サンプルの範囲では観測されなかった)。OR集約の設計自体は妥当だが、
+  この4サンプルのキャッシュではまだ「複数サンプルにしたから新たに
+  検出できた」実例は無い。
+
 ## 未リリース: 他生物種一致の考慮/非考慮を1スイッチで切り替え(設定.xlsx)
 
 `設定.xlsx`(ユーザー提示の2プリセット比較表)がまとめていた
