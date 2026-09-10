@@ -339,6 +339,10 @@ INTERACTION_PAIR_COLUMNS: tuple[str, ...] = (
     # v2_evidence_based, which exposes string_cooccurrence/string_neighborhood
     # as separate Interaction_Evidence_Detail rows instead of one blended score)
     "string_ppi_score",
+    # legacy_additive only (Phase 6f M3; blank/NaN for scoring_model:
+    # v2_evidence_based, which exposes rockhopper_operon as its own
+    # Interaction_Evidence_Detail row instead)
+    "rockhopper_operon_score",
     "pair_total_length",
     "alphafold_recommended",
     # scoring model v2 only (blank/NaN for scoring_model: legacy_additive)
@@ -440,6 +444,7 @@ INTERACTION_EVIDENCE_DETAIL_LEGACY_COLUMNS: tuple[str, ...] = (
     "domain_complementarity_score",
     "alphafold_readiness_score",
     "string_ppi_score",
+    "rockhopper_operon_score",
     "interaction_score_reasons",
 )
 
@@ -716,6 +721,7 @@ def run_interaction_scoring(config: Any, blast_classification: Any) -> Interacti
                 scoring_config=scoring_config,
                 feature_map=feature_map,
                 string_ppi_bundle=string_ppi_bundle,
+                rockhopper_operon_bundle=rockhopper_operon_bundle,
                 collect_evidence_detail=collect_evidence_detail,
             )
         if rows:
@@ -1327,6 +1333,7 @@ def _rank_source_candidates(
     scoring_config: Any,
     feature_map: dict[str, GffFeatureLocation],
     string_ppi_bundle: StringPpiBundle | None = None,
+    rockhopper_operon_bundle: RockhopperOperonBundle | None = None,
     collect_evidence_detail: bool = False,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     all_rows: list[dict[str, Any]] = []
@@ -1348,6 +1355,7 @@ def _rank_source_candidates(
                 _score_pair(
                     query, candidate, candidate_source, scoring_config, feature_map,
                     string_ppi_bundle=string_ppi_bundle,
+                    rockhopper_operon_bundle=rockhopper_operon_bundle,
                 )
             )
         _assign_distance_independent_ranks(query_rows)
@@ -1377,6 +1385,7 @@ def _evidence_detail_row_legacy(row: dict[str, Any]) -> dict[str, Any]:
         "domain_complementarity_score": row["domain_complementarity_score"],
         "alphafold_readiness_score": row["alphafold_readiness_score"],
         "string_ppi_score": row["string_ppi_score"],
+        "rockhopper_operon_score": row["rockhopper_operon_score"],
         "interaction_score_reasons": row["interaction_score_reasons"],
     }
 
@@ -1388,6 +1397,7 @@ def _score_pair(
     scoring_config: Any,
     feature_map: dict[str, GffFeatureLocation],
     string_ppi_bundle: StringPpiBundle | None = None,
+    rockhopper_operon_bundle: RockhopperOperonBundle | None = None,
 ) -> dict[str, Any]:
     weights = scoring_config.scoring_weights
     reasons: list[str] = [f"candidate source: {candidate_source}"]
@@ -1400,6 +1410,9 @@ def _score_pair(
 
     domain_complementarity_score = _domain_complementarity_score(query, candidate, weights.domain_complementarity, reasons)
     string_ppi_score = _legacy_string_ppi_score(query, candidate, weights.external_ppi, string_ppi_bundle, reasons)
+    rockhopper_operon_score = _legacy_rockhopper_operon_score(
+        query, candidate, weights.rockhopper_operon, rockhopper_operon_bundle, reasons
+    )
     alphafold_readiness_score, pair_total_length, alphafold_recommended = _alphafold_readiness(query, candidate, scoring_config)
     reasons.append("compatible for manual AlphaFold" if alphafold_recommended else "missing sequence or length too large for manual AlphaFold")
 
@@ -1417,12 +1430,22 @@ def _score_pair(
     if priority_group in {"distant_cooccurrence_candidate", "distant_domain_candidate"}:
         reasons.append("distant candidate retained by co-occurrence/domain evidence")
 
-    total_score = candidate_priority_score + neighborhood["same_gene_neighborhood_score"] + co_occurrence_score + domain_complementarity_score + alphafold_readiness_score + string_ppi_score
+    total_score = (
+        candidate_priority_score
+        + neighborhood["same_gene_neighborhood_score"]
+        + co_occurrence_score
+        + domain_complementarity_score
+        + alphafold_readiness_score
+        + string_ppi_score
+        + rockhopper_operon_score
+    )
     interaction_score = _legacy_interaction_score(
         neighborhood["same_gene_neighborhood_score"],
         domain_complementarity_score,
         string_ppi_score,
         string_ppi_bundle is not None,
+        rockhopper_operon_score,
+        rockhopper_operon_bundle is not None,
         weights,
     )
     row = {
@@ -1446,6 +1469,7 @@ def _score_pair(
         "domain_complementarity_score": round(domain_complementarity_score, 3),
         "alphafold_readiness_score": round(alphafold_readiness_score, 3),
         "string_ppi_score": round(string_ppi_score, 3),
+        "rockhopper_operon_score": round(rockhopper_operon_score, 3),
         "pair_total_length": pair_total_length,
         "alphafold_recommended": alphafold_recommended,
         "interaction_score": interaction_score,
@@ -1465,14 +1489,16 @@ def _legacy_interaction_score(
     domain_complementarity_score: float,
     string_ppi_score: float,
     string_ppi_active: bool,
+    rockhopper_operon_score: float,
+    rockhopper_operon_active: bool,
     weights: Any,
 ) -> float | None:
     """legacy_additive counterpart of interaction_score: query-specific evidence only.
 
     Same INTERACTION_SCORE_COMPONENT_NAMES scope as v2 (genomic_context +
-    domain_complementarity + external_ppi_evidence, co_occurrence
-    excluded) re-normalized to 0-100 against the configured weight budget
-    for those components. Unlike v2, legacy_additive has no
+    domain_complementarity + external_ppi_evidence + rockhopper_operon,
+    co_occurrence excluded) re-normalized to 0-100 against the configured
+    weight budget for those components. Unlike v2, legacy_additive has no
     MISSING/AVAILABLE evidence-status concept -- every legacy sub-score is
     always a plain number (0 when there is no evidence, never None) -- so
     this can only ever be a numeric 0-100 value, not the "no evidence at
@@ -1480,19 +1506,27 @@ def _legacy_interaction_score(
     when every active component carries zero weight in scoring_weights
     (nothing to normalize against).
 
-    ``weights.external_ppi`` is only added to the denominator when
-    ``string_ppi_active`` is true (STRING was actually configured for this
-    run) -- otherwise every run that does not use STRING would see its
-    interaction_score silently diluted by a weight budget that never has
-    anything to contribute to the numerator either, changing pre-Phase-6a
-    results for runs that never opted into STRING at all.
+    ``weights.external_ppi``/``weights.rockhopper_operon`` are only added
+    to the denominator when the corresponding ``*_active`` flag is true
+    (the bundle was actually configured for this run) -- otherwise every
+    run that does not use STRING/Rockhopper would see its interaction_score
+    silently diluted by a weight budget that never has anything to
+    contribute to the numerator either, changing pre-Phase-6a/6f results
+    for runs that never opted into either evidence source.
     """
     max_points = weights.gene_neighborhood + weights.domain_complementarity
     if string_ppi_active:
         max_points += weights.external_ppi
+    if rockhopper_operon_active:
+        max_points += weights.rockhopper_operon
     if max_points <= 0:
         return None
-    raw = same_gene_neighborhood_score + domain_complementarity_score + string_ppi_score
+    raw = (
+        same_gene_neighborhood_score
+        + domain_complementarity_score
+        + string_ppi_score
+        + rockhopper_operon_score
+    )
     return round(raw / max_points * 100, 3)
 
 
@@ -2828,6 +2862,38 @@ def _legacy_string_ppi_score(
         f"neighborhood={scores.neighborhood}/1000"
     )
     return combined * weight
+
+
+def _legacy_rockhopper_operon_score(
+    query: dict[str, Any],
+    candidate: ProteinRecord,
+    weight: float,
+    rockhopper_operon_bundle: RockhopperOperonBundle | None,
+    reasons: list[str],
+) -> float:
+    """legacy_additive counterpart of the v2 rockhopper_operon component
+    (Phase 6f M3). Unlike _legacy_string_ppi_score, this is a plain
+    binary hit (full ``weight`` points) or miss (0.0) -- Rockhopper's
+    evidence has no natural partial-credit channel the way STRING's
+    0-1000 scores do. Always 0.0 (never None) when unavailable, matching
+    every other legacy sub-score's "0 means no evidence, not missing"
+    convention -- legacy_additive has no MISSING concept at all, so the
+    v2 component's asymmetric MISSING-not-negative treatment collapses
+    naturally here: "not merged" and "never evaluated" both already mean
+    "contributes 0," same as any other absent legacy evidence.
+    """
+    if rockhopper_operon_bundle is None:
+        return 0.0
+
+    query_tag = query["resolved_old_locus_tag"]
+    candidate_tag = candidate.old_locus_tag or ""
+    hit = rockhopper_operon_bundle.lookup(query_tag, candidate_tag)
+    if hit is None:
+        reasons.append("not grouped into the same predicted operon in any cached Rockhopper sample")
+        return 0.0
+
+    reasons.append(f"Rockhopper: grouped into one predicted operon (sample={hit.sample}, condition={hit.condition})")
+    return weight
 
 
 def _meaningful_terms(text: str) -> set[str]:
