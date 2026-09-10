@@ -2653,6 +2653,216 @@ def test_v2_mode_domain_family_map_scores_pfam_match_without_legacy_keyword_over
     assert "domain family match" in row["interaction_score_reasons"]
 
 
+def _write_exclusive_domain_family_map(tmp_path: Path) -> Path:
+    path = tmp_path / "domain_family_map_exclusive.yaml"
+    path.write_text(
+        """
+version: test
+categories:
+  radical_sam:
+    pfam: [PF04055]
+  iron_sulfur_cluster:
+    pfam: [PF00037]
+    exclusive: true
+category_rules:
+  - left: radical_sam
+    right: iron_sulfur_cluster
+    note: "radical SAM x iron-sulfur cluster"
+""",
+        encoding="utf-8",
+    )
+    return path
+
+
+def _write_exclusive_uniprot_bulk_export(tmp_path: Path) -> Path:
+    path = tmp_path / "uniprot_bulk_exclusive.json"
+    path.write_text(
+        json.dumps(
+            {
+                "results": [
+                    {
+                        "genes": [{"orderedLocusNames": [{"value": "MA_QUERY"}]}],
+                        "uniProtKBCrossReferences": [
+                            {"database": "Pfam", "id": "PF04055", "properties": []}
+                        ],
+                    },
+                    {
+                        "genes": [{"orderedLocusNames": [{"value": "MA_SOLO"}]}],
+                        "uniProtKBCrossReferences": [
+                            {"database": "Pfam", "id": "PF00037", "properties": []}
+                        ],
+                    },
+                    {
+                        "genes": [{"orderedLocusNames": [{"value": "MA_MULTI"}]}],
+                        "uniProtKBCrossReferences": [
+                            {"database": "Pfam", "id": "PF00037", "properties": []},
+                            {"database": "Pfam", "id": "PF99999", "properties": []},
+                        ],
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_v2_mode_domain_family_map_exclusive_category_excludes_multidomain_candidate(
+    tmp_path: Path,
+) -> None:
+    """A solo Fer4 (PF00037-only) candidate matches iron_sulfur_cluster (exclusive);
+    a Fer4 + unrelated-domain candidate must not."""
+    domain_family_map_path = _write_exclusive_domain_family_map(tmp_path)
+    uniprot_bulk_export_path = _write_exclusive_uniprot_bulk_export(tmp_path)
+    records = {
+        "query": record(
+            "query",
+            old_locus_tag="MA_QUERY",
+            description="radical SAM domain-containing protein",
+            positive_sources_hit=["A"],
+        ),
+        "solo": record(
+            "solo",
+            old_locus_tag="MA_SOLO",
+            description="ferredoxin domain-containing protein",
+            positive_sources_hit=["A"],
+        ),
+        "multi": record(
+            "multi",
+            old_locus_tag="MA_MULTI",
+            description="membrane transporter protein",
+            positive_sources_hit=["A"],
+        ),
+    }
+    cls = build_classification(
+        all_records=records,
+        positive_only_records={"solo": records["solo"], "multi": records["multi"]},
+    )
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+        scoring_model="v2_evidence_based",
+        domain_family_map_path=domain_family_map_path,
+        uniprot_bulk_export_path=uniprot_bulk_export_path,
+    )
+
+    result = run_interaction_scoring(cfg, cls)
+
+    assert result is not None
+    rows = {r["candidate_protein_id"]: r for r in result.source_rows["Interaction_Candidates"]}
+    assert rows["solo"]["domain_complementarity_score"] == 10.0
+    assert "domain family match" in rows["solo"]["interaction_score_reasons"]
+    assert rows["multi"]["domain_complementarity_score"] == 0.0
+    assert "domain family match" not in rows["multi"]["interaction_score_reasons"]
+
+
+def _write_electron_carrier_domain_family_map(tmp_path: Path) -> Path:
+    path = tmp_path / "domain_family_map_electron_carrier.yaml"
+    path.write_text(
+        """
+version: test
+categories:
+  radical_sam:
+    pfam: [PF04055]
+  electron_carrier:
+    pfam: [PF12724]
+    interpro: [IPR029039]
+    supfam: [SSF52218]
+    match_fields: [pfam]
+category_rules:
+  - left: radical_sam
+    right: electron_carrier
+    note: "radical SAM x electron carrier"
+""",
+        encoding="utf-8",
+    )
+    return path
+
+
+def _write_electron_carrier_uniprot_bulk_export(tmp_path: Path) -> Path:
+    path = tmp_path / "uniprot_bulk_electron_carrier.json"
+    path.write_text(
+        json.dumps(
+            {
+                "results": [
+                    {
+                        "genes": [{"orderedLocusNames": [{"value": "MA_QUERY"}]}],
+                        "uniProtKBCrossReferences": [
+                            {"database": "Pfam", "id": "PF04055", "properties": []}
+                        ],
+                    },
+                    {
+                        "genes": [{"orderedLocusNames": [{"value": "MA_FMN_RED"}]}],
+                        "uniProtKBCrossReferences": [
+                            {"database": "Pfam", "id": "PF03358", "properties": []},
+                            {"database": "InterPro", "id": "IPR029039", "properties": []},
+                            {"database": "SUPFAM", "id": "SSF52218", "properties": []},
+                        ],
+                    },
+                    {
+                        "genes": [{"orderedLocusNames": [{"value": "MA_FLAVODOXIN"}]}],
+                        "uniProtKBCrossReferences": [
+                            {"database": "Pfam", "id": "PF12724", "properties": []}
+                        ],
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_v2_mode_domain_family_map_electron_carrier_match_fields_excludes_flavoprotein_fold_only(
+    tmp_path: Path,
+) -> None:
+    """electron_carrier is limited to pfam (PF12724); a candidate that only shares the
+    broad Flavoprotein-like_sf interpro/supfam fold (e.g. PF03358 FMN reductase) must
+    not match, while a true flavodoxin (PF12724) still does."""
+    domain_family_map_path = _write_electron_carrier_domain_family_map(tmp_path)
+    uniprot_bulk_export_path = _write_electron_carrier_uniprot_bulk_export(tmp_path)
+    records = {
+        "query": record(
+            "query",
+            old_locus_tag="MA_QUERY",
+            description="radical SAM domain-containing protein",
+            positive_sources_hit=["A"],
+        ),
+        "fmn_red": record(
+            "fmn_red",
+            old_locus_tag="MA_FMN_RED",
+            description="NADPH-dependent FMN reductase-like protein",
+            positive_sources_hit=["A"],
+        ),
+        "flavodoxin": record(
+            "flavodoxin",
+            old_locus_tag="MA_FLAVODOXIN",
+            description="flavodoxin",
+            positive_sources_hit=["A"],
+        ),
+    }
+    cls = build_classification(
+        all_records=records,
+        positive_only_records={"fmn_red": records["fmn_red"], "flavodoxin": records["flavodoxin"]},
+    )
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+        scoring_model="v2_evidence_based",
+        domain_family_map_path=domain_family_map_path,
+        uniprot_bulk_export_path=uniprot_bulk_export_path,
+    )
+
+    result = run_interaction_scoring(cfg, cls)
+
+    assert result is not None
+    rows = {r["candidate_protein_id"]: r for r in result.source_rows["Interaction_Candidates"]}
+    assert rows["fmn_red"]["domain_complementarity_score"] == 0.0
+    assert "domain family match" not in rows["fmn_red"]["interaction_score_reasons"]
+    assert rows["flavodoxin"]["domain_complementarity_score"] == 10.0
+    assert "domain family match" in rows["flavodoxin"]["interaction_score_reasons"]
+
+
 def test_v2_mode_domain_family_map_unset_falls_back_to_legacy_matching() -> None:
     """Regression: default (None/None) config must keep scoring domain_complementarity as before."""
     records = {

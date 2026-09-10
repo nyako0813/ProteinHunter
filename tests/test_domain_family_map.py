@@ -122,3 +122,77 @@ def test_shipped_v1_domain_family_map_loads() -> None:
     assert match is not None
     assert match[0] == "atp_dependent_activator"
     assert match[1] == "electron_carrier"
+
+    assert len(loaded.categories) == 10
+    assert len(loaded.category_rules) == 9
+    assert loaded.categories["iron_sulfur_cluster"].exclusive is True
+    assert loaded.categories["electron_carrier"].match_fields == frozenset({"pfam"})
+    assert loaded.categories["cysteine_desulfurase"].match_fields == frozenset({"pfam"})
+    assert loaded.categories["rhodanese_sulfurtransferase"].match_fields == frozenset({"pfam"})
+    assert loaded.categories["dsre_sulfur_relay"].match_fields == frozenset({"pfam"})
+    assert loaded.categories["dsre_sulfur_relay"].pfam == frozenset({"PF02635", "PF04077"})
+    assert loaded.categories["atp_dependent_activator"].match_fields == frozenset({"pfam"})
+    assert loaded.categories["radical_sam"].pfam == frozenset({"PF04055"})
+
+
+def test_exclusive_category_matches_only_when_pfam_is_a_subset(tmp_path: Path) -> None:
+    path = tmp_path / "domain_family_map.yaml"
+    path.write_text(
+        """
+version: test
+categories:
+  iron_sulfur_cluster:
+    pfam: [PF00037]
+    exclusive: true
+""",
+        encoding="utf-8",
+    )
+    loaded = load_domain_family_map(path)
+
+    solo_info = UniProtDomainInfo(pfam=frozenset({"PF00037"}))
+    multidomain_info = UniProtDomainInfo(pfam=frozenset({"PF00037", "PF99999"}))
+
+    assert loaded.categories_for(solo_info) == {"iron_sulfur_cluster"}
+    assert loaded.categories_for(multidomain_info) == set()
+
+
+def test_exclusive_category_does_not_match_empty_pfam(tmp_path: Path) -> None:
+    path = tmp_path / "domain_family_map.yaml"
+    path.write_text(
+        """
+version: test
+categories:
+  iron_sulfur_cluster:
+    pfam: [PF00037]
+    exclusive: true
+""",
+        encoding="utf-8",
+    )
+    loaded = load_domain_family_map(path)
+
+    empty_info = UniProtDomainInfo(pfam=frozenset())
+
+    assert loaded.categories_for(empty_info) == set()
+
+
+def test_match_fields_restricts_matching_to_listed_fields(tmp_path: Path) -> None:
+    path = tmp_path / "domain_family_map.yaml"
+    path.write_text(
+        """
+version: test
+categories:
+  activator:
+    pfam: [PF24167]
+    interpro: [IPR014729]
+    supfam: [SSF52402]
+    match_fields: [pfam]
+""",
+        encoding="utf-8",
+    )
+    loaded = load_domain_family_map(path)
+
+    interpro_only_info = UniProtDomainInfo(interpro=frozenset({"IPR014729"}))
+    pfam_info = UniProtDomainInfo(pfam=frozenset({"PF24167"}))
+
+    assert loaded.categories_for(interpro_only_info) == set()
+    assert loaded.categories_for(pfam_info) == {"activator"}
