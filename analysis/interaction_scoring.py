@@ -574,6 +574,7 @@ def run_interaction_scoring(config: Any, blast_classification: Any) -> Interacti
         _resolve_query(query, index, blast_classification.all_records)
         for index, query in enumerate(queries, start=1)
     ]
+    _check_conserved_query_visibility(resolved_queries, scoring_config.candidate_sources, warnings)
     query_rows = [_query_row(query) for query in resolved_queries]
     source_rows: dict[str, list[dict[str, Any]]] = {}
     evidence_detail_rows: list[dict[str, Any]] = []
@@ -1307,7 +1308,61 @@ def _resolve_query(query: dict[str, str], index: int, records: dict[str, Protein
         status = "unresolved"
         notes = "no matching target record or sequence"
 
-    return {"query_id": query_id, "input_protein_id": query["protein_id"], "input_old_locus_tag": query["old_locus_tag"], "resolved_protein_id": resolved_protein_id, "resolved_old_locus_tag": resolved_old_locus_tag, "sequence": sequence, "sequence_length": len(sequence) if sequence else None, "resolution_status": status, "description": description, "notes": notes, "record": matched_record}
+    # None (not "none") when there is no matched target record: a query
+    # resolved only from an explicit sequence was never BLASTed against the
+    # negative references, so its conservation is unknown, not absent.
+    negative_hit_strength = matched_record.negative_hit_strength if matched_record is not None else None
+
+    return {"query_id": query_id, "input_protein_id": query["protein_id"], "input_old_locus_tag": query["old_locus_tag"], "resolved_protein_id": resolved_protein_id, "resolved_old_locus_tag": resolved_old_locus_tag, "sequence": sequence, "sequence_length": len(sequence) if sequence else None, "resolution_status": status, "description": description, "notes": notes, "record": matched_record, "negative_hit_strength": negative_hit_strength}
+
+
+#: Marker that starts every warning built by
+#: _check_conserved_query_visibility, so output/word_report.py can pick these
+#: out of InteractionScoringResult.warnings without a second code path
+#: re-deriving the condition. See patches/conserved_query_visibility_design.md.
+CONSERVED_QUERY_WARNING_PREFIX = "conserved query visibility: "
+
+_CONSERVED_QUERY_STRENGTHS = frozenset({"strong", "medium"})
+_NEGATIVE_HIT_BUCKET_KEYS = ("negative_hit", "negative_strong_hit", "negative_medium_hit", "negative_weak_hit")
+
+
+def is_conserved_query_visibility_warning(warning: str) -> bool:
+    """True for a warning built by _check_conserved_query_visibility."""
+    return warning.startswith(CONSERVED_QUERY_WARNING_PREFIX)
+
+
+def _check_conserved_query_visibility(
+    resolved_queries: list[dict[str, Any]],
+    candidate_sources: dict[str, bool],
+    warnings: list[str],
+) -> None:
+    """Warn when a strongly conserved query's negative-hit partners are excluded.
+
+    Diagnostic only: never changes the candidate pool. Experimentally
+    confirmed partners of highly conserved queries tend to be conserved too,
+    so they land in the Negative_hit bucket, which is off by default and
+    therefore absent from every output sheet regardless of score. Stays
+    silent when any negative-hit bucket is already enabled (the user has
+    already made that decision) and for queries with no matched target
+    record (negative_hit_strength unknown).
+    """
+    if any(candidate_sources.get(key, False) for key in _NEGATIVE_HIT_BUCKET_KEYS):
+        return
+    for query in resolved_queries:
+        strength = query.get("negative_hit_strength")
+        if strength not in _CONSERVED_QUERY_STRENGTHS:
+            continue
+        warnings.append(
+            f"{CONSERVED_QUERY_WARNING_PREFIX}Query {query['query_id']} itself has a {strength} "
+            f"negative-reference BLAST hit (negative_hit_strength={strength}). Interaction "
+            "partners of broadly conserved proteins may be conserved too and so be classified "
+            "as Negative_hit as well. With the current interaction_scoring.candidate_sources "
+            "settings (negative_hit and its strong/medium/weak sub-buckets all disabled), "
+            "candidates in that bucket are excluded from every output sheet regardless of "
+            "their score. If expected partners of this query are missing from the output, "
+            "consider re-running with candidate_sources.negative_hit (or one strength "
+            "sub-bucket) enabled."
+        )
 
 
 def _find_query_record(query: dict[str, str], records: dict[str, ProteinRecord]) -> ProteinRecord | None:

@@ -17,6 +17,7 @@ from config import (
     InteractionScoringConfig,
     WordReportConfig,
 )
+from analysis.interaction_scoring import CONSERVED_QUERY_WARNING_PREFIX
 from output.report_v2 import bookmark_name
 from output.word_report import category_refs_for_scoring_model, write_word_report
 
@@ -250,6 +251,41 @@ def test_word_report_evidence_architecture_states_pih_bundle_absence(tmp_path: P
     document = Document(str(output_path))
     text = "\n".join(p.text for p in document.paragraphs)
     assert "was not supplied for this run" in text
+
+
+def test_word_report_5_7_includes_conserved_query_warning_without_prefix(tmp_path: Path) -> None:
+    output_path = tmp_path / "report.docx"
+    interaction_result = _interaction_result({"Interaction_Candidates": [_pair_row("q1", "c1")]})
+    interaction_result.warnings = [
+        f"{CONSERVED_QUERY_WARNING_PREFIX}Query HdrD1 itself has a strong negative-reference BLAST hit.",
+        "some unrelated warning",
+    ]
+
+    write_word_report(
+        config=app_config(),
+        blast_classification=blast_classification(),
+        output_path=output_path,
+        interaction_result=interaction_result,
+    )
+
+    text = "\n".join(p.text for p in Document(str(output_path)).paragraphs)
+    assert "Query HdrD1 itself has a strong negative-reference BLAST hit." in text
+    assert CONSERVED_QUERY_WARNING_PREFIX not in text
+    assert "some unrelated warning" not in text
+
+
+def test_word_report_5_7_unchanged_without_conserved_query_warning(tmp_path: Path) -> None:
+    output_path = tmp_path / "report.docx"
+
+    write_word_report(
+        config=app_config(),
+        blast_classification=blast_classification(),
+        output_path=output_path,
+        interaction_result=_interaction_result({"Interaction_Candidates": [_pair_row("q1", "c1")]}),
+    )
+
+    text = "\n".join(p.text for p in Document(str(output_path)).paragraphs)
+    assert "itself has a" not in text
 
 
 def test_word_report_prints_excel_cross_reference_as_plain_text_not_link(tmp_path: Path) -> None:

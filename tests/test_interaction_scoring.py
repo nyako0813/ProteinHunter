@@ -28,6 +28,7 @@ from analysis.interaction_scoring import (
     INTERACTION_EVIDENCE_DETAIL_V2_COLUMNS,
     PROTEIN_HUNTER_SCORE_CEILING,
     interaction_pair_columns,
+    is_conserved_query_visibility_warning,
     resolve_cdd_annotation_targets,
     resolve_protein_hunter_scores,
     run_interaction_scoring,
@@ -316,6 +317,155 @@ def test_resolved_old_locus_tag_stays_empty_when_neither_source_has_it() -> None
     assert result is not None
     assert result.query_rows[0]["resolved_old_locus_tag"] == ""
     assert result.query_rows[0]["resolution_status"] == "resolved"
+
+
+# ---------------------------------------------------------------------------
+# conserved-query visibility warning (patches/conserved_query_visibility_design.md)
+# ---------------------------------------------------------------------------
+
+
+def _conserved_query_warnings(
+    strengths: dict[str, str],
+    candidate_sources: dict[str, bool] | None = None,
+) -> list[str]:
+    """Run scoring with one query per (id -> negative_hit_strength) and return the conserved-query warnings."""
+    records = {}
+    for protein_id, strength in strengths.items():
+        rec = record(protein_id)
+        rec.negative_hit_strength = strength
+        records[protein_id] = rec
+    cfg = interaction_config(
+        enabled=True,
+        query_proteins=tuple(InteractionQueryConfig(pid, "", "") for pid in strengths),
+        candidate_sources=all_sources_disabled() if candidate_sources is None else candidate_sources,
+    )
+    result = run_interaction_scoring(cfg, build_classification(all_records=records))
+    assert result is not None
+    return [w for w in result.warnings if is_conserved_query_visibility_warning(w)]
+
+
+@pytest.mark.parametrize("strength", ["strong", "medium"])
+def test_conserved_query_warns_for_strong_and_medium(strength: str) -> None:
+    warnings = _conserved_query_warnings({"HdrD1": strength})
+
+    assert len(warnings) == 1
+    assert "HdrD1" in warnings[0]
+    assert f"negative_hit_strength={strength}" in warnings[0]
+
+
+@pytest.mark.parametrize("strength", ["weak", "none"])
+def test_conserved_query_silent_for_weak_and_none(strength: str) -> None:
+    assert _conserved_query_warnings({"MA_4115": strength}) == []
+
+
+@pytest.mark.parametrize(
+    "enabled_key",
+    ["negative_hit", "negative_strong_hit", "negative_medium_hit", "negative_weak_hit"],
+)
+def test_conserved_query_silent_when_a_negative_bucket_is_already_enabled(enabled_key: str) -> None:
+    sources = all_sources_disabled()
+    sources[enabled_key] = True
+
+    assert _conserved_query_warnings({"HdrD1": "strong"}, candidate_sources=sources) == []
+
+
+def test_conserved_query_warning_names_only_the_conserved_query() -> None:
+    warnings = _conserved_query_warnings({"MA_4115": "none", "MA_0688": "strong", "MA_0999": "weak"})
+
+    assert len(warnings) == 1
+    assert "MA_0688" in warnings[0]
+    assert "MA_4115" not in warnings[0]
+    assert "MA_0999" not in warnings[0]
+
+
+def test_conserved_query_silent_for_query_without_target_record() -> None:
+    """A sequence-only query was never BLASTed against the negative references."""
+    cfg = interaction_config(
+        enabled=True,
+        query_proteins=(InteractionQueryConfig("", "", "MSTNPKPQR"),),
+        candidate_sources=all_sources_disabled(),
+    )
+
+    result = run_interaction_scoring(cfg, build_classification(all_records={}))
+
+    assert result is not None
+    assert [w for w in result.warnings if is_conserved_query_visibility_warning(w)] == []
+
+
+def test_conserved_query_warning_survives_real_classification_path(tmp_path: Path) -> None:
+    """Regression: exercise the same path main.py does, not a hand-set field.
+
+    The unit tests above set ProteinRecord.negative_hit_strength directly.
+    Here it is derived the way the pipeline derives it -- real BlastHit
+    objects run through populate_negative_hit_evidence with the shipped
+    ORTHOLOG_FILTER_DEFAULT thresholds -- then fed through
+    run_interaction_scoring with the DEFAULT candidate_sources and on into
+    the Word report, mirroring the 5-query real-data run where HdrD1/NifD
+    (medium), NifK/MA_4115 (strong) must warn and MtpA (weak) must not.
+    """
+    from analysis.ortholog_filter import populate_negative_hit_evidence
+    from config import ORTHOLOG_FILTER_DEFAULT
+    from docx import Document
+    from output.word_report import write_word_report
+
+    def with_hit(protein_id: str, identity: float, coverage_pct: float, evalue: float) -> ProteinRecord:
+        length = 400
+        rec = record(protein_id, sequence="M" * length)
+        rec.negative_hits = [
+            BlastHit(
+                query_id=protein_id,
+                subject_id="neg_subject",
+                percent_identity=identity,
+                alignment_length=int(length * coverage_pct / 100),
+                evalue=evalue,
+                bitscore=100.0,
+                source="negative",
+                query_length=length,
+            )
+        ]
+        return rec
+
+    strong_thr = ORTHOLOG_FILTER_DEFAULT.strong
+    medium_thr = ORTHOLOG_FILTER_DEFAULT.medium
+    weak_thr = ORTHOLOG_FILTER_DEFAULT.weak
+    records = {
+        "MA_4115": with_hit("MA_4115", strong_thr.min_identity + 1, strong_thr.min_query_coverage + 1, 1e-50),
+        "HdrD1": with_hit("HdrD1", medium_thr.min_identity + 1, medium_thr.min_query_coverage + 1, 1e-20),
+        "MtpA": with_hit("MtpA", weak_thr.min_identity + 1, weak_thr.min_query_coverage + 1, 1e-5),
+    }
+    populate_negative_hit_evidence(records, ORTHOLOG_FILTER_DEFAULT)
+    # Guard the fixture itself: if thresholds drift, fail here, not silently.
+    assert [records[k].negative_hit_strength for k in ("MA_4115", "HdrD1", "MtpA")] == ["strong", "medium", "weak"]
+
+    cfg = interaction_config(
+        enabled=True,
+        query_proteins=tuple(InteractionQueryConfig(pid, "", "") for pid in records),
+        candidate_sources=None,  # shipped defaults: negative_hit and sub-buckets all off
+    )
+    result = run_interaction_scoring(cfg, build_classification(all_records=records))
+
+    assert result is not None
+    conserved = [w for w in result.warnings if is_conserved_query_visibility_warning(w)]
+    assert len(conserved) == 2
+    assert any("Query MA_4115 " in w for w in conserved)
+    assert any("Query HdrD1 " in w for w in conserved)
+    assert not any("Query MtpA " in w for w in conserved)
+
+    # Same result object main.py hands to write_word_report.
+    result_for_word = SimpleNamespace(
+        source_rows=result.source_rows,
+        evidence_detail_rows=result.evidence_detail_rows,
+        evidence_detail_scoring_model=result.evidence_detail_scoring_model,
+        query_rows=result.query_rows,
+        neighborhood_rows=result.neighborhood_rows,
+        warnings=result.warnings,
+    )
+    word_cfg = SimpleNamespace(interaction_scoring=cfg.interaction_scoring)
+    out = write_word_report(word_cfg, build_classification(all_records=records), tmp_path / "r.docx", result_for_word)
+    text = "\n".join(p.text for p in Document(str(out)).paragraphs)
+    assert "Query MA_4115 itself has a strong" in text
+    assert "Query HdrD1 itself has a medium" in text
+    assert "Query MtpA itself" not in text
 
 
 # ---------------------------------------------------------------------------
