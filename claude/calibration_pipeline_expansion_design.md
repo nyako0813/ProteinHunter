@@ -1,15 +1,8 @@
 # 校正データ拡充パイプライン — 設計書
 
-Status: 設計提案(未実装)。`main`(PR #15まで)および既存の校正関連
-成果物(`claude/experimental_interactions_curated.csv`,
-`claude/experimental_interactions_calibration_report*.csv/.md`)を
-読んで現状の作業実態を確認済み。**2026-09-20: [[run_provenance_design]]
-がPR #21として実装済み(未マージ)になったため、下記「実行結果Excel」の
-項をサイドカーYAML前提の記述に更新済み。実装順序上の依存はなし
-(このツールは新規追加のみで既存コードに触らないため、PR #21のマージを
-待たずに実装着手してよい。ただしサイドカーファイル名の規約は
-`<output_excelのstem>.run_provenance.yaml`で確定しているので、実装時は
-それに合わせること)。**
+Status: **実装完了・実データ検証済み。PR #22(本体)・PR #23(出力形式の
+Excel化)としてpush済み(いずれも未マージ)。** 全634テストパス。設計から
+の差分は「実装結果(PR #22)」「実装結果(PR #23)」参照。
 
 ## 背景・問題
 
@@ -31,7 +24,7 @@ PR #9〜#11のキャリブレーション(design spec §37対応)は、以下の
   進めば追加の校正データとして使える可能性がある」と書かれているが、
   それを実際に追加するための受け皿(スクリプト・スキーマ)が無いため、
   着手のハードルが実質的に高いまま放置されている。
-- **2026-09-20に追加で判明した実例**: [[negative_reference_species_mislabeling_finding]]
+- 2026-09-20に追加で判明した実例: [[negative_reference_species_mislabeling_finding]]
   で行った前後比較(config.yaml既定設定・キャリブレーション相当設定)も、
   今回の設計が目指す「決定的に再生成できるCLI」ではなく、都度Excelを
   読み直して手計算する形で行われた。まさに本設計が解決しようとしている
@@ -45,10 +38,10 @@ PR #9〜#11のキャリブレーション(design spec §37対応)は、以下の
 
 一回限りの分析を、3つの入力ファイルから決定的に再生成できる
 **単一のCLIスクリプト**に切り出す。design spec自体を変更するものではなく、
-既存の `output/excel.py` が書き出す列(`Interaction_Evidence_Detail`,
-`02_Final_Score`)をそのまま読むだけの、**分析専用・スコアリングには
-一切影響しない**ツールとして位置づける(既存コードのポリシー
-「既存の計算結果を変えない追加ツール」— Wordレポート機能と同じ立ち位置)。
+既存の `output/excel.py` が書き出す列をそのまま読むだけの、**分析専用・
+スコアリングには一切影響しない**ツールとして位置づける(既存コードの
+ポリシー「既存の計算結果を変えない追加ツール」— Wordレポート機能と
+同じ立ち位置)。
 
 ### 入力(3種、いずれもCSV/YAMLで人間がGit管理できる形)
 
@@ -57,47 +50,32 @@ PR #9〜#11のキャリブレーション(design spec §37対応)は、以下の
    (`protein_a_old_locus_tag, protein_a_label, protein_b_old_locus_tag,
    protein_b_label, class, confidence, source`)。Tier分類列
    (`tier: A/B/excluded`)を1列追加して、今回別文書だった
-   「Tier分け」もこのCSV1本に統合する(現状 curation.md の文章内に
-   埋め込まれているTier A/B/除外の判断を、機械可読な列として持たせる)。
+   「Tier分け」もこのCSV1本に統合する。**入力CSVはExcel化の対象外**
+   (git管理でdiffが読める形を維持するため、ユーザーの明示的な指示)。
 2. **陰性リストCSV**: 既存の `alphafold3_calibration_comparison.csv`
    相当のスキーマ(`old_locus_tag, af3_classification, af3_ipTM`)。
-   AlphaFold3で確認した陰性以外にも、将来別の方法(実験的陰性等)で
-   確認した陰性ペアを同じスキーマで追加できるよう、
    `source`列(例: "alphafold3", "experimental_negative")を持たせる。
-3. **実行結果Excel**: 通常の `ProteinHunter_results_*.xlsx`
-   (`Interaction_Evidence_Detail` + `02_Final_Score` シート)。
-   **[[run_provenance_design]]がPR #21で実装済みのため、`--results`で
+   **これも入力CSVのためExcel化の対象外。**
+3. **実行結果Excel**: 通常の `ProteinHunter_results_*.xlsx`。
+   [[run_provenance_design]]がPR #21で実装済みのため、`--results`で
    渡されたExcelと同じディレクトリに`<stemと同名>.run_provenance.yaml`
    が存在すれば読み込み、`config_hash`/`git_commit`/`git_dirty`/
    `reference_genome_check_passed`を`calibration_summary.md`に転記する。
-   サイドカーが無い場合(古い出力、または`--results`に手作業で用意した
-   Excelを渡した場合)はこの節を「provenance情報なし」として省略し、
-   処理は続行する(必須依存にしない)。** これにより「この設定で計測」
-   という事故(Stage 1検証・PR #20前後比較で実際に起きた設定取り違え)
-   の再発をレポート側からも検知しやすくする。
+   サイドカーが無い場合はこの節を「provenance情報なし」として省略し、
+   処理は続行する(必須依存にしない)。
 
-### 出力
+### 出力(PR #23実装後の最終形)
 
-- `<curated>_pairs.csv` / `<negatives>_matched.csv`
-  (既存の `_pairs.csv`/`_negatives.csv` と同スキーマの後継、
-  自動生成に置き換え)。
-- `calibration_summary.md`(Markdown、既存の
-  `experimental_interactions_calibration_report.md` の「Reading the
-  two tables together」相当のセクションを自動生成): 各スコア列
+- `<curated>_pairs.xlsx`(シート`Pairs`)。
+- `<negatives>_matched.xlsx`(シート`Negatives_Matched`)。
+- `calibration_summary.md`(Markdown、変更なし): 各スコア列
   (`interaction_score`, `interaction_priority_score`,
   `string_neighborhood`, `string_cooccurrence`,
   `coexpression_gse77738`, `coexpression_gse64349`, `final_score`)ごとに、
 
-  - Tier A/B別・陰性別の平均・中央値(現状通り)
-  - **追加: Mann-Whitney U検定のp値**(scipyへの依存が増えるが、
-    `pandas`/`numpy`は既に依存済みなので `scipy` 追加は妥当な範囲。
-    n=8のような小標本でも計算自体は可能で、「有意差なし」という
-    結果も含めて正直に報告できる)
-  - **追加: ROC-AUC**(`interaction_score` がどれだけ正例/陰性を
-    順位で分離できるかを1指標にする。`sklearn` はさすがに重いので、
-    自前実装 or `scipy.stats.mannwhitneyu` のU統計量から
-    `AUC = U / (n1 * n2)` の関係式で算出すれば追加依存なしで済む
-    — この方が既存依存に近く望ましい)
+  - Tier A/B別・陰性別の平均・中央値
+  - Mann-Whitney U検定のp値
+  - ROC-AUC(`U/(n1*n2)`)
   - 実行に使ったExcelのprovenance情報(サイドカーYAMLがあれば
     config_hash/git commit/reference_genome_check_passedを記載)
 
@@ -111,70 +89,120 @@ python tools/calibration_report.py \
   --out claude/calibration/2026-09-19_run \
 ```
 
-`--out` ディレクトリに `pairs.csv`/`negatives_matched.csv`/
-`summary.md` の3点セットを書き出す。日付付きディレクトリにすることで、
-過去の校正結果を上書きせず時系列で残せる(「校正データの拡充」は
-1回で終わる作業ではなく継続的に積み増すものなので、履歴を残す設計に
-しておく)。
+`--out` ディレクトリに `pairs.xlsx`/`negatives_matched.xlsx`/
+`summary.md` を書き出す。日付付きディレクトリにすることで、過去の
+校正結果を上書きせず時系列で残せる。
 
 ### 既存資産の扱い
 
 - `claude/experimental_interactions_curated.csv` は
-  `tier` 列を追加した上でそのまま入力として使う(過去の手作業の結果を
-  無駄にしない、後方互換)。
+  `tier` 列を追加した上でそのまま入力として使う。**Excel化しない。**
 - `claude/experimental_interactions_calibration_report.md` は
   「このツール登場以前の、最初の一回限りの分析の記録」として
-  そのままリポジトリに残す(過去の意思決定の記録としての価値は
-  ドキュメントに書かれた考察・注記(HdrD1-Merの外れ値の考察など)に
-  あり、これはツールが自動生成する数値だけでは再現できないので、
-  削除や置き換えはしない)。冒頭の訂正ブロック(PR #17で追加、
+  そのままリポジトリに残す。冒頭の訂正ブロック(PR #17で追加、
   [[negative_reference_species_mislabeling_finding]]参照)もそのまま
   残す。
 
 ### 校正データの拡充そのものについて(ツールとは別に必要な作業)
 
-ツールが整えば、以下は「入力CSVに行を足すだけ」で着手できるようになる。
-
 - Tier B・要確認19ペア: 2026年ACDS論文の特定、CdhC/CdhDパラログ
-  クラスタの解消(どちらのパラログが実際に相互作用するかのGFF上の
-  確認)が進み次第、`curated.csv` の該当行の `tier` を `B`→`A` に
-  昇格するだけで次回のレポート生成に反映される。
+  クラスタの解消が進み次第、`curated.csv` の該当行の `tier` を
+  `B`→`A` に昇格するだけで次回のレポート生成に反映される。
 - AlphaFold3陰性セット(現状28件、MA_4115クエリ限定)を、他のTier A
   クエリ(HdrD1, MtpA, NifD/K)についても同様にAlphaFold3で陰性確認
-  した候補を追加できると、「陰性側もクエリ非依存に均質化する」ことが
-  でき、現状の「陰性はMA_4115限定・正例はMA_4115以外」という
-  非対称性(`implementation_status_scoring_v2.md` が明記する制約)を
-  緩和できる。これは実験(AlphaFold3実行)そのものはユーザー側の作業だが、
-  結果を受け取るCSVスキーマは今回のツールと共通にしておく。
+  した候補を追加できると、「陰性はMA_4115限定・正例はMA_4115以外」
+  という非対称性を緩和できる。
 
 ## スコープ外(あえてやらないこと)
 
-- キャップ/重みの自動最適化(ロジスティック回帰等でのフィッティング)は
-  今回はやらない。n=8〜数十件規模でパラメータをデータにフィットさせると
-  過学習のリスクが高く、「暫定値のまま」という現状の誠実な運用の方が
-  この標本サイズでは妥当。統計指標(Mann-Whitney/ROC-AUC)は
-  「判断材料を増やす」ためであり、「自動でパラメータを変える」
-  ためではない。
+- キャップ/重みの自動最適化は今回はやらない。
 - ホールドアウト/交差検証の枠組みも、正例データ数が2桁に達するまでは
   時期尚早と判断し、今回のスコープには含めない。
+- 入力CSV(curated.csv・陰性リストCSV)のExcel化(ユーザーの明示的な
+  指示により対象外と確定)。
 
 ## テスト計画
 
-- `tests/test_calibration_report.py`(新規): 小さな合成データ
-  (数行のcurated CSV・negatives CSV・ダミーのExcel出力)を使い、
-  出力される `pairs.csv`/`summary.md` の値を手計算した期待値と突き合わせる。
-  特にMann-Whitney U統計量とAUC換算式の一致を確認するテストを含める。
-  サイドカーYAMLがある場合/ない場合の両方でエラーなく動作することの
-  確認も含める。
-- 実データ検証: 今回の設計で、既存の
-  `claude/experimental_interactions_calibration_report_pairs.csv` と
-  同じ入力データセットを流し、`interaction_score`の平均値(39.55/12.95)
-  など既存レポート記載の数値と一致することを確認する(回帰確認)。
+- `tests/test_calibration_report.py`: 小さな合成データを使い、出力
+  される値を手計算した期待値と突き合わせる。Mann-Whitney U統計量と
+  AUC換算式の一致、サイドカーYAMLがある場合/ない場合の両方でエラーなく
+  動作することの確認、Excel出力の型・書式・シート構成の確認を含む。
+- 実データ検証: 既存の`_pairs.csv`と同じ入力データセットを流し、
+  `interaction_score`の平均値(39.55/12.95)など既存レポート記載の
+  数値と一致することを確認する(回帰確認)。
 
 ## 見積もり
 
-新規スクリプト1本(`tools/calibration_report.py`)+ 新規テスト。
-`scipy` の依存追加が必要かどうかは実装時に再検討(AUC計算をU統計量経由の
-自前実装にすれば `scipy` すら不要にできるため、依存を増やしたくなければ
-その方式を選ぶ)。既存のスコアリング・出力コードには一切手を入れない
-独立ツールなので、既存テストへの影響はゼロ。1PRで完結できる。
+新規スクリプト1本(`tools/calibration_report.py`)+ 新規テスト。既存の
+スコアリング・出力コードには一切手を入れない独立ツールなので、既存
+テストへの影響はゼロ。
+
+## 実装結果(2026-09-20、Claude Code実装・PR #22)
+
+実装・テスト完了(新規22件)、既存分含め全604件パス(PR #21を含まない
+mainベース)。PR #21のマージは待たずに実装。CHANGELOGはPR #21と同じ
+箇所を編集して衝突するため、この PRでは変更なし(マージ時に統合)。
+
+設計からの差分:
+
+- **scipy不使用。** U統計量・AUC・p値をnumpy/pandasのみで自前実装。
+  scipy 1.18と1,500件のランダム標本で全件一致を確認済み(検証用の
+  一時インストールのみ、依存には未追加)。
+- **シート読み込み対象の修正。** `Interaction_Evidence_Detail`シートは
+  現在のExcelに存在しないため、実際の構成(`04_Score_Breakdown`、
+  `11_Raw_Audit`、`03_Candidate_Overview`)から読む実装に修正。
+- **陰性CSVに`query_old_locus_tag`列(任意)を追加**、既定は
+  `--negatives-query`(既定値MA_4115)で補う。
+- **`--out`の上書き防止(`--force`なしでは既存出力を上書きしない)**。
+
+データ側の変更(`experimental_interactions_curated.csv`への`tier`列):
+
+- レポートの`tier_final`から機械的に導出(A: 7、B: 20、excluded: 2)。
+- **RNAP subunit D・MmcAはexcluded**(問い合わせ可能な遺伝子座番号が
+  無いため)。**CdhDクラスターの6ペアはB**
+  (`implementation_status_scoring_v2.md`記載の既存の未解決事項を
+  そのまま機械可読化したもの)。**両方とも確認・承認済み。**
+- AlphaFold3陰性28件を`claude/calibration/af3_negatives_MA_4115.csv`
+  として入力用CSV化。
+
+実データ検証:
+
+- 既存レポートとの回帰確認: レポートの`_pairs.csv`/`_negatives.csv`から
+  Excelを組み直して流した。Tier Aの`interaction_score`平均39.55・
+  中央値43.85(n=8)、陰性12.95・12.27(n=28)、`interaction_priority_score`
+  17.97対20.55、`string_neighborhood`0.62対0.04など、レポート記載値と
+  一致(レポート記載値の再現であり、パイプラインの独立検証ではないと
+  明記)。
+- 実際のExcel(5クエリ実行結果)での試走: Tier Aは8ペア一致、
+  AF3陰性は28件中4件一致。サイドカー付き実行ではprovenance節が
+  サマリに出ることも確認済み。
+
+## 実装結果(2026-09-20、Claude Code実装・PR #23): 出力形式のExcel化
+
+ユーザーからの追加指示(CSV出力を全てExcelに切り替え。対象は本ツールの
+出力ファイルのみ、入力CSVは対象外)を受けて実施。全634テストパス。
+
+- `pairs.csv` → `pairs.xlsx`(シート`Pairs`)、`negatives_matched.csv` →
+  `negatives_matched.xlsx`(シート`Negatives_Matched`)。入力CSV2種と
+  `calibration_summary.md`は変更なし。
+- セル型: スコアは数値セル、欠損は空セル(従来は欠損混じりの列が文字列
+  扱いになっていた点の副次的な改善)。`found`は真偽値セル。ヘッダ太字・
+  ヘッダ行固定・オートフィルタ・列幅上限、といった最低限の書式を適用。
+  新規依存なし(`openpyxl`は既存依存)。
+- 上書き防止チェックの判定対象を`pairs.xlsx`・`negatives_matched.xlsx`・
+  `calibration_summary.md`に変更。古い実行で残った`pairs.csv`等は
+  無視され、実行の妨げにならない。
+- **2ファイルのまま(1ワークブックに統合しない)と判断。** 理由:
+  (1) PairsとNegatives_Matchedは列構成が異なり別々に読まれる、
+  (2) ファイル名が設計書のまま維持できる、(3) 上書きチェックが単純に
+  保てる。1ワークブック化する案(プロジェクト本体の`ProteinHunter_
+  results_*.xlsx`のような単一ワークブック・複数シートの流儀に近づく)
+  は将来の選択肢として残す — `write_excel_table`がシート名を引数に
+  取る実装になっているため、後から統合する変更コストは低い。
+- テスト: CSV読み込みの確認を`pandas.read_excel`に置き換え、セル型・
+  書式・1ファイル1シート構成・空表での非破壊・古いCSV残存時の非干渉、
+  を新規に確認。
+- 回帰確認: 既存レポート数値との回帰テスト(39.55/43.85対12.95/12.27等)
+  は変更なく通過。
+- 実データ確認: 5クエリの実データExcelで試走し、`calibration_summary.md`
+  が変更前の実行結果と(生成時刻の行を除き)完全一致することを確認。
