@@ -15,6 +15,12 @@ ExcelとWordに加えて、レポートをNotionのページ・データベー�
   Notionの上限に合わせて分割送信(1リクエスト100ブロック・表の行を含め900要素、rich textは2000文字)し、
   429/5xx/ネットワークエラーはRetry-Afterを尊重した指数バックオフで再試行、送信間隔は約3リクエスト/秒に抑える。
   APIバージョンは`2022-06-28`固定、SDK自身の自動リトライはオフ。
+- 証拠カテゴリ(5.1〜5.7)はRunページの子ページ(独立したNotionページ)にし、Runページには順位表と子ページへのリンクだけを残す。
+- 各候補に「ドメイン情報」の小節(検出されたドメイン一覧と、パイプラインがドメイン相補性の算出に使った証拠の説明)を追加。
+  共有ナラティブ層(`report_sections.py`)に入れたので、Word・Notionの両方の候補詳細に出る。
+- Notion APIはSDKのエンドポイント別ヘルパーではなく`client.request`で呼ぶ。notion-client 3.xの`databases.create`が
+  `properties`を黙って捨てるため、候補データベースが作れず候補ページも作られなかった不具合の修正
+  (`httpx.MockTransport`経由で実際のHTTPリクエストを検査するテストを追加)。
 - `config.yaml`に`notion_export.enabled`/`parent_page_id`。トークンは設定ファイルに持たず、環境変数`NOTION_TOKEN`から読む
   (未設定なら警告してNotion出力だけをスキップ)。`config.py`で検証(有効時は32桁のページIDが必須)。
 - 新規依存: `notion-client>=3.0,<4`(Notion出力を有効にしたときだけimport)。

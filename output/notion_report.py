@@ -8,19 +8,22 @@ Layout in the workspace (claude/notion_export_design.md):
 
     parent page (notion_export.parent_page_id, shared with the integration)
       └─ Run page          one per pipeline run: title-page lines, table of
-                           contents, "5. Evidence Architecture", the per-query
-                           ranking tables
-           └─ Candidates   an inline database, one row per candidate
-                └─ page    the candidate's "why it ranks highly" /
-                           "biological interpretation" text, opened from the row
+           │               contents, the per-query ranking tables, and links to:
+           ├─ evidence pages   one child page per evidence category (5.1-5.7)
+           └─ Candidates       an inline database, one row per candidate
+                └─ page        the candidate's "why it ranks highly",
+                               "biological interpretation" and domain
+                               information, opened from the row
 
 Database properties carry the data behind each row (query, rank, final score,
 tier, candidate source, candidate id) so the database can be filtered and
 grouped in Notion; their values are the same data values the Excel workbook
 has and are never translated.
 
-The Notion API is called through ``notion-client`` pinned to API version
-2022-06-28, with the SDK's own automatic retries switched off: this module
+The Notion API is called through ``notion-client``'s low-level ``request`` (not
+its per-endpoint helpers, some of which drop fields depending on SDK version --
+3.x silently omitted ``properties`` from ``databases.create``), pinned to API
+version 2022-06-28, with the SDK's own automatic retries switched off: this module
 throttles to Notion's ~3 requests/second average and retries 429/5xx/network
 errors with exponential backoff itself (honouring ``Retry-After``), so the
 behaviour is the same whichever SDK version is installed and is testable.
@@ -166,58 +169,121 @@ class CandidatePage:
 
 
 @dataclass(frozen=True)
-class ReportLayout:
+class EvidencePage:
     title: str
-    run_blocks: list[dict[str, Any]]
+    blocks: list[dict[str, Any]]
+
+
+@dataclass(frozen=True)
+class ReportLayout:
+    """The report split into Notion pages.
+
+    ``run_head`` and ``run_tail`` are the Run page's blocks before and after
+    the evidence child pages (which Notion lists at the point they are created,
+    so the export writes head, then the evidence pages, then tail, then the
+    database). Without evidence sections everything is in ``run_head``.
+    """
+
+    title: str
+    run_head: list[dict[str, Any]]
+    evidence_pages: list[EvidencePage]
+    run_tail: list[dict[str, Any]]
     candidates: list[CandidatePage]
+
+    @property
+    def run_blocks(self) -> list[dict[str, Any]]:
+        """All Run-page blocks in reading order (head then tail), ignoring the child pages between them."""
+        return [*self.run_head, *self.run_tail]
 
 
 def layout_report(sections: Sequence[NarrativeSection], language: str = DEFAULT_LANGUAGE) -> ReportLayout:
-    """Split the report into the Run page's blocks and one page per candidate.
+    """Split the report into the Run page, evidence child pages and one page per candidate.
 
-    Everything before the ``details`` heading, and that heading itself, is the
-    Run page; each ``candidate`` heading opens a candidate page that collects
-    the paragraphs after it. Per-query headings inside the details are dropped
-    (the query is a database property instead). Without a ``details`` heading
-    the whole report stays on the Run page.
+    * Before the ``evidence_root`` heading: Run page (head).
+    * The ``evidence_root`` heading and its intro paragraph: Run page (head),
+      followed by a note that each category has its own page; every ``evidence``
+      heading then opens a child page collecting the paragraphs after it.
+    * Everything up to the ``details`` heading, that heading, and (when there
+      are candidates) a note pointing at the database: Run page (tail). The
+      ranking tables stay here as the overview.
+    * Each ``candidate`` heading opens a candidate page that collects the
+      sections after it (narrative, domain information, Excel reference);
+      per-query headings inside the details are dropped (the query is a
+      database property instead).
+
+    Without those role markers the whole report stays on the Run page.
     """
     language = normalize_language(language)
     title = next((s.text for s in sections if s.kind == "heading" and s.level == 0), "ProteinHunter")
-    run_blocks: list[dict[str, Any]] = []
+    head: list[dict[str, Any]] = []
+    tail: list[dict[str, Any]] = []
+    evidence_pages: list[EvidencePage] = []
     candidates: list[CandidatePage] = []
-    in_details = False
-    current: tuple[str, dict[str, str], list[dict[str, Any]]] | None = None
-
-    def close_current() -> None:
-        nonlocal current
-        if current is not None:
-            candidates.append(CandidatePage(title=current[0], meta=current[1], blocks=current[2]))
-            current = None
-
+    current_evidence: tuple[str, list[dict[str, Any]]] | None = None
+    current_candidate: tuple[str, dict[str, str], list[dict[str, Any]]] | None = None
+    state = "head"  # head -> evidence (after the evidence_root heading) -> tail -> details
     details_note_index: int | None = None
-    for section in sections:
-        if section.kind == "heading" and section.role == "details":
-            in_details = True
-            run_blocks.extend(section_to_blocks(section))
-            details_note_index = len(run_blocks)
-            continue
-        if in_details and section.kind == "heading" and section.role == "query":
-            close_current()
-            continue
-        if in_details and section.kind == "heading" and section.role == "candidate":
-            close_current()
-            current = (section.text, section.meta_dict(), [])
-            continue
-        blocks = section_to_blocks(section)
-        if in_details and current is not None:
-            current[2].extend(blocks)
-        else:
-            run_blocks.extend(blocks)
-    close_current()
 
+    def close_evidence() -> None:
+        nonlocal current_evidence
+        if current_evidence is not None:
+            evidence_pages.append(EvidencePage(title=current_evidence[0], blocks=current_evidence[1]))
+            current_evidence = None
+
+    def close_candidate() -> None:
+        nonlocal current_candidate
+        if current_candidate is not None:
+            candidates.append(CandidatePage(title=current_candidate[0], meta=current_candidate[1], blocks=current_candidate[2]))
+            current_candidate = None
+
+    for section in sections:
+        blocks = section_to_blocks(section)
+        is_heading = section.kind == "heading"
+        if is_heading and section.role == "evidence_root":
+            head.extend(blocks)
+            state = "evidence"
+            continue
+        if state == "evidence":
+            if is_heading and section.role == "evidence":
+                close_evidence()
+                current_evidence = (section.text, [])
+                continue
+            if not is_heading and (current_evidence is not None or section.kind == "paragraph"):
+                # Paragraphs after an evidence heading belong to its page; the paragraph right after the
+                # root heading (the intro) stays on the Run page.
+                (current_evidence[1] if current_evidence is not None else head).extend(blocks)
+                continue
+            close_evidence()
+            if evidence_pages:
+                head.append(_block("paragraph", rich_text(t("notion.evidence_note", language))))
+            state = "tail"
+        if is_heading and section.role == "details":
+            close_evidence()
+            state = "details"
+            tail.extend(blocks)
+            details_note_index = len(tail)
+            continue
+        if state == "details" and is_heading and section.role == "query":
+            close_candidate()
+            continue
+        if state == "details" and is_heading and section.role == "candidate":
+            close_candidate()
+            current_candidate = (section.text, section.meta_dict(), [])
+            continue
+        if state == "details" and current_candidate is not None:
+            current_candidate[2].extend(blocks)
+        elif state == "head":
+            head.extend(blocks)
+        else:
+            tail.extend(blocks)
+    close_evidence()
+    close_candidate()
+
+    if state == "evidence" and evidence_pages:  # report ended inside the evidence section
+        head.append(_block("paragraph", rich_text(t("notion.evidence_note", language))))
     if candidates and details_note_index is not None:
-        run_blocks.insert(details_note_index, _block("paragraph", rich_text(t("notion.details_note", language))))
-    return ReportLayout(title=title, run_blocks=run_blocks, candidates=candidates)
+        tail.insert(details_note_index, _block("paragraph", rich_text(t("notion.details_note", language))))
+    return ReportLayout(title=title, run_head=head, evidence_pages=evidence_pages, run_tail=tail, candidates=candidates)
 
 
 # ---------------------------------------------------------------------------
@@ -381,21 +447,47 @@ class NotionExporter:
                 self._sleep(delay)
         raise AssertionError("unreachable")  # pragma: no cover
 
-    # -- page/database helpers, all sending blocks in limit-respecting batches ----
+    # -- raw API calls: the body sent is exactly the body built here ----------
+    # (``client.request`` rather than the SDK's per-endpoint helpers, which pick
+    # a fixed set of fields per SDK version and dropped ``properties`` from
+    # databases.create in notion-client 3.x.)
 
-    def create_page(self, parent: dict[str, Any], properties: dict[str, Any], blocks: Sequence[dict[str, Any]], description: str) -> dict[str, Any]:
+    def api(self, description: str, method: str, path: str, body: dict[str, Any]) -> Any:
+        return self.call(description, self.client.request, path=path, method=method, body=body)
+
+    def create_page(
+        self,
+        parent: dict[str, Any],
+        properties: dict[str, Any],
+        blocks: Sequence[dict[str, Any]],
+        description: str,
+    ) -> dict[str, Any]:
+        """Create a page; blocks beyond the first request's limits are appended afterwards."""
         batches = list(batch_blocks(blocks))
-        first = batches[0] if batches else []
-        page = self.call(
-            description,
-            self.client.pages.create,
-            parent=parent,
-            properties=properties,
-            **({"children": first} if first else {}),
-        )
+        body: dict[str, Any] = {"parent": parent, "properties": properties}
+        if batches:
+            body["children"] = batches[0]
+        page = self.api(description, "POST", "pages", body)
         for batch in batches[1:]:
-            self.call(f"{description} (more blocks)", self.client.blocks.children.append, block_id=page["id"], children=batch)
+            self.api(f"{description} (more blocks)", "PATCH", f"blocks/{page['id']}/children", {"children": batch})
         return page
+
+    def append_blocks(self, block_id: str, blocks: Sequence[dict[str, Any]], description: str) -> None:
+        for batch in batch_blocks(blocks):
+            self.api(description, "PATCH", f"blocks/{block_id}/children", {"children": batch})
+
+    def create_database(self, parent_page_id: str, title: str, properties: dict[str, Any], description: str) -> dict[str, Any]:
+        return self.api(
+            description,
+            "POST",
+            "databases",
+            {
+                "parent": {"type": "page_id", "page_id": parent_page_id},
+                "title": rich_text(title),
+                "is_inline": True,
+                "properties": properties,
+            },
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -412,6 +504,8 @@ class NotionExportResult:
     candidates_created: int
     failed: tuple[str, ...] = field(default=())
     aborted: bool = False
+    evidence_pages_total: int = 0
+    evidence_pages_created: int = 0
 
 
 def export_sections_to_notion(
@@ -423,13 +517,16 @@ def export_sections_to_notion(
     run_name: str = "",
     generated_at: datetime | None = None,
 ) -> NotionExportResult:
-    """Create the Run page, the candidate database and one page per candidate under ``parent_page_id``.
+    """Create the Run page, its evidence pages, the candidate database and one page per candidate.
 
-    Raises NotionExportError if the Run page or the database cannot be created
-    (nothing useful exists yet). Once the database exists, a candidate whose
-    page cannot be created is recorded in ``failed`` and skipped; after
-    MAX_CONSECUTIVE_CANDIDATE_FAILURES in a row the rest are skipped
-    (``aborted``) rather than waiting out retries for every remaining page.
+    Order matters because Notion lists a child page where it was created:
+    Run page (head blocks) -> evidence child pages -> remaining Run-page blocks
+    -> candidate database. Raises NotionExportError if the Run page or the
+    database cannot be created (the message then names the Run page that
+    already exists). A failed evidence or candidate page is recorded in
+    ``failed`` and skipped; after MAX_CONSECUTIVE_CANDIDATE_FAILURES candidate
+    failures in a row the rest are skipped (``aborted``) rather than waiting
+    out retries for every remaining page.
     """
     language = normalize_language(language)
     layout = layout_report(sections, language)
@@ -439,27 +536,43 @@ def export_sections_to_notion(
     run_page = exporter.create_page(
         {"page_id": parent_page_id},
         {"title": {"title": rich_text(run_title)}},
-        layout.run_blocks,
+        layout.run_head,
         "create Run page",
     )
     run_page_id = run_page["id"]
     run_page_url = str(run_page.get("url", ""))
+    where = f" (the Run page was already created: {run_page_url or run_page_id})"
 
-    if not layout.candidates:
-        return NotionExportResult(run_page_id, run_page_url, "", 0, 0)
+    failed: list[str] = []
+    evidence_created = 0
+    try:
+        for evidence in layout.evidence_pages:
+            try:
+                exporter.create_page(
+                    {"page_id": run_page_id},
+                    {"title": {"title": rich_text(evidence.title)}},
+                    evidence.blocks,
+                    f"create evidence page '{evidence.title[:60]}'",
+                )
+                evidence_created += 1
+            except NotionExportError as exc:
+                failed.append(evidence.title)
+                exporter.log(str(exc))
+        exporter.append_blocks(run_page_id, layout.run_tail, "add Run page blocks")
 
-    database = exporter.call(
-        "create candidate database",
-        exporter.client.databases.create,
-        parent={"type": "page_id", "page_id": run_page_id},
-        title=rich_text(t("notion.database_title", language)),
-        is_inline=True,
-        properties=database_properties(language),
-    )
+        if not layout.candidates:
+            return NotionExportResult(
+                run_page_id, run_page_url, "", 0, 0, tuple(failed), False, len(layout.evidence_pages), evidence_created
+            )
+
+        database = exporter.create_database(
+            run_page_id, t("notion.database_title", language), database_properties(language), "create candidate database"
+        )
+    except NotionExportError as exc:
+        raise NotionExportError(f"{exc}{where}") from exc
     database_id = database["id"]
 
     created = 0
-    failed: list[str] = []
     consecutive_failures = 0
     aborted = False
     for index, page in enumerate(layout.candidates):
@@ -471,6 +584,8 @@ def export_sections_to_notion(
                 f"{len(layout.candidates) - index} candidate page(s) were not created."
             )
             break
+        if not page.blocks:
+            exporter.log(f"Candidate '{page.title[:60]}' has no narrative text to export.")
         try:
             exporter.create_page(
                 {"database_id": database_id},
@@ -485,17 +600,33 @@ def export_sections_to_notion(
             consecutive_failures += 1
             exporter.log(str(exc))
 
-    return NotionExportResult(run_page_id, run_page_url, database_id, len(layout.candidates), created, tuple(failed), aborted)
+    return NotionExportResult(
+        run_page_id,
+        run_page_url,
+        database_id,
+        len(layout.candidates),
+        created,
+        tuple(failed),
+        aborted,
+        len(layout.evidence_pages),
+        evidence_created,
+    )
 
 
-def create_client(token: str) -> Any:
-    """A ``notion_client.Client`` on API version 2022-06-28 with the SDK's own retries and chatter off."""
+def create_client(token: str, http_client: Any | None = None) -> Any:
+    """A ``notion_client.Client`` on API version 2022-06-28 with the SDK's own retries and chatter off.
+
+    ``http_client`` (an ``httpx.Client``) lets tests inspect the real HTTP requests.
+    """
     from notion_client import Client
 
+    options: dict[str, Any] = {"auth": token, "notion_version": NOTION_VERSION, "log_level": logging.ERROR}
+    if http_client is not None:
+        options["client"] = http_client
     try:
-        return Client(auth=token, notion_version=NOTION_VERSION, retry=False, log_level=logging.ERROR)
+        return Client(retry=False, **options)
     except TypeError:  # older SDKs have no built-in retry option to switch off
-        return Client(auth=token, notion_version=NOTION_VERSION, log_level=logging.ERROR)
+        return Client(**options)
 
 
 def export_run_to_notion(

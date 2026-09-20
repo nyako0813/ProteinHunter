@@ -220,10 +220,11 @@ def _run_notion_export(
         return
 
     logger.info(f"Notion Run page: {result.run_page_url or result.run_page_id}")
+    logger.info(f"Notion evidence pages created: {result.evidence_pages_created} of {result.evidence_pages_total}")
     logger.info(f"Notion candidate pages created: {result.candidates_created} of {result.candidates_total}")
     if result.failed:
         logger.warning(
-            f"{len(result.failed)} Notion candidate page(s) could not be created"
+            f"{len(result.failed)} Notion page(s) could not be created"
             + (" (export stopped early after repeated failures)" if result.aborted else "")
             + f": {', '.join(result.failed[:5])}{' ...' if len(result.failed) > 5 else ''}"
         )

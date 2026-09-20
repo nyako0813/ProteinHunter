@@ -135,8 +135,21 @@ _EN: dict[str, str] = {
         "02_Final_Score, query_id={query_id}, "
         "candidate_protein_id={candidate_id}."
     ),
+    # -- domain information on each candidate ------------------------------
+    "domains.label": "Domain information: ",
+    "domains.summary": (
+        "{count} domain hit(s) are recorded for this candidate (CDD/Pfam annotation, the same "
+        "data the pipeline's functional/domain evidence uses)."
+    ),
+    "domains.none": (
+        "No domain hits are recorded for this candidate (it may not have been annotated, "
+        "or no domain was detected)."
+    ),
+    "domains.more": "...and {count} more domain hit(s) not listed here.",
+    "domains.evidence_label": "Domain evidence used for scoring: ",
     # -- Notion export (output/notion_report.py) ---------------------------
     "notion.run_title": "{title} — {name} ({timestamp})",
+    "notion.evidence_note": "Each evidence category has its own page below.",
     "notion.database_title": "Candidates",
     "notion.prop.query": "Query",
     "notion.prop.candidate_id": "Candidate ID",
@@ -386,8 +399,21 @@ _JA: dict[str, str] = {
         "この候補の全データ: {excel_filename} のシート 02_Final_Score、"
         "query_id={query_id}、candidate_protein_id={candidate_id} を参照。"
     ),
+    # -- domain information on each candidate ------------------------------
+    "domains.label": "ドメイン情報: ",
+    "domains.summary": (
+        "この候補には {count} 件のドメインヒットが記録されている"
+        "(CDD/Pfam 注釈。パイプラインの機能・ドメイン証拠が用いるのと同じデータ)。"
+    ),
+    "domains.none": (
+        "この候補に記録されたドメインヒットはない"
+        "(注釈が行われていないか、ドメインが検出されなかった可能性がある)。"
+    ),
+    "domains.more": "ほか {count} 件のドメインヒットはここでは省略した。",
+    "domains.evidence_label": "スコアリングで用いたドメイン証拠: ",
     # -- Notion export (output/notion_report.py) ---------------------------
     "notion.run_title": "{title} — {name}({timestamp})",
+    "notion.evidence_note": "証拠カテゴリごとの説明は、下の子ページにある。",
     "notion.database_title": "候補",
     "notion.prop.query": "クエリ",
     "notion.prop.candidate_id": "候補ID",

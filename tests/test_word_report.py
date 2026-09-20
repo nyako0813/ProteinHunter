@@ -9,6 +9,7 @@ import pytest
 from docx import Document
 from docx.opc.constants import RELATIONSHIP_TYPE as RT
 
+from core.models import DomainHit, ProteinRecord
 from config import (
     INTERACTION_ALPHAFOLD_DEFAULT,
     INTERACTION_EVIDENCE_DETAIL_DEFAULT,
@@ -540,3 +541,47 @@ def test_renderer_draws_bullet_lists_and_rejects_unknown_kinds() -> None:
     assert [p.style.name for p in document.paragraphs][1:] == ["List Bullet", "List Bullet"]
     with pytest.raises(ValueError, match="unknown report section kind"):
         _render_sections(document, [_Section("carousel")])
+
+
+# ---------------------------------------------------------------------------
+# Domain information in the candidate details (shared with the Notion export)
+# ---------------------------------------------------------------------------
+
+
+def test_candidate_details_list_the_domains_and_the_pipelines_domain_evidence(tmp_path: Path) -> None:
+    hit = DomainHit(source="CDD", accession="cd01", name="HUP domain", description="ATP pyrophosphatase", start=5, end=120, evalue=1e-20)
+    classification = blast_classification(all_records={"c1": ProteinRecord(protein_id="c1", sequence="MKV", description="d", domains=[hit])})
+    interaction_result = _interaction_result({"Interaction_Candidates": [_pair_row("q1", "c1"), _pair_row("q1", "c2")]})
+    interaction_result.evidence_detail_rows = [
+        {"query_id": "q1", "candidate_protein_id": "c1", "component_name": "domain_complementarity", "status": "AVAILABLE",
+         "explanation": "domain family match: a x b", "normalized_value": 1.0}
+    ]
+    output_path = tmp_path / "report.docx"
+
+    write_word_report(config=app_config(), blast_classification=classification, output_path=output_path, interaction_result=interaction_result, excel_filename="r.xlsx")
+
+    document = Document(str(output_path))
+    texts = [p.text for p in document.paragraphs]
+    assert any(t.startswith("Domain information: 1 domain hit(s)") for t in texts)
+    bullets = [p.text for p in document.paragraphs if p.style.name == "List Bullet"]
+    assert bullets == ["CDD cd01 — HUP domain: ATP pyrophosphatase [aa 5–120, E=1.0e-20]"]
+    assert any(t == "Domain evidence used for scoring: domain family match: a x b (domain_complementarity = 1.00)" for t in texts)
+    assert sum(t.startswith("Domain information") for t in texts) == 1  # c2 has no annotation record: no block
+
+
+def test_japanese_candidate_details_have_the_domain_block_too(tmp_path: Path) -> None:
+    hit = DomainHit(source="Pfam", accession="PF01", name="X")
+    config = app_config()
+    config.report_language = "ja"
+    output_path = tmp_path / "report.docx"
+
+    write_word_report(
+        config=config,
+        blast_classification=blast_classification(all_records={"c1": ProteinRecord(protein_id="c1", sequence="MKV", description="d", domains=[hit])}),
+        output_path=output_path,
+        interaction_result=_interaction_result({"Interaction_Candidates": [_pair_row("q1", "c1")]}),
+    )
+
+    texts = [p.text for p in Document(str(output_path)).paragraphs]
+    assert any(t.startswith("ドメイン情報: この候補には 1 件のドメインヒット") for t in texts)
+    assert "Pfam PF01 — X" in [p.text for p in Document(str(output_path)).paragraphs if p.style.name == "List Bullet"]

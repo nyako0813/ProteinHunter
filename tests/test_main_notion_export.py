@@ -100,7 +100,7 @@ def test_enabled_with_a_token_exports_and_logs_the_run_page(monkeypatch: pytest.
     assert sections == ["section"] and kwargs["token"] == TOKEN and kwargs["run_name"] == "MA_4115_2"
     assert calls["excel_filename"] == "MA_4115_2.xlsx"
     assert any("https://www.notion.so/run-id" in message for message in logger.infos)
-    assert any("3 of 3" in message for message in logger.infos)
+    assert any("candidate pages created: 3 of 3" in message for message in logger.infos)
     assert logger.warnings == []
 
 
@@ -154,4 +154,4 @@ def test_failed_candidate_pages_are_reported(monkeypatch: pytest.MonkeyPatch, ca
     run(logger, config(True))
 
     assert any("2 of 5" in message for message in logger.infos)
-    assert any("3 Notion candidate page(s)" in message and "stopped early" in message for message in logger.warnings)
+    assert any("3 Notion page(s)" in message and "stopped early" in message for message in logger.warnings)

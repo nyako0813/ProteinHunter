@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, NamedTuple, Sequence
 
 from analysis.interaction_scoring import CONSERVED_QUERY_WARNING_PREFIX, is_conserved_query_visibility_warning
 from analysis.scoring_engine_config import ScoringEngineConfig, load_scoring_engine_config
@@ -36,11 +36,85 @@ from output.word_narrative import (
     build_biological_interpretation,
     build_evolutionary_closer,
     build_why_ranks_highly,
+    bullet_list,
     heading,
     paragraph,
     table,
     toc,
 )
+
+#: Most domain hits listed per candidate; the rest are summarised as "and N more".
+MAX_DOMAINS_LISTED = 25
+
+
+class DomainEntry(NamedTuple):
+    """One domain hit on a protein (a plain view of ``core.models.DomainHit``)."""
+
+    source: str
+    accession: str
+    name: str
+    description: str = ""
+    start: int | None = None
+    end: int | None = None
+    evalue: float | None = None
+
+
+class DomainEvidence(NamedTuple):
+    """The pipeline's own domain-complementarity evidence for one query/candidate pair."""
+
+    explanation: str
+    score: float | None = None
+
+
+def _domain_line(entry: DomainEntry) -> str:
+    """``CDD cd00001 — name: description [aa 12–340, E=1.2e-30]``; all data, so language-neutral."""
+    line = f"{entry.source} {entry.accession}".strip()
+    if entry.name:
+        line += f" — {entry.name}"
+    description = entry.description.strip()
+    if description.strip("-–— ") and description != entry.name:  # CDD leaves "-" for a missing description
+        line += f": {description}"
+    details = []
+    if entry.start is not None and entry.end is not None:
+        details.append(f"aa {entry.start}–{entry.end}")
+    if entry.evalue is not None:
+        details.append(f"E={entry.evalue:.1e}")
+    return f"{line} [{', '.join(details)}]" if details else line
+
+
+def _domain_sections(
+    language: str,
+    domains: Sequence[DomainEntry] | None,
+    evidence: DomainEvidence | None,
+) -> list[NarrativeSection]:
+    """The "domain information" block of one candidate; empty when nothing is known about it.
+
+    ``domains`` None means the protein has no annotation record at all (the
+    block is omitted); an empty sequence means it was looked up and has no
+    hits. Hits are listed in sequence order (the domain architecture), capped
+    at MAX_DOMAINS_LISTED.
+    """
+    if domains is None and evidence is None:
+        return []
+    sections: list[NarrativeSection] = []
+    if domains is not None:
+        ordered = sorted(domains, key=lambda d: (d.start if d.start is not None else 10**9, d.accession))
+        if ordered:
+            sections.append(paragraph(t("domains.summary", language, count=len(ordered)), label=t("domains.label", language)))
+            listed = ordered[:MAX_DOMAINS_LISTED]
+            items = [_domain_line(entry) for entry in listed]
+            if len(ordered) > len(listed):
+                items.append(t("domains.more", language, count=len(ordered) - len(listed)))
+            sections.append(bullet_list(items))
+        else:
+            sections.append(paragraph(t("domains.none", language), label=t("domains.label", language)))
+    if evidence is not None:
+        text = evidence.explanation
+        if evidence.score is not None:
+            text += f" (domain_complementarity = {evidence.score:.2f})"
+        sections.append(paragraph(text, label=t("domains.evidence_label", language)))
+    return sections
+
 
 _CONSERVED_NOTE = re.compile(
     r"^Query (?P<query_id>\S+) itself has a (?P<strength>\w+) negative-reference BLAST hit "
@@ -124,22 +198,22 @@ def _architecture_sections(
         + caps.get("pih_direct_interaction", 0.0)
     )
     sections = [
-        heading(t("arch.title", language), 1),
+        heading(t("arch.title", language), 1, role="evidence_root"),
         # repr() keeps the quotes the report has always shown around the model name.
         paragraph(t("arch.intro", language, scoring_model=repr(scoring_model))),
-        heading(t("arch.seq.heading", language, cap=caps.get("source_classification", 0.0)), 2),
+        heading(t("arch.seq.heading", language, cap=caps.get("source_classification", 0.0)), 2, role="evidence", meta=(("section", "sequence"),)),
         paragraph(t("arch.seq.body", language)),
-        heading(t("arch.func.heading", language, cap=caps.get("functional_annotation", 0.0)), 2),
+        heading(t("arch.func.heading", language, cap=caps.get("functional_annotation", 0.0)), 2, role="evidence", meta=(("section", "functional_domain"),)),
         paragraph(t("arch.func.body", language)),
-        heading(t("arch.genomic.heading", language, cap=caps.get("genomic_context", 0.0)), 2),
+        heading(t("arch.genomic.heading", language, cap=caps.get("genomic_context", 0.0)), 2, role="evidence", meta=(("section", "genomic_context"),)),
         paragraph(t("arch.genomic.body", language)),
-        heading(t("arch.interaction.heading", language, cap=interaction_cap), 2),
+        heading(t("arch.interaction.heading", language, cap=interaction_cap), 2, role="evidence", meta=(("section", "interaction"),)),
         paragraph(t("arch.interaction.body", language)),
-        heading(t("arch.evolutionary.heading", language, cap=caps.get("pih_evolutionary", 0.0)), 2),
+        heading(t("arch.evolutionary.heading", language, cap=caps.get("pih_evolutionary", 0.0)), 2, role="evidence", meta=(("section", "evolutionary"),)),
         paragraph(t("arch.evolutionary.body", language, closer=closer)),
-        heading(t("arch.cellular.heading", language, cap=caps.get("pih_cellular_compatibility", 0.0)), 2),
+        heading(t("arch.cellular.heading", language, cap=caps.get("pih_cellular_compatibility", 0.0)), 2, role="evidence", meta=(("section", "cellular_compatibility"),)),
         paragraph(t("arch.cellular.body", language, closer=closer)),
-        heading(t("arch.negative.heading", language), 2),
+        heading(t("arch.negative.heading", language), 2, role="evidence", meta=(("section", "negative"),)),
         paragraph(t("arch.negative.body", language)),
     ]
     # A known side effect of that absence, not a Negative Evidence signal:
@@ -185,6 +259,8 @@ def _details_sections(
     category_refs: Sequence[CategoryRef],
     evolutionary_closer: str,
     excel_filename: str,
+    domains_by_protein: Mapping[str, Sequence[DomainEntry]] | None = None,
+    domain_evidence: Mapping[tuple[str, str], DomainEvidence] | None = None,
 ) -> list[NarrativeSection]:
     sections = [heading(t("details.title", language), 1, role="details")]
     if not grouped:
@@ -240,6 +316,13 @@ def _details_sections(
                         language=language,
                     ),
                     label=t("details.interpretation_label", language),
+                )
+            )
+            sections.extend(
+                _domain_sections(
+                    language,
+                    (domains_by_protein or {}).get(candidate_id),
+                    (domain_evidence or {}).get((query_id, candidate_id)),
                 )
             )
             sections.append(
@@ -321,6 +404,56 @@ def group_by_query(rows: list[dict[str, Any]]) -> list[tuple[str, list[dict[str,
     return groups
 
 
+def collect_domain_data(
+    blast_classification: Any,
+    interaction_result: Any | None,
+    grouped: Sequence[tuple[str, Sequence[dict[str, Any]]]],
+) -> tuple[dict[str, list[DomainEntry]], dict[tuple[str, str], DomainEvidence]]:
+    """Domain hits of the candidates on the report and the pipeline's own domain evidence for each pair.
+
+    Reads what the pipeline already computed and changes nothing: the
+    annotation records (``all_records[...].domains``, the CDD/Pfam hits) and the
+    ``domain_complementarity`` rows of the evidence detail (the explanation the
+    functional/domain score was based on). A candidate with no annotation
+    record is left out of the first mapping (its block is then omitted);
+    one with a record but no hits maps to an empty list.
+    """
+    records = getattr(blast_classification, "all_records", None) or {}
+    domains: dict[str, list[DomainEntry]] = {}
+    wanted_pairs: set[tuple[str, str]] = set()
+    for query_id, rows in grouped:
+        for row in rows:
+            candidate_id = str(row.get("candidate_protein_id") or "")
+            wanted_pairs.add((query_id, candidate_id))
+            record = records.get(candidate_id)
+            if record is None or candidate_id in domains:
+                continue
+            domains[candidate_id] = [
+                DomainEntry(
+                    source=str(getattr(hit, "source", "") or ""),
+                    accession=str(getattr(hit, "accession", "") or ""),
+                    name=str(getattr(hit, "name", "") or ""),
+                    description=str(getattr(hit, "description", "") or ""),
+                    start=getattr(hit, "start", None),
+                    end=getattr(hit, "end", None),
+                    evalue=getattr(hit, "evalue", None),
+                )
+                for hit in getattr(record, "domains", None) or []
+            ]
+
+    evidence: dict[tuple[str, str], DomainEvidence] = {}
+    for detail in getattr(interaction_result, "evidence_detail_rows", None) or []:
+        if detail.get("component_name") != "domain_complementarity" or detail.get("status") != "AVAILABLE":
+            continue
+        pair = (str(detail.get("query_id") or ""), str(detail.get("candidate_protein_id") or ""))
+        explanation = str(detail.get("explanation") or "").strip()
+        if pair not in wanted_pairs or pair in evidence or not explanation:
+            continue
+        value = detail.get("normalized_value")
+        evidence[pair] = DomainEvidence(explanation, float(value) if isinstance(value, (int, float)) else None)
+    return domains, evidence
+
+
 def build_run_sections(
     config: Any,
     blast_classification: Any,
@@ -355,6 +488,7 @@ def build_run_sections(
         for warning in getattr(interaction_result, "warnings", None) or []
         if is_conserved_query_visibility_warning(warning)
     ]
+    domains_by_protein, domain_evidence = collect_domain_data(blast_classification, interaction_result, grouped)
     return build_report_sections(
         language=language,
         generated_at=generated_at or datetime.now(),
@@ -367,6 +501,8 @@ def build_run_sections(
         excel_filename=excel_filename,
         provenance=provenance,
         conserved_query_notes=conserved_query_notes,
+        domains_by_protein=domains_by_protein,
+        domain_evidence=domain_evidence,
     )
 
 
@@ -383,8 +519,15 @@ def build_report_sections(
     excel_filename: str = "",
     provenance: RunProvenance | None = None,
     conserved_query_notes: Sequence[str] = (),
+    domains_by_protein: Mapping[str, Sequence[DomainEntry]] | None = None,
+    domain_evidence: Mapping[tuple[str, str], DomainEvidence] | None = None,
 ) -> list[NarrativeSection]:
     """Every section of the report, in reading order.
+
+    ``domains_by_protein`` (protein id -> domain hits) and ``domain_evidence``
+    ((query id, candidate id) -> the pipeline's domain-complementarity
+    evidence) add a "domain information" block to each candidate's details;
+    without them the report is exactly as it was before that block existed.
 
     ``grouped`` is the already-selected ``(query_id, rows)`` list (see
     group_by_query); ``category_refs`` and
@@ -397,14 +540,19 @@ def build_report_sections(
         *_title_sections(language, generated_at, scoring_model, len(grouped), max_per_query, excel_filename, provenance),
         *_architecture_sections(language, scoring_model, category_caps, pih_bundle_configured, conserved_query_notes),
         *_ranking_sections(language, grouped),
-        *_details_sections(language, grouped, category_refs, evolutionary_closer, excel_filename),
+        *_details_sections(
+            language, grouped, category_refs, evolutionary_closer, excel_filename, domains_by_protein, domain_evidence
+        ),
     ]
 
 
 __all__: tuple[str, ...] = (
+    "DomainEntry",
+    "DomainEvidence",
     "build_report_sections",
     "build_run_sections",
     "category_refs_for_scoring_model",
+    "collect_domain_data",
     "group_by_query",
     "localize_conserved_query_note",
 )

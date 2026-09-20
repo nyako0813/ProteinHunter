@@ -70,9 +70,21 @@ class FakeClient:
         self.calls: list[tuple[str, dict]] = []
         self._fail = fail
         self._ids = 0
+        self.request = self._request  # what the exporter actually calls
         self.pages = SimpleNamespace(create=lambda **kw: self._do("pages.create", kw, self._page))
         self.databases = SimpleNamespace(create=lambda **kw: self._do("databases.create", kw, self._database))
         self.blocks = SimpleNamespace(children=SimpleNamespace(append=lambda **kw: self._do("blocks.children.append", kw, lambda kw: {"results": []})))
+
+    def _request(self, path: str, method: str, body: dict | None = None, **_: Any) -> dict:
+        """Route the raw API call to the same recorded names the endpoint helpers used."""
+        body = body or {}
+        if method == "POST" and path == "pages":
+            return self._do("pages.create", body, self._page)
+        if method == "POST" and path == "databases":
+            return self._do("databases.create", body, self._database)
+        if method == "PATCH" and path.startswith("blocks/") and path.endswith("/children"):
+            return self._do("blocks.children.append", {"block_id": path.split("/")[1], **body}, lambda kw: {"results": []})
+        raise AssertionError(f"unexpected Notion call: {method} {path}")
 
     def _do(self, name: str, kwargs: dict, make: Callable[[dict], dict]) -> dict:
         self.calls.append((name, kwargs))
@@ -237,6 +249,50 @@ def test_layout_splits_run_page_from_candidate_pages() -> None:
     assert "Why this candidate ranks highly" not in run_text  # that text lives on the candidate pages
 
 
+def test_evidence_categories_become_child_pages_and_the_run_page_only_links_to_them() -> None:
+    layout = nr.layout_report(sections("en"), "en")
+
+    assert [p.title for p in layout.evidence_pages] == [
+        "5.1 Sequence Evidence (cap 30)",
+        "5.2 Functional/Domain Evidence (cap 0)",
+        "5.3 Genomic Context (cap 25)",
+        "5.4 Interaction Evidence (cap 0)",
+        "5.5 Evolutionary Evidence (cap 0)",
+        "5.6 Cellular Compatibility (cap 0)",
+        "5.7 Negative Evidence (reserved)",
+    ]
+    assert all(page.blocks and all(b["type"] == "paragraph" for b in page.blocks) for page in layout.evidence_pages)
+    head_text = " ".join(item["text"]["content"] for b in layout.run_head for item in b.get(b["type"], {}).get("rich_text", []))
+    assert "5. Evidence Architecture" in head_text and "Each evidence category has its own page below." in head_text
+    assert "BLAST-based positive/negative classification" not in head_text  # the body moved to the child page
+    assert "BLAST-based" in nr.layout_report(sections("en"), "en").evidence_pages[0].blocks[0]["paragraph"]["rich_text"][0]["text"]["content"]
+    tail_types = [b["type"] for b in layout.run_tail]
+    assert tail_types[0] == "heading_1" and tail_types.count("table") == 2  # "7. Candidate Ranking" stays on the Run page
+
+
+def test_conserved_query_notes_land_on_the_negative_evidence_page() -> None:
+    notes = ["Query WP_1 itself has a strong negative-reference BLAST hit (negative_hit_strength=strong)."]
+    layout = nr.layout_report(
+        build_report_sections(
+            language="en", generated_at=NOW, scoring_model="v2_evidence_based", category_caps={}, pih_bundle_configured=False,
+            grouped=GROUPED, category_refs=REFS, max_per_query=15, conserved_query_notes=notes,
+        ),
+        "en",
+    )
+
+    negative = layout.evidence_pages[-1]
+    assert negative.title.startswith("5.7") and len(negative.blocks) == 2
+    assert "WP_1" in negative.blocks[1]["paragraph"]["rich_text"][0]["text"]["content"]
+
+
+def test_a_report_without_evidence_sections_keeps_everything_on_the_run_page() -> None:
+    plain = [heading("Title", 0), heading("Overview", 1), paragraph("text")]
+
+    layout = nr.layout_report(plain, "en")
+
+    assert layout.evidence_pages == [] and [b["type"] for b in layout.run_head] == ["heading_1", "paragraph"] and layout.run_tail == []
+
+
 def test_candidate_page_body_is_the_three_narrative_paragraphs() -> None:
     page = nr.layout_report(sections("en"), "en").candidates[0]
 
@@ -311,15 +367,21 @@ def test_export_builds_run_page_then_database_then_one_page_per_candidate() -> N
     result, _, _, _ = export(client)
 
     names = [name for name, _ in client.calls]
-    assert names == ["pages.create", "databases.create", "pages.create", "pages.create", "pages.create"]
-    run_call, db_call, *candidate_calls = [kwargs for _, kwargs in client.calls]
+    # Run page, 7 evidence child pages, the rest of the Run page, the database, then the 3 candidates
+    assert names == ["pages.create"] * 8 + ["blocks.children.append", "databases.create"] + ["pages.create"] * 3
+    calls = [kwargs for _, kwargs in client.calls]
+    run_call, db_call = calls[0], calls[9]
+    evidence_calls, candidate_calls = calls[1:8], calls[10:]
+    assert all(call["parent"] == {"page_id": "page-1"} for call in evidence_calls)
+    assert calls[8]["block_id"] == "page-1"  # the tail of the Run page follows its evidence pages
     assert run_call["parent"] == {"page_id": "3e1ef408bf298005a303f93efcff9871"}
     assert run_call["properties"]["title"]["title"][0]["text"]["content"] == "ProteinHunter Candidate Report — MA_4115_2 (2026-09-20 12:30)"
     assert db_call["parent"] == {"type": "page_id", "page_id": "page-1"} and db_call["is_inline"] is True
     assert db_call["title"][0]["text"]["content"] == "Candidates"
-    assert all(call["parent"] == {"database_id": "db-2"} for call in candidate_calls)
-    assert result.run_page_url == "https://www.notion.so/page-1" and result.database_id == "db-2"
+    assert all(call["parent"] == {"database_id": "db-9"} for call in candidate_calls)
+    assert result.run_page_url == "https://www.notion.so/page-1" and result.database_id == "db-9"
     assert (result.candidates_total, result.candidates_created, result.failed, result.aborted) == (3, 3, (), False)
+    assert (result.evidence_pages_total, result.evidence_pages_created) == (7, 7)
 
 
 def test_japanese_export_uses_japanese_titles_and_columns_with_unchanged_data() -> None:
@@ -327,8 +389,10 @@ def test_japanese_export_uses_japanese_titles_and_columns_with_unchanged_data() 
 
     export(client, "ja")
 
-    run_call, db_call, first = [kwargs for _, kwargs in client.calls][:3]
+    calls = [kwargs for _, kwargs in client.calls]
+    run_call, db_call, first = calls[0], calls[9], calls[10]
     assert run_call["properties"]["title"]["title"][0]["text"]["content"] == "ProteinHunter 候補レポート — MA_4115_2(2026-09-20 12:30)"
+    assert calls[1]["properties"]["title"]["title"][0]["text"]["content"] == "5.1 配列の証拠 (Sequence Evidence, 上限 30)"
     assert db_call["title"][0]["text"]["content"] == "候補" and "クエリ" in db_call["properties"]
     assert first["properties"]["クエリ"] == {"select": {"name": "MA_4115"}}
     assert first["properties"]["候補ID"]["rich_text"][0]["text"]["content"] == "MA_0363"
@@ -387,7 +451,7 @@ def test_run_page_failure_is_fatal() -> None:
 def test_database_failure_is_fatal() -> None:
     client = FakeClient(lambda name, kwargs, n: HttpError(400) if name == "databases.create" else None)
 
-    with pytest.raises(NotionExportError, match="create candidate database"):
+    with pytest.raises(NotionExportError, match=r"create candidate database.*the Run page was already created: https://www.notion.so/page-1"):
         export(client)
 
 
@@ -396,7 +460,7 @@ def test_no_database_is_created_when_there_are_no_candidates() -> None:
 
     result, _, _, _ = export(client, grouped=[])
 
-    assert [name for name, _ in client.calls] == ["pages.create"]
+    assert [name for name, _ in client.calls] == ["pages.create"] * 8 + ["blocks.children.append"]  # no database
     assert (result.database_id, result.candidates_total) == ("", 0)
 
 
@@ -521,3 +585,111 @@ def test_create_client_pins_the_api_version_and_turns_sdk_retries_off() -> None:
 
     assert client.options.notion_version == nr.NOTION_VERSION == "2022-06-28"
     assert client.options.retry is False
+
+
+def test_a_failing_evidence_page_is_recorded_and_everything_else_is_still_created() -> None:
+    def fail(name: str, kwargs: dict, n: int) -> Exception | None:
+        title = kwargs.get("properties", {}).get("title", {}).get("title", [{}])[0].get("text", {}).get("content", "") if name == "pages.create" else ""
+        return HttpError(400) if title.startswith("5.3") else None
+
+    result, _, _, logs = export(FakeClient(fail))
+
+    assert result.failed == ("5.3 Genomic Context (cap 25)",)
+    assert (result.evidence_pages_created, result.candidates_created) == (6, 3)
+    assert any("5.3" in message for message in logs)
+
+
+def test_candidate_pages_carry_the_narrative_and_the_domain_information() -> None:
+    from output.report_sections import DomainEntry, DomainEvidence
+
+    domains = {"MA_0363": [DomainEntry("CDD", "cd01", "HUP domain", "ATP pyrophosphatase", 5, 120, 1e-20)], "MA_4110": []}
+    evidence = {("MA_4115", "MA_0363"): DomainEvidence("domain family match: a x b", 1.0)}
+    layout = nr.layout_report(
+        build_report_sections(
+            language="en", generated_at=NOW, scoring_model="v2_evidence_based", category_caps={}, pih_bundle_configured=False,
+            grouped=GROUPED, category_refs=REFS, max_per_query=15, domains_by_protein=domains, domain_evidence=evidence,
+        ),
+        "en",
+    )
+
+    first, second, third = layout.candidates
+    text = lambda page: " || ".join(item["text"]["content"] for b in page.blocks for item in b.get(b["type"], {}).get("rich_text", []))
+    assert [b["type"] for b in first.blocks] == ["paragraph", "paragraph", "paragraph", "bulleted_list_item", "paragraph", "paragraph"]
+    assert "Why this candidate ranks highly: " in text(first) and "Biological Interpretation: " in text(first)
+    assert "Domain information: " in text(first) and "CDD cd01 — HUP domain: ATP pyrophosphatase [aa 5–120, E=1.0e-20]" in text(first)
+    assert "Domain evidence used for scoring: " in text(first) and "domain_complementarity = 1.00" in text(first)
+    assert "No domain hits are recorded" in text(second)  # looked up, nothing found
+    assert "Domain information" not in text(third)  # no annotation record at all: block omitted
+    assert all(page.blocks[-1]["paragraph"]["rich_text"][0]["text"]["content"].startswith("Full data for this candidate") for page in layout.candidates)
+
+
+# ---------------------------------------------------------------------------
+# Through the real SDK: the HTTP requests that would actually reach Notion
+# ---------------------------------------------------------------------------
+# A recorder that replaces the client object cannot see what the SDK does to a
+# request. notion-client 3.x silently dropped ``properties`` from
+# ``databases.create`` (Notion answered 400 "body.properties should be defined"),
+# which no fake-client test noticed. These tests run the whole export through
+# the real SDK over httpx.MockTransport and check the wire-level requests.
+
+
+def _run_through_the_real_sdk(language: str = "en") -> tuple[list[tuple[str, str, Any, dict]], nr.NotionExportResult]:
+    import json
+
+    httpx = pytest.importorskip("httpx")
+    pytest.importorskip("notion_client")
+    requests: list[tuple[str, str, Any, dict]] = []
+
+    def handler(request: Any) -> Any:
+        requests.append((request.method, request.url.path, request.headers, json.loads(request.content or b"{}")))
+        return httpx.Response(200, json={"object": "page", "id": f"id-{len(requests)}", "url": f"https://www.notion.so/id-{len(requests)}"})
+
+    client = nr.create_client("secret-token", http_client=httpx.Client(transport=httpx.MockTransport(handler), base_url="https://api.notion.com"))
+    exporter = nr.NotionExporter(client, sleep=lambda seconds: None, min_interval=0.0)
+    result = nr.export_sections_to_notion(
+        sections(language), exporter=exporter, parent_page_id="3e1ef408bf298005a303f93efcff9871",
+        language=language, run_name="run", generated_at=NOW,
+    )
+    return requests, result
+
+
+def test_the_database_request_really_carries_its_properties() -> None:
+    requests, _ = _run_through_the_real_sdk()
+
+    (database_body,) = [body for method, path, _, body in requests if path == "/v1/databases"]
+    assert set(database_body) >= {"parent", "title", "is_inline", "properties"}
+    assert list(database_body["properties"]) == ["Candidate", "Query", "Rank", "Final Score", "Tier", "Candidate Source", "Candidate ID"]
+    assert database_body["is_inline"] is True and database_body["parent"]["type"] == "page_id"
+
+
+def test_every_real_request_uses_the_pinned_version_and_the_bearer_token() -> None:
+    requests, _ = _run_through_the_real_sdk()
+
+    assert requests
+    assert {headers["notion-version"] for _, _, headers, _ in requests} == {"2022-06-28"}
+    assert {headers["authorization"] for _, _, headers, _ in requests} == {"Bearer secret-token"}
+
+
+def test_real_candidate_page_requests_have_properties_and_the_narrative_children() -> None:
+    requests, result = _run_through_the_real_sdk("ja")
+
+    database_id = result.database_id
+    candidate_bodies = [body for method, path, _, body in requests if path == "/v1/pages" and body["parent"] == {"database_id": database_id}]
+    assert len(candidate_bodies) == 3
+    for body in candidate_bodies:
+        assert set(body["properties"]) == {"候補", "クエリ", "順位", "最終スコア", "Tier(信頼度階層)", "候補ソース", "候補ID"}
+        first = body["children"][0]["paragraph"]["rich_text"]
+        assert first[0]["text"]["content"] == "この候補が上位にある理由: " and first[0]["annotations"] == {"bold": True}
+        assert len(first) >= 2 and "Tier" in first[1]["text"]["content"]
+
+
+def test_real_request_order_and_paths_for_the_run_page_tree() -> None:
+    requests, result = _run_through_the_real_sdk()
+
+    steps = [(method, path) for method, path, _, _ in requests]
+    assert steps[0] == ("POST", "/v1/pages")  # Run page
+    assert steps[1:8] == [("POST", "/v1/pages")] * 7  # evidence child pages
+    assert steps[8] == ("PATCH", f"/v1/blocks/{result.run_page_id}/children")  # rest of the Run page
+    assert steps[9] == ("POST", "/v1/databases")
+    assert steps[10:] == [("POST", "/v1/pages")] * 3
+    assert all(body["parent"] == {"page_id": result.run_page_id} for method, path, _, body in requests[1:8])

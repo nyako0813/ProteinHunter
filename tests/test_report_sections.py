@@ -217,3 +217,120 @@ def test_structural_hints_are_data_values_identical_in_both_languages() -> None:
 
     assert hints("en") == hints("ja")
 
+
+
+# ---------------------------------------------------------------------------
+# Evidence-section roles and the per-candidate domain information
+# ---------------------------------------------------------------------------
+
+from types import SimpleNamespace
+
+from output.report_sections import DomainEntry, DomainEvidence, collect_domain_data
+
+
+def test_evidence_headings_are_marked_for_renderers_that_split_them() -> None:
+    sections = build("en")
+
+    roots = [s for s in sections if s.role == "evidence_root"]
+    evidence = [s for s in sections if s.role == "evidence"]
+    assert len(roots) == 1 and roots[0].level == 1
+    assert [s.meta_dict()["section"] for s in evidence] == [
+        "sequence", "functional_domain", "genomic_context", "interaction", "evolutionary", "cellular_compatibility", "negative",
+    ]
+    assert all(s.level == 2 for s in evidence)
+
+
+def _candidate_block(sections, candidate_id: str):
+    """The sections between a candidate's heading and the next heading."""
+    start = next(i for i, s in enumerate(sections) if s.role == "candidate" and s.meta_dict()["candidate_id"] == candidate_id)
+    end = next((i for i in range(start + 1, len(sections)) if sections[i].kind == "heading"), len(sections))
+    return sections[start + 1 : end]
+
+
+def test_domain_block_lists_hits_in_sequence_order_between_interpretation_and_excel_reference() -> None:
+    domains = {"MA_0363": [
+        DomainEntry("CDD", "cd02", "second", "", 200, 300, 2e-5),
+        DomainEntry("Pfam", "PF01", "first", "the first domain", 10, 150, 1e-30),
+        DomainEntry("CDD", "cdX", "no-position"),
+    ]}
+    evidence = {("MA_4115", "MA_0363"): DomainEvidence("domain family match (UniProt Pfam/InterPro): a x b", 1.0)}
+
+    block = _candidate_block(build("en", domains_by_protein=domains, domain_evidence=evidence), "MA_0363")
+
+    assert [s.kind for s in block] == ["paragraph", "paragraph", "paragraph", "bullet_list", "paragraph", "paragraph"]
+    assert block[2].label == "Domain information: " and "3 domain hit(s)" in block[2].text
+    assert block[3].items == (
+        "Pfam PF01 — first: the first domain [aa 10–150, E=1.0e-30]",
+        "CDD cd02 — second [aa 200–300, E=2.0e-05]",
+        "CDD cdX — no-position",
+    )
+    assert block[4].label == "Domain evidence used for scoring: "
+    assert block[4].text == "domain family match (UniProt Pfam/InterPro): a x b (domain_complementarity = 1.00)"
+    assert block[5].text.startswith("Full data for this candidate")
+
+
+def test_long_domain_lists_are_capped_with_a_count_of_the_rest() -> None:
+    many = [DomainEntry("CDD", f"cd{i:03d}", f"d{i}", "", i, i + 5, 1e-3) for i in range(30)]
+
+    block = _candidate_block(build("en", domains_by_protein={"MA_0363": many}), "MA_0363")
+
+    items = next(s for s in block if s.kind == "bullet_list").items
+    assert len(items) == 26 and items[-1] == "...and 5 more domain hit(s) not listed here."
+
+
+def test_domain_block_distinguishes_no_hits_from_no_record() -> None:
+    sections = build("en", domains_by_protein={"MA_0363": []})
+
+    no_hits = _candidate_block(sections, "MA_0363")
+    unknown = _candidate_block(sections, "MA_4110")
+    assert "No domain hits are recorded" in no_hits[2].text and no_hits[2].label == "Domain information: "
+    assert [s.kind for s in unknown] == ["paragraph"] * 3  # no annotation record: no domain block at all
+
+
+def test_without_domain_data_the_report_is_exactly_as_before() -> None:
+    plain = build("en")
+
+    assert plain == build("en", domains_by_protein=None, domain_evidence=None)
+    assert all("Domain information" not in s.label for s in plain)
+
+
+def test_domain_block_is_localized_but_carries_the_same_data() -> None:
+    domains = {"MA_0363": [DomainEntry("CDD", "cd01", "HUP", "ATP pyrophosphatase", 5, 120, 1e-20)]}
+    evidence = {("MA_4115", "MA_0363"): DomainEvidence("domain family match: a x b", 0.5)}
+
+    en = _candidate_block(build("en", domains_by_protein=domains, domain_evidence=evidence), "MA_0363")
+    ja = _candidate_block(build("ja", domains_by_protein=domains, domain_evidence=evidence), "MA_0363")
+
+    assert ja[2].label == "ドメイン情報: " and "1 件のドメインヒット" in ja[2].text
+    assert ja[3].items == en[3].items  # data lines are not translated
+    assert ja[4].label == "スコアリングで用いたドメイン証拠: " and ja[4].text == en[4].text
+
+
+def test_collect_domain_data_reads_records_and_the_domain_complementarity_evidence() -> None:
+    hit = SimpleNamespace(source="CDD", accession="cd01", name="HUP", description="d", start=1, end=9, evalue=1e-5)
+    classification = SimpleNamespace(all_records={"MA_0363": SimpleNamespace(domains=[hit]), "MA_4110": SimpleNamespace(domains=[])})
+    detail_rows = [
+        {"query_id": "MA_4115", "candidate_protein_id": "MA_0363", "component_name": "co_occurrence", "status": "AVAILABLE", "explanation": "overlap", "normalized_value": 1.0},
+        {"query_id": "MA_4115", "candidate_protein_id": "MA_0363", "component_name": "domain_complementarity", "status": "MISSING", "explanation": "missing"},
+        {"query_id": "MA_4115", "candidate_protein_id": "MA_0363", "component_name": "domain_complementarity", "status": "AVAILABLE", "explanation": "family match", "normalized_value": 0.75},
+        {"query_id": "MA_4115", "candidate_protein_id": "OTHER", "component_name": "domain_complementarity", "status": "AVAILABLE", "explanation": "not on the report", "normalized_value": 1.0},
+    ]
+
+    domains, evidence = collect_domain_data(classification, SimpleNamespace(evidence_detail_rows=detail_rows), GROUPED)
+
+    assert domains == {"MA_0363": [DomainEntry("CDD", "cd01", "HUP", "d", 1, 9, 1e-5)], "MA_4110": []}  # MA_0687 has no record
+    assert evidence == {("MA_4115", "MA_0363"): DomainEvidence("family match", 0.75)}
+
+
+def test_collect_domain_data_tolerates_missing_attributes() -> None:
+    assert collect_domain_data(SimpleNamespace(), None, GROUPED) == ({}, {})
+
+
+def test_placeholder_descriptions_are_not_printed() -> None:
+    block = _candidate_block(
+        build("en", domains_by_protein={"MA_0363": [DomainEntry("CDD", "cl00959", "Nitrate_red_gam superfamily", "-", 96, 254, 1.9e-4)]}),
+        "MA_0363",
+    )
+
+    assert next(s for s in block if s.kind == "bullet_list").items == ("CDD cl00959 — Nitrate_red_gam superfamily [aa 96–254, E=1.9e-04]",)
+
