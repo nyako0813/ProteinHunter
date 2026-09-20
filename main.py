@@ -114,6 +114,44 @@ def _build_cdd_target_records(
     return target_records
 
 
+def _log_reference_genome_check(logger: Any, directories: dict[str, Path]) -> None:
+    """Log each reference genome's identity and any mismatch with config/reference_genomes.v1.yaml.
+
+    Findings are warnings only: a wrong/missing/duplicated reference genome
+    silently changes every classification, so it must be visible in the log,
+    but a deliberate change should not be blocked. Never raises.
+    """
+    from core.reference_genomes import (
+        DEFAULT_MANIFEST_PATH,
+        check_reference_genomes,
+        describe_reference_genomes,
+        load_manifest,
+    )
+
+    try:
+        records = describe_reference_genomes(directories)
+        for record in records:
+            logger.info(
+                f"Reference genome: {record.category}/{record.label} {record.accession} "
+                f"{record.organism} proteins={record.protein_count} md5={record.md5}"
+            )
+        manifest = None
+        if DEFAULT_MANIFEST_PATH.exists():
+            manifest = load_manifest(DEFAULT_MANIFEST_PATH)
+        else:
+            logger.warning(
+                f"Reference genome manifest not found ({DEFAULT_MANIFEST_PATH}); "
+                "expected genome composition was not verified."
+            )
+        findings = check_reference_genomes(records, manifest)
+        for finding in findings:
+            logger.warning(f"Reference genome check: {finding}")
+        if manifest is not None and not findings:
+            logger.info(f"Reference genome check passed ({len(records)} genomes match {DEFAULT_MANIFEST_PATH}).")
+    except Exception as exc:  # the check must never stop a run
+        logger.warning(f"Reference genome check could not be completed: {exc}")
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     """Build the command-line parser for Protein Hunter."""
     parser = argparse.ArgumentParser(
@@ -249,6 +287,13 @@ def main(argv: Sequence[str] | None = None) -> None:
                 logger.info(f"Combined target FASTA: {target_fasta}")
                 logger.info(f"Combined positive FASTA: {positive_fasta}")
                 logger.info(f"Combined negative FASTA: {negative_fasta}")
+                _log_reference_genome_check(
+                    logger,
+                    {
+                        "positive": _require_path(config.paths.positive_dir, "paths.positive_dir"),
+                        "negative": _require_path(config.paths.negative_dir, "paths.negative_dir"),
+                    },
+                )
             else:
                 logger.info(f"Target FASTA: {target_fasta}")
                 logger.info(f"Positive FASTA: {positive_fasta}")
