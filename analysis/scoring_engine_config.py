@@ -31,7 +31,11 @@ class TierThresholds:
     tier1_min_categories: int = 3
     tier2_min_score: float = 50.0
     tier2_min_categories: int = 2
-    tier3_min_score: float = 25.0
+    # 25 -> 35 (2026-09 recalibration, claude/calibration/2026-09-21_scoring_recalibration/):
+    # against the curated positives / AF3 negatives, 35 keeps 10 of 11 Tier A pairs
+    # at Tier3+ while cutting negatives at Tier3+ from 12/28 to 4/28 (Youden's J
+    # 0.48 -> 0.77; the J-maximising cut is ~40). Tier1/Tier2 are unchanged.
+    tier3_min_score: float = 35.0
     tier3_min_categories: int = 1
 
 
@@ -232,7 +236,7 @@ def _parse_scoring_engine_config(raw: dict[object, object], path: Path) -> Scori
             tiers_raw.get("tier2_min_categories", 2), "tiers.tier2_min_categories", path
         ),
         tier3_min_score=_positive_float(
-            tiers_raw.get("tier3_min_score", 25.0), "tiers.tier3_min_score", path
+            tiers_raw.get("tier3_min_score", 35.0), "tiers.tier3_min_score", path
         ),
         tier3_min_categories=_positive_int(
             tiers_raw.get("tier3_min_categories", 1), "tiers.tier3_min_categories", path

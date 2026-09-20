@@ -170,3 +170,27 @@ def test_example_config_matches_defaults() -> None:
     assert config.minimum_evidence == DEFAULT_SCORING_ENGINE_CONFIG.minimum_evidence
     assert config.tie_precision == DEFAULT_SCORING_ENGINE_CONFIG.tie_precision
     assert config.sequence_evidence == DEFAULT_SCORING_ENGINE_CONFIG.sequence_evidence
+
+
+def test_default_tier_thresholds_after_the_2026_09_recalibration(tmp_path: Path) -> None:
+    """tier3 was raised 25 -> 35; tier1/tier2 were deliberately left alone.
+
+    Pinned for both code paths: the dataclass default (no config file) and
+    the parser default (a config file that does not mention tier3).
+    """
+    tiers = load_scoring_engine_config(None).tiers
+    assert (tiers.tier1_min_score, tiers.tier2_min_score, tiers.tier3_min_score) == (70.0, 50.0, 35.0)
+    assert (tiers.tier1_min_categories, tiers.tier2_min_categories, tiers.tier3_min_categories) == (3, 2, 1)
+
+    path = tmp_path / "scoring.yaml"
+    path.write_text("category_caps:\n  source_classification: 30\ntiers:\n  tier1_min_score: 70\n", encoding="utf-8")
+    assert load_scoring_engine_config(path).tiers.tier3_min_score == 35.0
+
+
+def test_tier3_boundary_moved_from_25_to_35() -> None:
+    from analysis.scoring_engine import _classify_tier
+
+    tiers = DEFAULT_SCORING_ENGINE_CONFIG.tiers
+    assert _classify_tier(30.0, 1, tiers) == "Tier4_Weak"  # was Tier3_Moderate under the old default of 25
+    assert _classify_tier(35.0, 1, tiers) == "Tier3_Moderate"
+    assert _classify_tier(34.99, 1, tiers) == "Tier4_Weak"

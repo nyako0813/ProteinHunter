@@ -2,6 +2,34 @@
 
 ProteinHunter_v5 の変更履歴です。
 
+## 未リリース: スコアリングの再較正(Tier3閾値)と`config_hash`の対象拡大
+
+`v2_evidence_based`の**既定の挙動を変える**変更。分析の記録は`claude/calibration/2026-09-21_scoring_recalibration/`。
+
+### Changed
+
+| 設定 | 旧値 | 新値 |
+|---|---|---|
+| `tiers.tier3_min_score`(`TierThresholds`とYAMLパーサーの既定、`config/scoring_engine.example.yaml`) | 25 | **35** |
+
+- 影響を受けるのは`final_score_tier`・`evidence_tier`・`interaction_evidence_tier`の3列(同じ`TierThresholds`を共有)。
+  スコア・順位・Tier1/Tier2・常時表示される候補の集合は変わらず、Tier3だったものの一部がTier4表示になるだけ。
+  実データ27,756行での実測: `final_score_tier`のTier3は4,305→194行、`evidence_tier`は11,730→1,532行、`interaction_evidence_tier`は99→27行。
+  既知のTier A(n=11)は`final_score_tier`・`evidence_tier`でTier3以上を維持(10/11・11/11)し、AF3陰性のTier3以上は12→4・13→4。
+  `interaction_evidence_tier`ではTier AのTier3以上が11件中9→4件に減る点に注意(参考列)。旧値に戻すには`tiers.tier3_min_score: 25`を指定する。
+- `external_ppi_evidence`/`coexpression_evidence`のcap、`coexpression_gse64349`の重み、Final Scoreのcap配分(30/70)は**変更なし**
+  (leave-one-outで基準を明確に上回る候補が無かったため)。
+- `legacy_additive`は影響を受けない。
+
+### Added
+
+- `tools/scoring_recalibration.py`: Tier A・AF3陰性を使ったTier閾値の分析(Youden's J、セーフティネットへの影響)と、事前指定した少数の
+  cap/重み候補のleave-one-out比較(LOO AUC ± jackknife SE、入れ子選択)。分析専用でスコアリングは変更しない。
+- `config_hash`の入力に「実効スコアリングパラメータ」(`scoring_engine_config`の解決結果、組み込み既定を含む、と`V2_COMPONENT_WEIGHTS`)を追加。
+  従来のハッシュはYAMLファイルの内容しか見ておらず、YAMLを使わない実行ではコード側の既定値の変更(今回の25→35)がハッシュに現れなかった。
+  同じ`config.yaml`でも、**この変更以降のすべての`config_hash`は以前の値と一致しなくなる**(新旧の比較はできない)。
+  `<出力>.run_provenance.yaml`にも`effective_scoring_parameters`を記録する。
+
 ## 未リリース: Notion出力(第三の出力)
 
 ExcelとWordに加えて、レポートをNotionのページ・データベースとして出力できるようにする対応。

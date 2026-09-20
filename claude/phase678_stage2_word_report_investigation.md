@@ -648,3 +648,9 @@ to Excel-only) left off for the Word half.
    before Stage 2 is called done, or whether it's acceptable for M6 to
    only ever exercise the "not configured" branch, same as every prior
    real-data run in this project so far.
+
+---
+
+**追記(2026-09-21): Tier3の既定閾値を25から35に変更した。** 上の表の`Tier3_Moderate ≥ 25`は当時の既定値で、
+本節の考察(既知の陰性の平均がTier3の下限25のすぐ上にある)を受けた再較正の結果、現在の既定は35。
+根拠と副作用の実測は`claude/calibration/2026-09-21_scoring_recalibration/README.md`を参照。上の記述は当時の記録として残す。

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import shutil
 import subprocess
 from datetime import datetime
@@ -20,6 +21,7 @@ from core.provenance import (
     code_version_text,
     collect_run_provenance,
     compute_config_hash,
+    effective_scoring_parameters,
     provenance_sidecar_filename,
     provenance_sidecar_path,
     write_provenance_sidecar,
@@ -237,3 +239,82 @@ def test_sidecar_is_plain_yaml_with_paths_and_tuples_converted(tmp_path: Path) -
     assert isinstance(payload["effective_config"]["paths"]["output_excel"], str)
     assert isinstance(payload["effective_config"]["interaction_scoring"]["query_proteins"], list)
     assert payload["config_file"] is None
+
+
+# ---------------------------------------------------------------------------
+# effective scoring parameters (built-in code defaults are part of the hash)
+# ---------------------------------------------------------------------------
+
+
+def _hash_with_default_config(tmp_path: Path) -> str:
+    return collect_run_provenance(fake_config(scoring_engine_config=None), tmp_path).config_hash
+
+
+def test_config_hash_changes_when_a_built_in_tier_threshold_default_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No YAML file is involved here: only the code default differs."""
+    from analysis import scoring_engine_config as engine_config
+
+    before = _hash_with_default_config(tmp_path)
+    assert _hash_with_default_config(tmp_path) == before
+
+    edited = dataclasses.replace(
+        engine_config.DEFAULT_SCORING_ENGINE_CONFIG,
+        tiers=dataclasses.replace(engine_config.DEFAULT_SCORING_ENGINE_CONFIG.tiers, tier3_min_score=25.0),
+    )
+    monkeypatch.setattr(engine_config, "DEFAULT_SCORING_ENGINE_CONFIG", edited)
+
+    assert _hash_with_default_config(tmp_path) != before
+
+
+def test_config_hash_changes_when_a_component_weight_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """V2_COMPONENT_WEIGHTS is not YAML-configurable; it must still be fingerprinted."""
+    from analysis import interaction_scoring
+
+    before = _hash_with_default_config(tmp_path)
+    monkeypatch.setitem(interaction_scoring.V2_COMPONENT_WEIGHTS, "coexpression_gse64349", 0.5)
+
+    assert _hash_with_default_config(tmp_path) != before
+
+
+def test_effective_scoring_parameters_report_defaults_and_file_overrides(tmp_path: Path) -> None:
+    defaults = effective_scoring_parameters(fake_config(scoring_engine_config=None))
+    assert defaults["scoring_engine"]["tiers"]["tier3_min_score"] == 35.0
+    assert defaults["scoring_engine"]["category_caps"]["interaction"] == 70.0
+    assert defaults["v2_component_weights"]["coexpression_gse64349"] == pytest.approx(1 / 3)
+
+    override = tmp_path / "engine.yaml"
+    override.write_text("category_caps:\n  source_classification: 30\ntiers:\n  tier3_min_score: 40\n")
+    overridden = effective_scoring_parameters(fake_config(scoring_engine_config=override))
+    assert overridden["scoring_engine"]["tiers"]["tier3_min_score"] == 40.0
+
+
+def test_effective_scoring_parameters_survive_an_unparsable_engine_file(tmp_path: Path) -> None:
+    broken = tmp_path / "engine.yaml"
+    broken.write_text("tiers: [not, a, mapping\n")
+
+    params = effective_scoring_parameters(fake_config(scoring_engine_config=broken))
+    result = collect_run_provenance(fake_config(scoring_engine_config=broken), tmp_path)
+
+    assert params["scoring_engine"] == "<unavailable>"
+    assert len(result.config_hash) == CONFIG_HASH_LENGTH
+
+
+def test_compute_config_hash_accepts_in_memory_bytes(tmp_path: Path) -> None:
+    assert compute_config_hash([("x", b"1")]) == compute_config_hash([("x", b"1")])
+    assert compute_config_hash([("x", b"1")]) != compute_config_hash([("x", b"2")])
+    assert compute_config_hash([("x", b"<default>")]) == compute_config_hash([("x", None)])
+
+
+def test_sidecar_records_the_effective_scoring_parameters(tmp_path: Path) -> None:
+    config = fake_config(scoring_engine_config=None)
+    provenance = collect_run_provenance(config, tmp_path)
+
+    sidecar = write_provenance_sidecar(provenance, config, tmp_path / "run.xlsx")
+    payload = yaml.safe_load(sidecar.read_text(encoding="utf-8"))
+
+    assert payload["effective_scoring_parameters"]["scoring_engine"]["tiers"]["tier3_min_score"] == 35.0
+    assert "coexpression_gse64349" in payload["effective_scoring_parameters"]["v2_component_weights"]
