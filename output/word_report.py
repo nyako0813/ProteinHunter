@@ -9,11 +9,12 @@ sections instead, see
 This module owns everything ``python-docx``-specific: low-level OOXML
 helpers for bookmarks, external hyperlinks, and the Table of Contents
 field (``python-docx`` has no high-level API for any of the three), plus
-document assembly. It reuses ``output/report_v2.py`` for row
+rendering. What the report *says* -- structure and every wording, in English
+or Japanese (``report_language``) -- is built by ``output/report_sections.py``
+as a renderer-neutral list of ``NarrativeSection``; this module only draws
+that list into a document. It reuses ``output/report_v2.py`` for row
 shaping/selection (the same consolidated rows the Excel workbook is built
-from -- see ``build_workbook_sheets``) and ``output/word_narrative.py``
-for the deterministic "why ranks highly" / "Biological Interpretation"
-text. It has no knowledge of Excel/openpyxl -- the reverse direction
+from -- see ``build_workbook_sheets``). It has no knowledge of Excel/openpyxl -- the reverse direction
 (Excel's ``word_report_link`` column) lives in ``output/excel.py`` and
 depends on this module's ``bookmark_name``/``select_top_candidates_per_query``
 re-exports from ``output/report_v2.py``, not on this module directly, so
@@ -37,19 +38,15 @@ from docx.text.paragraph import Paragraph
 from analysis.interaction_scoring import CONSERVED_QUERY_WARNING_PREFIX, is_conserved_query_visibility_warning
 from analysis.scoring_engine_config import ScoringEngineConfig, load_scoring_engine_config
 from core.exceptions import WordReportError
-from core.provenance import (
-    REFERENCE_GENOME_WARNING_TEXT,
-    RunProvenance,
-    code_version_text,
-    provenance_sidecar_filename,
-)
+from core.provenance import RunProvenance
+from output.report_i18n import DEFAULT_LANGUAGE, normalize_language
+from output.report_sections import build_report_sections
 from output.report_v2 import (
     TIER_SAFETY_NET,
-    bookmark_name,
     build_workbook_sheets,
     select_top_candidates_per_query,
 )
-from output.word_narrative import CategoryRef, build_biological_interpretation, build_evolutionary_closer, build_why_ranks_highly
+from output.word_narrative import CategoryRef, NarrativeSection
 
 
 # ---------------------------------------------------------------------------
@@ -138,8 +135,10 @@ def _add_external_hyperlink(paragraph: Paragraph, url: str, text: str) -> None:
     paragraph._p.append(hyperlink)
 
 
-def _add_toc_field(document: Document) -> None:
+def _add_toc_field(document: Document, placeholder: str) -> None:
     """Insert a Word Table of Contents field covering heading levels 1-3.
+
+    ``placeholder`` is the text shown until the field is updated.
 
     Candidate-detail headings are deliberately level 4 (see
     ``_write_candidate_details``) so the TOC lists report sections and
@@ -162,7 +161,7 @@ def _add_toc_field(document: Document) -> None:
 
     placeholder_run = OxmlElement("w:r")
     placeholder_text = OxmlElement("w:t")
-    placeholder_text.text = "Right-click and choose “Update Field” to generate the table of contents."
+    placeholder_text.text = placeholder
     placeholder_run.append(placeholder_text)
     paragraph._p.append(placeholder_run)
 
@@ -222,118 +221,6 @@ def category_refs_for_scoring_model(
 
 
 # ---------------------------------------------------------------------------
-# Section 5: Evidence Architecture (5.1-5.7)
-# ---------------------------------------------------------------------------
-
-
-def _write_evidence_architecture(
-    document: Document,
-    scoring_model: str,
-    engine_config: ScoringEngineConfig,
-    pih_bundle_configured: bool,
-    conserved_query_notes: list[str] | None = None,
-) -> None:
-    """Write the fixed-text "5. Evidence Architecture" section (5.1-5.7).
-
-    Text is static except for: the run's scoring_model (stated once, up
-    front) and the 5.5/5.6 evolutionary/PIH-bundle branch (reused from
-    output/word_narrative.build_evolutionary_closer so the same fact is
-    never worded two different ways in one report). See
-    claude/phase678_stage2_word_report_investigation.md item 4 for why
-    5.5/5.6 ("data not supplied, can become available") and 5.7 ("no
-    signal implemented, cannot become available today") are deliberately
-    described as two different *kinds* of limitation, not lumped together.
-    """
-    caps = engine_config.category_caps
-    document.add_heading("5. Evidence Architecture", level=1)
-    document.add_paragraph(
-        f"This run used the {scoring_model!r} scoring model. The seven "
-        "evidence categories below are the pipeline's full evidence "
-        "vocabulary; which ones actually contributed evidence for any "
-        "given candidate depends on what data and configuration were "
-        "available for this specific run (see each candidate's own "
-        "“why this candidate ranks highly” text in section 8)."
-    )
-
-    document.add_heading(f"5.1 Sequence Evidence (cap {caps.get('source_classification', 0.0):.0f})", level=2)
-    document.add_paragraph(
-        "BLAST-based positive/negative classification and best-hit "
-        "identity/coverage/E-value strength. Populated for essentially "
-        "every candidate that has any BLAST hit at all -- this is the "
-        "pipeline's most consistently available evidence category."
-    )
-
-    document.add_heading(f"5.2 Functional/Domain Evidence (cap {caps.get('functional_annotation', 0.0):.0f})", level=2)
-    document.add_paragraph(
-        "Shared or complementary functional annotation (CDD/Pfam domains, "
-        "description terms) between query and candidate. Populated "
-        "whenever domain annotation is enabled and available for both "
-        "proteins."
-    )
-
-    document.add_heading(f"5.3 Genomic Context (cap {caps.get('genomic_context', 0.0):.0f})", level=2)
-    document.add_paragraph(
-        "Genomic proximity between query and candidate genes, from GFF "
-        "coordinates -- used as positive evidence only (a distant "
-        "candidate is never penalized for being far away, only not "
-        "credited for being close). Populated whenever GFF neighborhood "
-        "data is available for both genes."
-    )
-
-    interaction_cap = (
-        caps.get("external_ppi_evidence", 0.0)
-        + caps.get("coexpression_evidence", 0.0)
-        + caps.get("pih_direct_interaction", 0.0)
-    )
-    document.add_heading(f"5.4 Interaction Evidence (cap {interaction_cap:.0f})", level=2)
-    document.add_paragraph(
-        "External protein-protein interaction evidence from up to three "
-        "independent sources: STRING PPI, GEO transcript coexpression, "
-        "and the optional ProteinInteractionHunter (PIH) direct-interaction "
-        "bridge. Populated whenever the corresponding optional data source "
-        "(STRING taxon ID, GEO coexpression, or a PIH evidence bundle) is "
-        "configured for the run; each source is independent and any subset "
-        "may be available."
-    )
-
-    evolutionary_closer = build_evolutionary_closer(scoring_model, pih_bundle_configured)
-    document.add_heading(f"5.5 Evolutionary Evidence (cap {caps.get('pih_evolutionary', 0.0):.0f})", level=2)
-    document.add_paragraph(
-        "Phylogenetic/evolutionary profile consistency between candidate "
-        f"and query, sourced entirely from the optional PIH bridge. {evolutionary_closer}"
-    )
-
-    document.add_heading(f"5.6 Cellular Compatibility (cap {caps.get('pih_cellular_compatibility', 0.0):.0f})", level=2)
-    document.add_paragraph(
-        "Subcellular localization / compatibility evidence, also sourced "
-        f"from the optional PIH bridge. {evolutionary_closer}"
-    )
-
-    document.add_heading("5.7 Negative Evidence (reserved)", level=2)
-    document.add_paragraph(
-        "Reserved for evidence that directly contradicts a candidate/query "
-        "pairing -- e.g. incompatible cellular localization, phylogenetic "
-        "inconsistency, or functionally contradictory annotation. No such "
-        "signal is implemented in this pipeline version. This category is "
-        "reported as not evaluated for every candidate, in every run, with "
-        "no exceptions. This is a deliberate design decision, not an "
-        "oversight: an earlier implementation attempt used "
-        "negative_hit_strength (shown elsewhere in this report, under "
-        "candidate_source) as a stand-in for this category and found, on "
-        "real-data verification, that it measures a different thing -- how "
-        "broadly a candidate protein is conserved across negative "
-        "reference genomes -- and using it as a contradiction penalty "
-        "incorrectly punished well-conserved true interaction partners. "
-        "The two signals are kept visibly separate in this report for "
-        "that reason, not merged back together for convenience."
-    )
-    # A known side effect of that absence, not a Negative Evidence signal:
-    # see patches/conserved_query_visibility_design.md.
-    for note in conserved_query_notes or []:
-        document.add_paragraph(note)
-
-
-# ---------------------------------------------------------------------------
 # Sections 7 / 8: per-query candidate ranking and details
 # ---------------------------------------------------------------------------
 
@@ -361,106 +248,75 @@ def _group_by_query(rows: list[dict[str, Any]]) -> list[tuple[str, list[dict[str
     return groups
 
 
-def _write_candidate_ranking(document: Document, grouped: list[tuple[str, list[dict[str, Any]]]]) -> None:
-    """Write "7. Candidate Ranking": one summary table per query."""
-    document.add_heading("7. Candidate Ranking", level=1)
-    if not grouped:
-        document.add_paragraph("No query-specific candidates were produced by this run.")
-        return
+# ---------------------------------------------------------------------------
+# Rendering: NarrativeSection list -> python-docx
+# ---------------------------------------------------------------------------
 
-    for index, (query_id, rows) in enumerate(grouped, start=1):
-        document.add_heading(f"7.{index} Query: {query_id}", level=2)
-        table = document.add_table(rows=1, cols=5)
-        table.style = "Table Grid"
-        header = table.rows[0].cells
-        header[0].text = "Rank"
-        header[1].text = "Candidate"
-        header[2].text = "Final Score"
-        header[3].text = "Tier"
-        header[4].text = "Candidate Source"
-        for row in rows:
-            cells = table.add_row().cells
-            cells[0].text = str(row.get("candidate_rank") or "")
-            cells[1].text = str(row.get("candidate_protein_id") or "")
-            final_score = row.get("final_score")
-            cells[2].text = f"{final_score:.1f}" if final_score is not None else "—"
-            cells[3].text = str(row.get("final_score_tier") or "—")
-            cells[4].text = str(row.get("candidate_source") or "")
+#: East Asian font applied to the document's styles for Japanese output. Without
+#: an explicit ``eastAsia`` font Word falls back to whatever the system default
+#: is (often a serif face); Yu Gothic ships with current Windows and macOS Office.
+JAPANESE_FONT = "Yu Gothic"
+_JAPANESE_STYLE_NAMES = ("Normal", "Title", "Heading 1", "Heading 2", "Heading 3", "Heading 4", "Table Grid")
 
 
-def _write_candidate_details(
-    document: Document,
-    grouped: list[tuple[str, list[dict[str, Any]]]],
-    category_refs: tuple[CategoryRef, ...],
-    evolutionary_closer: str,
-    excel_filename: str,
-) -> int:
-    """Write "8. Candidate Details": one subsection per candidate, bookmarked for Excel to link to.
+def _apply_japanese_fonts(document: Document) -> None:
+    """Point the document's main styles at a Japanese font and mark the language as ja-JP."""
+    for name in _JAPANESE_STYLE_NAMES:
+        if name not in document.styles:
+            continue
+        run_properties = document.styles[name].element.get_or_add_rPr()
+        fonts = run_properties.find(qn("w:rFonts"))
+        if fonts is None:
+            fonts = OxmlElement("w:rFonts")
+            run_properties.insert(0, fonts)
+        fonts.set(qn("w:eastAsia"), JAPANESE_FONT)
+        theme_attribute = qn("w:eastAsiaTheme")
+        if theme_attribute in fonts.attrib:  # a theme font would override the explicit one
+            del fonts.attrib[theme_attribute]
+        if name == "Normal":
+            language = OxmlElement("w:lang")
+            language.set(qn("w:eastAsia"), "ja-JP")
+            run_properties.append(language)
 
-    Returns the next unused bookmark id, so callers that add further
-    bookmarks afterward do not collide with the ones assigned here.
+
+def _render_sections(document: Document, sections: list[NarrativeSection]) -> None:
+    """Draw the report sections into ``document`` in order.
+
+    Headings that carry an ``anchor`` become Word bookmarks (the targets of the
+    Excel workbook's ``word_report_link`` column); ids run 1, 2, ... in order.
     """
-    document.add_heading("8. Candidate Details", level=1)
-    if not grouped:
-        document.add_paragraph("No query-specific candidates were produced by this run.")
-        return 1
-
     bookmark_id = 1
-    for index, (query_id, rows) in enumerate(grouped, start=1):
-        document.add_heading(f"8.{index} Query: {query_id}", level=2)
-        n_candidates = len(rows)
-        for row in rows:
-            candidate_id = str(row.get("candidate_protein_id") or "")
-            description = str(row.get("candidate_description") or "").strip()
-            title = candidate_id if not description else f"{candidate_id} — {description[:80]}"
-            heading = document.add_heading(title, level=4)
-            _add_bookmark(heading, bookmark_name(query_id, candidate_id), bookmark_id)
-            bookmark_id += 1
-
-            why_paragraph = document.add_paragraph()
-            why_paragraph.add_run("Why this candidate ranks highly: ").bold = True
-            why_paragraph.add_run(build_why_ranks_highly(row, category_refs))
-
-            interpretation_paragraph = document.add_paragraph()
-            interpretation_paragraph.add_run("Biological Interpretation: ").bold = True
-            interpretation_paragraph.add_run(
-                build_biological_interpretation(
-                    row,
-                    rank=int(row.get("candidate_rank") or 0),
-                    n_candidates=n_candidates,
-                    category_refs=category_refs,
-                    evolutionary_closer=evolutionary_closer,
-                )
-            )
-
-            document.add_paragraph(
-                f"Full data for this candidate: see {excel_filename}, sheet "
-                f"02_Final_Score, query_id={query_id}, "
-                f"candidate_protein_id={candidate_id}."
-            )
-    return bookmark_id
+    for section in sections:
+        if section.kind == "heading":
+            heading = document.add_heading(section.text, level=section.level)
+            if section.anchor:
+                _add_bookmark(heading, section.anchor, bookmark_id)
+                bookmark_id += 1
+        elif section.kind == "paragraph":
+            paragraph = document.add_paragraph()
+            if section.label:
+                paragraph.add_run(section.label).bold = True
+            paragraph.add_run(section.text)
+        elif section.kind == "bullet_list":
+            for item in section.items:
+                document.add_paragraph(item, style="List Bullet")
+        elif section.kind == "table":
+            grid = document.add_table(rows=1, cols=len(section.header))
+            grid.style = "Table Grid"
+            for cell, text in zip(grid.rows[0].cells, section.header):
+                cell.text = text
+            for row in section.rows:
+                for cell, text in zip(grid.add_row().cells, row):
+                    cell.text = text
+        elif section.kind == "toc":
+            _add_toc_field(document, section.text)
+        else:
+            raise ValueError(f"unknown report section kind: {section.kind!r}")
 
 
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
-
-
-def _write_provenance_paragraphs(
-    document: Document, provenance: RunProvenance, excel_filename: str
-) -> None:
-    """Title-page run-provenance lines (see core/provenance.py); only called when provenance is given."""
-    document.add_paragraph(f"Code version: {code_version_text(provenance)}")
-    document.add_paragraph(f"Config fingerprint: {provenance.config_hash}")
-    if excel_filename:
-        location = provenance_sidecar_filename(excel_filename)
-    else:
-        location = "<Excel workbook stem>.run_provenance.yaml"
-    document.add_paragraph(
-        f"Full effective configuration saved alongside this report as {location}"
-    )
-    if provenance.reference_genome_check_passed is False:
-        document.add_paragraph(f"Reference genome check: {REFERENCE_GENOME_WARNING_TEXT}")
 
 
 def write_word_report(
@@ -488,7 +344,13 @@ def write_word_report(
     version, config fingerprint and sidecar filename to the title page (plus
     a warning when the reference-genome check failed). Left ``None`` (the
     default), the title page is unchanged.
+
+    The report's language comes from ``config.report_language`` ("en", the
+    default, or "ja"): one setting decides the language of the one Word file.
+    Only wording is translated; locus tags, scores and classification values
+    stay as in the Excel workbook (output/report_i18n.py).
     """
+    language = normalize_language(getattr(config, "report_language", DEFAULT_LANGUAGE))
     resolved_output = Path(output_path).expanduser().resolve()
     resolved_output.parent.mkdir(parents=True, exist_ok=True)
 
@@ -507,34 +369,31 @@ def write_word_report(
         )
         grouped = _group_by_query(selected_rows)
         category_refs = category_refs_for_scoring_model(scoring_model, engine_config, legacy_weights)
-        evolutionary_closer = build_evolutionary_closer(scoring_model, pih_bundle_configured)
-
-        document = Document()
-        _ensure_hyperlink_style(document)
-        _set_update_fields_on_open(document)
-
-        document.add_heading("ProteinHunter Candidate Report", level=0)
-        document.add_paragraph(f"Report generated: {datetime.now():%Y-%m-%d %H:%M}")
-        document.add_paragraph(f"Scoring model: {scoring_model}")
-        if provenance is not None:
-            _write_provenance_paragraphs(document, provenance, excel_filename)
-        document.add_paragraph(
-            f"Queries evaluated: {len(grouped)}. Candidates shown per query: up to "
-            f"{max_per_query}, plus any additional Tier1_VeryStrong/Tier2_Strong "
-            "candidate regardless of rank."
-        )
-        _add_toc_field(document)
-
         conserved_query_notes = [
             warning[len(CONSERVED_QUERY_WARNING_PREFIX):]
             for warning in getattr(interaction_result, "warnings", None) or []
             if is_conserved_query_visibility_warning(warning)
         ]
-        _write_evidence_architecture(
-            document, scoring_model, engine_config, pih_bundle_configured, conserved_query_notes
+        sections = build_report_sections(
+            language=language,
+            generated_at=datetime.now(),
+            scoring_model=scoring_model,
+            category_caps=engine_config.category_caps,
+            pih_bundle_configured=pih_bundle_configured,
+            grouped=grouped,
+            category_refs=category_refs,
+            max_per_query=max_per_query,
+            excel_filename=excel_filename,
+            provenance=provenance,
+            conserved_query_notes=conserved_query_notes,
         )
-        _write_candidate_ranking(document, grouped)
-        _write_candidate_details(document, grouped, category_refs, evolutionary_closer, excel_filename)
+
+        document = Document()
+        _ensure_hyperlink_style(document)
+        _set_update_fields_on_open(document)
+        if language == "ja":
+            _apply_japanese_fonts(document)
+        _render_sections(document, sections)
 
         document.save(str(resolved_output))
     except Exception as exc:

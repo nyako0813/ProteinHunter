@@ -333,12 +333,23 @@ class Config:
     # optional setting in this file.
     consider_cross_species_matches: bool = True
 
+    # Language of the Word report's wording: "en" (default, the wording the
+    # report has always had) or "ja". One setting decides the language of the
+    # one Word file; the Excel workbook stays English. See
+    # output/report_i18n.py and claude/word_report_japanese_localization_design.md.
+    report_language: str = "en"
+
 
 # ==========================================================
 # Config Loader
 # ==========================================================
 
 CONFIG_FILE = Path(__file__).parent / "config.yaml"
+
+#: Languages the Word report can be written in (mirrors output/report_i18n.SUPPORTED_LANGUAGES;
+#: a test keeps the two in step so config.py need not import the output package).
+REPORT_LANGUAGES: tuple[str, ...] = ("en", "ja")
+REPORT_LANGUAGE_DEFAULT = "en"
 
 ANNOTATION_TARGET_DEFAULTS: dict[str, AnnotationTargetConfig] = {
     "candidates": AnnotationTargetConfig(
@@ -629,6 +640,7 @@ def load_config(config_file: str | Path = CONFIG_FILE, initialize: bool = True) 
         score=score,
         logging=logging,
         consider_cross_species_matches=consider_cross_species_matches,
+        report_language=str(raw.get("report_language", REPORT_LANGUAGE_DEFAULT)),
     )
 
     if initialize:
@@ -644,6 +656,7 @@ def validate_config(raw: object) -> None:
 
     _validate_input_mode(raw)
     _validate_consider_cross_species_matches_section(raw)
+    _validate_report_language(raw)
     _validate_paths_section(raw)
     _validate_blast_section(raw)
     _validate_annotation_section(raw)
@@ -734,6 +747,17 @@ def _validate_consider_cross_species_matches_section(raw: dict[object, object]) 
     if not isinstance(value, bool):
         raise ConfigError(
             "config.yaml value 'consider_cross_species_matches' must be true or false."
+        )
+
+
+def _validate_report_language(raw: dict[object, object]) -> None:
+    """Validate the optional top-level report_language ("en" or "ja")."""
+    value = raw.get("report_language", REPORT_LANGUAGE_DEFAULT)
+    if value not in REPORT_LANGUAGES:
+        raise ConfigError(
+            "config.yaml value 'report_language' must be one of: "
+            + ", ".join(f'"{code}"' for code in REPORT_LANGUAGES)
+            + "."
         )
 
 

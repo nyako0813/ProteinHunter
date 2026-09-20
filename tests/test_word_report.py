@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from docx import Document
 from docx.opc.constants import RELATIONSHIP_TYPE as RT
 
@@ -388,3 +389,154 @@ def test_title_page_handles_missing_excel_filename_and_unknown_git(tmp_path: Pat
 
     assert "Code version: 5.0 (git unknown)" in text
     assert "<Excel workbook stem>.run_provenance.yaml" in text
+
+
+# ---------------------------------------------------------------------------
+# Japanese localization (report_language: ja; output/report_i18n.py)
+# ---------------------------------------------------------------------------
+
+import re as _re
+
+from docx.oxml.ns import qn as _qn
+
+from output.word_narrative import bullet_list as _bullet_list, heading as _heading, NarrativeSection as _Section
+from output.word_report import JAPANESE_FONT, _render_sections
+
+_JA_CHARS = _re.compile(r"[぀-ヿ㐀-鿿]")
+
+
+def _localized_document(tmp_path: Path, language: str | None, *, name: str = "report.docx", **kwargs) -> Document:
+    config = app_config()
+    if language is not None:
+        config.report_language = language
+    rows = [
+        _pair_row("q1", "c1", final_score=80.0, final_score_tier="Tier1_VeryStrong", candidate_rank=1),
+        _pair_row("q1", "c2", candidate_source="Negative_hit", negative_hit_strength="medium", candidate_rank=2),
+    ]
+    output_path = tmp_path / name
+    write_word_report(
+        config=config,
+        blast_classification=blast_classification(),
+        output_path=output_path,
+        interaction_result=_interaction_result({"Interaction_Candidates": rows}),
+        excel_filename="results.xlsx",
+        **kwargs,
+    )
+    return Document(str(output_path))
+
+
+def _bookmark_names(document: Document) -> list[str]:
+    return [element.get(_qn("w:name")) for element in document.element.body.iter(_qn("w:bookmarkStart"))]
+
+
+def test_japanese_report_has_japanese_headings(tmp_path: Path) -> None:
+    document = _localized_document(tmp_path, "ja")
+
+    headings = [p.text for p in document.paragraphs if p.style.name.startswith("Heading")]
+    for expected in ("5. 証拠の構成", "7. 候補の順位", "8. 候補の詳細", "7.1 クエリ: q1", "8.1 クエリ: q1"):
+        assert expected in headings
+    assert any(h.startswith("5.7 負の証拠") for h in headings)
+    assert "ProteinHunter 候補レポート" in [p.text for p in document.paragraphs]
+
+
+def test_japanese_report_leaves_no_english_prose(tmp_path: Path) -> None:
+    document = _localized_document(tmp_path, "ja")
+
+    for paragraph in document.paragraphs:
+        if paragraph.style.name == "Heading 4" or not paragraph.text.strip():
+            continue  # candidate titles are ids and gene descriptions
+        assert _JA_CHARS.search(paragraph.text), paragraph.text
+    for table in document.tables:
+        assert all(_JA_CHARS.search(cell.text) for cell in table.rows[0].cells)  # header row is translated
+
+
+def test_japanese_report_keeps_ids_scores_and_classification_values(tmp_path: Path) -> None:
+    en = _localized_document(tmp_path, "en", name="en.docx")
+    ja = _localized_document(tmp_path, "ja", name="ja.docx")
+
+    def cells(document: Document) -> list[list[str]]:
+        return [[cell.text for cell in row.cells] for table in document.tables for row in table.rows[1:]]
+
+    assert cells(en) == cells(ja)  # candidate ids, "80.0", tier and candidate_source values are identical
+    assert cells(ja)[0][3] == "Tier1_VeryStrong"
+    ja_text = "\n".join(p.text for p in ja.paragraphs)
+    assert "80.0/100" in ja_text and "c1" in ja_text and "Negative_hit(陰性ヒット)" in ja_text
+
+
+def test_bookmarks_for_the_excel_links_do_not_depend_on_the_language(tmp_path: Path) -> None:
+    en = _localized_document(tmp_path, "en", name="en.docx")
+    ja = _localized_document(tmp_path, "ja", name="ja.docx")
+
+    assert _bookmark_names(en) == _bookmark_names(ja) != []
+
+
+def test_english_is_the_default_and_identical_to_an_explicit_en(tmp_path: Path) -> None:
+    default = _localized_document(tmp_path, None, name="default.docx")
+    explicit = _localized_document(tmp_path, "en", name="explicit.docx")
+
+    def structure(document: Document) -> list[str]:
+        return [p.text for p in document.paragraphs if not p.text.startswith("Report generated")] + [
+            cell.text for table in document.tables for row in table.rows for cell in row.cells
+        ]
+
+    assert structure(default) == structure(explicit)
+    assert "Candidate Details" in " ".join(structure(default))
+
+
+def test_japanese_output_sets_east_asian_fonts_and_language_only_in_japanese(tmp_path: Path) -> None:
+    ja = _localized_document(tmp_path, "ja", name="ja.docx")
+    en = _localized_document(tmp_path, "en", name="en.docx")
+
+    for style_name in ("Normal", "Heading 1", "Title"):
+        fonts = ja.styles[style_name].element.rPr.find(_qn("w:rFonts"))
+        assert fonts.get(_qn("w:eastAsia")) == JAPANESE_FONT
+        assert _qn("w:eastAsiaTheme") not in fonts.attrib
+    lang = ja.styles["Normal"].element.rPr.find(_qn("w:lang"))
+    assert lang.get(_qn("w:eastAsia")) == "ja-JP"
+
+    normal_fonts = en.styles["Normal"].element.rPr.find(_qn("w:rFonts")) if en.styles["Normal"].element.rPr is not None else None
+    assert normal_fonts is None or normal_fonts.get(_qn("w:eastAsia")) != JAPANESE_FONT
+
+
+def test_japanese_title_page_provenance_and_genome_warning(tmp_path: Path) -> None:
+    document = _localized_document(tmp_path, "ja", provenance=_make_provenance(check_passed=False))
+
+    text = "\n".join(p.text for p in document.paragraphs)
+    assert "コードのバージョン: 5.0 (git 1a2b3c4)" in text
+    assert "設定フィンガープリント: deadbeef" in text
+    assert "results.run_provenance.yaml" in text
+    assert "参照ゲノムのチェック: 警告" in text
+
+
+def test_conserved_query_note_is_localized_in_the_japanese_report(tmp_path: Path) -> None:
+    note = (
+        "conserved query visibility: Query WP_1 itself has a strong negative-reference BLAST hit "
+        "(negative_hit_strength=strong). Interaction partners of broadly conserved proteins may be conserved too."
+    )
+    config = app_config()
+    config.report_language = "ja"
+    interaction_result = _interaction_result({"Interaction_Candidates": [_pair_row("q1", "c1")]})
+    interaction_result.warnings = [note]
+    write_word_report(config=config, blast_classification=blast_classification(), output_path=tmp_path / "r.docx", interaction_result=interaction_result)
+
+    text = "\n".join(p.text for p in Document(str(tmp_path / "r.docx")).paragraphs)
+    assert "クエリ WP_1 自身が" in text and "strong(強)" in text
+
+
+def test_unsupported_report_language_is_rejected(tmp_path: Path) -> None:
+    config = app_config()
+    config.report_language = "fr"
+
+    with pytest.raises(ValueError, match="unsupported report language"):
+        write_word_report(config=config, blast_classification=blast_classification(), output_path=tmp_path / "r.docx", interaction_result=_interaction_result({"Interaction_Candidates": [_pair_row("q1", "c1")]}))
+
+
+def test_renderer_draws_bullet_lists_and_rejects_unknown_kinds() -> None:
+    document = Document()
+
+    _render_sections(document, [_heading("Title", 1), _bullet_list(["first", "second"])])
+
+    assert [p.text for p in document.paragraphs] == ["Title", "first", "second"]
+    assert [p.style.name for p in document.paragraphs][1:] == ["List Bullet", "List Bullet"]
+    with pytest.raises(ValueError, match="unknown report section kind"):
+        _render_sections(document, [_Section("carousel")])

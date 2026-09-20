@@ -2,6 +2,29 @@
 
 ProteinHunter_v5 の変更履歴です。
 
+## 未リリース: Word報告書の日本語化(`report_language`)
+
+Word報告書の言語を`config.yaml`の`report_language`(`"en"`が既定、`"ja"`で日本語)で
+切り替えられるようにする対応。設計は`claude/word_report_japanese_localization_design.md`。
+英語出力は変更前とバイト単位で同一(既定・後方互換)。Excel出力は言語に関係なく英語のまま。
+
+### Added
+
+- `output/report_i18n.py`: 見出し・固定文言・説明文の`en`/`ja`辞書と、分類ラベル
+  (候補ソース・信頼度階層・陰性ヒット強度・証拠カテゴリ)の訳語表。日本語の説明文中では
+  ラベルを`English(日本語)`の併記にし、遺伝子座番号・スコア・表内の分類値は翻訳しない。
+- `output/report_sections.py`: 報告書全体(タイトルページ・5章・7章・8章)を、docxに依存しない
+  `NarrativeSection`(heading/paragraph/bullet_list/table/toc)のリストとして組み立てる。
+  Word以外の出力(予定のNotion出力)も同じリストを描画できる。
+- `config.py`: `report_language`(検証付き)。
+
+### Changed
+
+- `output/word_narrative.py`: 候補ごとの説明文ビルダーに`language`引数(既定`"en"`)を追加し、
+  `NarrativeSection`と構築ヘルパーを導入。
+- `output/word_report.py`: 文言のハードコードを廃し、`NarrativeSection`をdocxに描画する側に徹する。
+  日本語出力時は主要スタイルに東アジア用フォント(Yu Gothic)と`ja-JP`言語を設定する。
+
 ## 未リリース: 実行の再現性・トレーサビリティ(run provenance)
 
 出力(Excel/Word)が「どのコード版・どの設定で」生成されたかを、出力自体から

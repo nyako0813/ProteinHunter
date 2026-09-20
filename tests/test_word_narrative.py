@@ -158,3 +158,80 @@ def test_biological_interpretation_reproducible_for_identical_input() -> None:
     first = build_biological_interpretation(row, rank=3, n_candidates=15, category_refs=V2_REFS, evolutionary_closer=closer)
     second = build_biological_interpretation(dict(row), rank=3, n_candidates=15, category_refs=V2_REFS, evolutionary_closer=closer)
     assert first == second
+
+
+# ---------------------------------------------------------------------------
+# Japanese wording (language="ja")
+# ---------------------------------------------------------------------------
+
+
+def test_default_language_is_english_and_ja_is_opt_in() -> None:
+    row = _row()
+
+    assert build_why_ranks_highly(row, V2_REFS) == build_why_ranks_highly(row, V2_REFS, "en")
+    assert build_why_ranks_highly(row, V2_REFS, "ja") != build_why_ranks_highly(row, V2_REFS, "en")
+
+
+def test_ja_why_ranks_highly_keeps_numbers_and_glosses_labels() -> None:
+    row = _row(final_score_tier="Tier1_VeryStrong", final_score=88.4, evidence_category_count=4)
+
+    text = build_why_ranks_highly(row, V2_REFS, "ja")
+
+    assert "88.4/100" in text and "4 個" in text
+    assert "Tier 1 — Very Strong(非常に強い)" in text
+    assert "Sequence/Source Classification(配列・ソース分類) (30.0/30)" in text
+    assert "Genomic Context(ゲノム文脈) (12.5/25)" in text
+
+
+def test_ja_negative_hit_caveat_glosses_the_strength_but_keeps_its_value() -> None:
+    row = _row(candidate_source="Candidates_relaxed", negative_hit_strength="medium")
+
+    text = build_why_ranks_highly(row, V2_REFS, "ja")
+
+    assert "medium(中)" in text
+    assert "Candidates_relaxed(候補(緩和条件))" in text
+    assert "candidate_source" in text  # column name stays English
+
+
+def test_ja_unknown_candidate_source_adds_no_sentence_like_english() -> None:
+    row = _row(candidate_source="Negative_strong_hit")
+
+    en = build_why_ranks_highly(row, V2_REFS, "en")
+    ja = build_why_ranks_highly(row, V2_REFS, "ja")
+
+    assert "Negative_strong_hit" not in en and "Negative_strong_hit" not in ja
+
+
+def test_ja_biological_interpretation_stays_hedged_and_names_the_candidate() -> None:
+    row = _row(same_gene_neighborhood_score=12.5)
+    closer = build_evolutionary_closer("v2_evidence_based", False, "ja")
+
+    text = build_biological_interpretation(row, 3, 20, V2_REFS, closer, "ja")
+
+    assert "candidate_1" in text and "query_1" in text and "20 個の候補のうち 3 位" in text
+    assert "確定的に同定したものではない" in text
+    assert "立証するものではない" in text  # genomic-context colour sentence
+    assert "評価されていない" in text  # the PIH-not-supplied closer
+
+
+def test_ja_evolutionary_closer_covers_all_three_branches() -> None:
+    legacy = build_evolutionary_closer("legacy_additive", False, "ja")
+    with_pih = build_evolutionary_closer("v2_evidence_based", True, "ja")
+    without_pih = build_evolutionary_closer("v2_evidence_based", False, "ja")
+
+    assert len({legacy, with_pih, without_pih}) == 3
+    assert "legacy_additive" in legacy and "PIH" in with_pih and "提供されなかった" in without_pih
+
+
+def test_ja_output_is_reproducible() -> None:
+    row = _row()
+
+    assert build_why_ranks_highly(row, V2_REFS, "ja") == build_why_ranks_highly(dict(row), V2_REFS, "ja")
+
+
+def test_unsupported_language_raises() -> None:
+    import pytest
+
+    with pytest.raises(ValueError):
+        build_why_ranks_highly(_row(), V2_REFS, "fr")
+

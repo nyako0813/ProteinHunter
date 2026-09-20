@@ -729,3 +729,28 @@ def test_invalid_logging_save_log_raises_config_error(tmp_path: Path) -> None:
 
     with pytest.raises(ConfigError, match="logging.save_log"):
         load_config(config_path, initialize=False)
+
+
+def test_report_language_defaults_to_english(tmp_path: Path) -> None:
+    cfg = load_config(write_config(tmp_path, valid_config_data()), initialize=False)
+
+    assert cfg.report_language == "en"
+
+
+def test_report_language_accepts_japanese(tmp_path: Path) -> None:
+    data = valid_config_data()
+    data["report_language"] = "ja"
+
+    cfg = load_config(write_config(tmp_path, data), initialize=False)
+
+    assert cfg.report_language == "ja"
+
+
+@pytest.mark.parametrize("value", ["fr", "EN", "", True, None, ["ja"]])
+def test_invalid_report_language_raises_config_error(tmp_path: Path, value: object) -> None:
+    data = valid_config_data()
+    data["report_language"] = value
+
+    with pytest.raises(ConfigError, match="report_language"):
+        load_config(write_config(tmp_path, data), initialize=False)
+
