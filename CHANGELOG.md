@@ -2,6 +2,37 @@
 
 ProteinHunter_v5 の変更履歴です。
 
+## 未リリース: PIHブリッジのバグ修正(`integrated_scoring`の形)
+
+`analysis/pih_evidence_bridge.py`(Phase 4)は、PIHの`candidate_evidence_bundle.jsonl`を実際の出力と異なる形で読んでいた。
+PIHは`integrated_scoring`を**配列**(要素0〜1個)で書くが、ブリッジは**辞書**を前提にしていたため、実際のPIH出力からは1カテゴリも取り込めなかった
+(Phase 4以来、実データでは常に0件)。テストのフィクスチャも同じ誤った前提(辞書)で作られていたので、テストは通り続けていた。
+調査は`~/projects/ProteinInteractionHunter`のスキーマ(`schemas/candidate_evidence_bundle.schema.json`)とライター(`application/pipeline.py`)を読んで行った。
+PIHの実bundleはこの環境に存在しない。
+
+### Fixed
+
+- `integrated_scoring`をPIHの実際の形(配列、要素0〜1個)でパースする。配列が空(または`integrated_scoring`が無い)なら
+  「PIH側でスコアリングされなかったペア」として何も取り込まず、警告も出さない。辞書形式への後方互換は無い(そのような出力は存在しない)。
+- 旧実装のフォールバック(`integrated_scoring`が空のとき、PIHの別構造`score`を読む)を削除。`score`にはカテゴリ内訳が無く、読む意味が無かった。
+
+### Changed
+
+- 構造がPIHのスキーマと違うレコード(`integrated_scoring`が配列でない、要素がオブジェクトでない、`category_scores`が無い、要素が2個以上)は、
+  黙って捨てず警告する(種類ごとに1件へ集約し、件数と最初の行番号を出す。巨大なbundleの全行が不一致でもログが溢れない)。
+  今回のバグが長く見つからなかったのは、この不一致が無警告で握りつぶされていたため。実行全体は従来どおり止めない。
+- 負の`normalized_score`の扱いは**従来どおり**: PIHのカテゴリスコアは[-1, 1]で、負は不整合な局在や系統プロファイルの強い不一致などを表すが、
+  ブリッジは[0, 1]に切り詰める(負は0.0になり、そのカテゴリは「証拠あり・寄与ゼロ」として分母に入る)。符号情報は現状捨てている。
+  実bundleが1件も無い段階で負値を減点にモデル化しない判断(`negative_hit_strength`で保存性と反証を混同した前例を避ける)。実データで負値の分布を見てから再検討する。
+
+### Tests
+
+- テストフィクスチャをPIHの実スキーマ形(配列、`raw_weighted_sum`/`configured_cap`などスキーマの必須項目つき)に置き換えた(`tests/pih_fixtures.py`)。
+  旧形式(辞書)のフィクスチャは、実在しない形なので凍結せず廃止した。
+- `tests/test_pih_evidence_bridge.py`を追加(実スキーマのレコードでカテゴリが埋まること、空配列、`score`を読まないこと、警告の集約、負値・1超の切り詰めなど)。
+  `tests/test_interaction_scoring.py`にも、実スキーマのレコードから`Interaction_Candidates`の行まで届く結合テストを追加。
+- 新しいテストは旧ブリッジに対して失敗する(20件)ことを確認済み。
+
 ## 未リリース: スコアリングの再較正(Tier3閾値)と`config_hash`の対象拡大
 
 `v2_evidence_based`の**既定の挙動を変える**変更。分析の記録は`claude/calibration/2026-09-21_scoring_recalibration/`。
