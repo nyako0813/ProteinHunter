@@ -855,3 +855,95 @@ def test_word_report_link_respects_max_candidates_per_query(tmp_path: Path) -> N
     final_score = pd.read_excel(result, sheet_name="02_Final_Score", header=1).set_index("candidate_protein_id")
     assert not pd.isna(final_score.loc["in_range", "word_report_link"])
     assert pd.isna(final_score.loc["out_of_range", "word_report_link"])
+
+
+# ---------------------------------------------------------------------------
+# Run provenance block on 01_Index (core/provenance.py)
+# ---------------------------------------------------------------------------
+
+
+def make_provenance(*, check_passed: bool | None = None, commit: str | None = "1a2b3c4", dirty: bool | None = False):
+    from datetime import datetime
+
+    from core.provenance import RunProvenance
+
+    return RunProvenance("5.0", commit, dirty, "deadbeef", check_passed, datetime(2026, 9, 20, 12, 30))
+
+
+def _index_column_a_and_b(path: Path) -> list[tuple[object, object]]:
+    index = load_workbook(path)["01_Index"]
+    return [(row[0].value, row[1].value) for row in index.iter_rows()]
+
+
+def test_index_without_provenance_starts_with_the_table_header(tmp_path: Path) -> None:
+    result = write_classification_workbook(
+        config=app_config(), blast_classification=blast_classification(), output_path=tmp_path / "plain.xlsx"
+    )
+
+    assert _index_column_a_and_b(result)[0][0] == "Sheet"
+
+
+def test_index_with_provenance_shows_fingerprint_block_above_the_table(tmp_path: Path) -> None:
+    result = write_classification_workbook(
+        config=app_config(),
+        blast_classification=blast_classification(),
+        output_path=tmp_path / "MA_4115_2.xlsx",
+        provenance=make_provenance(dirty=True),
+    )
+
+    rows = _index_column_a_and_b(result)
+    assert rows[0] == ("Code version", "5.0 (git 1a2b3c4+dirty)")
+    assert rows[1] == ("Config fingerprint", "deadbeef")
+    assert rows[2] == ("Generated", "2026-09-20 12:30")
+    assert rows[3] == ("Run provenance file", "MA_4115_2.run_provenance.yaml")
+    assert all(label != "Reference genome check" for label, _ in rows)
+    assert rows[4] == (None, None)  # blank separator
+    assert rows[5][0] == "Sheet"  # table header, shifted down
+
+
+def test_index_links_still_point_at_the_right_sheets_when_the_table_is_shifted(tmp_path: Path) -> None:
+    result = write_classification_workbook(
+        config=app_config(),
+        blast_classification=blast_classification(),
+        output_path=tmp_path / "shifted.xlsx",
+        provenance=make_provenance(check_passed=False),
+    )
+
+    workbook = load_workbook(result)
+    index = workbook["01_Index"]
+    header_row = next(row[0].row for row in index.iter_rows() if row[0].value == "Sheet")
+    expected_sheets = [row[0] for row in INDEX_ROWS_V2]
+    linked = [index.cell(row=header_row + offset, column=1) for offset in range(1, 1 + len(expected_sheets))]
+    assert [cell.value for cell in linked] == expected_sheets
+    for cell in linked:
+        assert cell.hyperlink.target == f"#'{cell.value}'!A1"
+        assert cell.value in workbook.sheetnames
+    assert index.freeze_panes == f"A{header_row + 1}"
+
+
+@pytest.mark.parametrize("check_passed, expect_warning", [(False, True), (True, False), (None, False)])
+def test_index_warns_only_when_the_reference_genome_check_failed(
+    tmp_path: Path, check_passed: bool | None, expect_warning: bool
+) -> None:
+    result = write_classification_workbook(
+        config=app_config(),
+        blast_classification=blast_classification(),
+        output_path=tmp_path / "warn.xlsx",
+        provenance=make_provenance(check_passed=check_passed),
+    )
+
+    labels = {label: value for label, value in _index_column_a_and_b(result) if isinstance(label, str)}
+    assert ("Reference genome check" in labels) is expect_warning
+    if expect_warning:
+        assert "WARNING" in labels["Reference genome check"]
+
+
+def test_index_reports_unknown_git_state(tmp_path: Path) -> None:
+    result = write_classification_workbook(
+        config=app_config(),
+        blast_classification=blast_classification(),
+        output_path=tmp_path / "nogit.xlsx",
+        provenance=make_provenance(commit=None, dirty=None),
+    )
+
+    assert _index_column_a_and_b(result)[0] == ("Code version", "5.0 (git unknown)")

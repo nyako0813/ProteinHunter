@@ -328,3 +328,63 @@ def test_category_refs_for_legacy_use_scoring_weights() -> None:
     caps = {ref.row_key: ref.cap for ref in refs}
     assert caps["candidate_priority_score"] == INTERACTION_SCORING_WEIGHTS_DEFAULT.candidate_priority
     assert caps["co_occurrence_score"] == INTERACTION_SCORING_WEIGHTS_DEFAULT.co_occurrence
+
+
+# ---------------------------------------------------------------------------
+# Run provenance on the title page (core/provenance.py)
+# ---------------------------------------------------------------------------
+
+
+def _make_provenance(*, check_passed: bool | None = None, commit: str | None = "1a2b3c4", dirty: bool | None = False):
+    from datetime import datetime
+
+    from core.provenance import RunProvenance
+
+    return RunProvenance("5.0", commit, dirty, "deadbeef", check_passed, datetime(2026, 9, 20, 12, 30))
+
+
+def _report_text(tmp_path: Path, **kwargs) -> str:
+    output_path = tmp_path / "report.docx"
+    write_word_report(
+        config=app_config(),
+        blast_classification=blast_classification(),
+        output_path=output_path,
+        interaction_result=_interaction_result({"Interaction_Candidates": [_pair_row("q1", "c1")]}),
+        **kwargs,
+    )
+    return "\n".join(p.text for p in Document(str(output_path)).paragraphs)
+
+
+def test_title_page_shows_code_version_fingerprint_and_sidecar_name(tmp_path: Path) -> None:
+    text = _report_text(tmp_path, excel_filename="MA_4115_2.xlsx", provenance=_make_provenance(dirty=True))
+
+    assert "Code version: 5.0 (git 1a2b3c4+dirty)" in text
+    assert "Config fingerprint: deadbeef" in text
+    assert "saved alongside this report as MA_4115_2.run_provenance.yaml" in text
+    assert "Reference genome check" not in text
+
+
+def test_title_page_without_provenance_is_unchanged(tmp_path: Path) -> None:
+    text = _report_text(tmp_path, excel_filename="MA_4115_2.xlsx")
+
+    assert "Code version" not in text
+    assert "Config fingerprint" not in text
+    assert "run_provenance" not in text
+    assert "Scoring model: v2_evidence_based" in text
+
+
+def test_title_page_warns_only_when_reference_genome_check_failed(tmp_path: Path) -> None:
+    failed = _report_text(tmp_path, excel_filename="r.xlsx", provenance=_make_provenance(check_passed=False))
+    passed = _report_text(tmp_path, excel_filename="r.xlsx", provenance=_make_provenance(check_passed=True))
+    unknown = _report_text(tmp_path, excel_filename="r.xlsx", provenance=_make_provenance(check_passed=None))
+
+    assert "Reference genome check: WARNING" in failed
+    assert "Reference genome check" not in passed
+    assert "Reference genome check" not in unknown
+
+
+def test_title_page_handles_missing_excel_filename_and_unknown_git(tmp_path: Path) -> None:
+    text = _report_text(tmp_path, provenance=_make_provenance(commit=None, dirty=None))
+
+    assert "Code version: 5.0 (git unknown)" in text
+    assert "<Excel workbook stem>.run_provenance.yaml" in text

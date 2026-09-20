@@ -2,6 +2,30 @@
 
 ProteinHunter_v5 の変更履歴です。
 
+## 未リリース: 実行の再現性・トレーサビリティ(run provenance)
+
+出力(Excel/Word)が「どのコード版・どの設定で」生成されたかを、出力自体から
+追跡できるようにする対応。設計は`claude/run_provenance_design.md`。
+
+### Added
+
+- `core/provenance.py`: 新設。`RunProvenance`(app_version、git短縮SHA・dirtyフラグ、
+  configハッシュ、参照ゲノムチェック結果、生成時刻)と
+  `collect_run_provenance`/`write_provenance_sidecar`。gitはサブプロセスの
+  `git`呼び出しのみで、取得できなければ`None`(実行は止めない)。configハッシュは
+  `config.yaml`+`scoring_engine_config`+`functional_complementarity_ruleset`+
+  `domain_family_map`の内容(改行はLFに正規化)のSHA-256。
+- サイドカー`<output_excelのstem>.run_provenance.yaml`を毎回出力し、実効設定全体を
+  保存する(コミットしていない`config.yaml`の一時的な変更も後から復元できる)。
+- Excel`01_Index`とWordのタイトルページに、コード版・configフィンガープリント・
+  サイドカーのファイル名を追記。参照ゲノムの起動時チェックが失敗した場合は警告行も出る。
+
+### Changed
+
+- `write_classification_workbook`/`write_word_report`に任意引数`provenance`を追加
+  (既定`None`で従来どおりの出力)。`main._log_reference_genome_check`が
+  チェック結果(True/False/None)を返すようになった。
+
 ## 未リリース: Rockhopperオペロン予測証拠の統合(Phase 6f)
 
 Rockhopper(ゲノム配列+RNA-seqリードから直接オペロン構造を予測する

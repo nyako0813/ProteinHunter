@@ -14,6 +14,12 @@ from openpyxl.worksheet.worksheet import Worksheet
 
 from core.exceptions import ExcelOutputError
 from core.models import BlastHit, ProteinRecord
+from core.provenance import (
+    REFERENCE_GENOME_WARNING_TEXT,
+    RunProvenance,
+    code_version_text,
+    provenance_sidecar_filename,
+)
 from analysis.interaction_scoring import (
     INTERACTION_EVIDENCE_DETAIL_V2_COLUMNS,
     INTERACTION_QUERY_COLUMNS,
@@ -546,6 +552,7 @@ def write_classification_workbook(
     output_path: str | Path,
     interaction_result: Any | None = None,
     word_report_filename: str | None = None,
+    provenance: RunProvenance | None = None,
 ) -> Path:
     """Write the unified 12-sheet Phase 6-8 Stage 1 workbook and return its path.
 
@@ -567,6 +574,12 @@ def write_classification_workbook(
     claude/phase678_excel_word_redesign_investigation.md item 6). Left
     ``None`` (the default), every row's ``word_report_link`` stays blank,
     exactly as it has since Phase 6-8 Stage 1 reserved the column.
+
+    ``provenance`` (run provenance, see core/provenance.py) adds a short
+    fingerprint block -- code version, config hash, generation time, the
+    sidecar filename, and a warning when the reference-genome check failed --
+    above the ``01_Index`` table, which shifts down accordingly. Left
+    ``None`` (the default), the Index sheet is laid out exactly as before.
     """
     resolved_output = Path(output_path).expanduser().resolve()
     resolved_output.parent.mkdir(parents=True, exist_ok=True)
@@ -600,8 +613,16 @@ def write_classification_workbook(
     try:
         with pd.ExcelWriter(resolved_output, engine="openpyxl") as writer:
             index_dataframe = _index_dataframe(INDEX_ROWS_V2)
-            index_dataframe.to_excel(writer, sheet_name="01_Index", index=False)
-            _format_index_worksheet(writer.sheets["01_Index"], index_dataframe, INDEX_ROWS_V2)
+            provenance_lines = _provenance_index_lines(provenance, resolved_output)
+            # One line per fingerprint entry, a blank row, then the table header.
+            index_header_row = len(provenance_lines) + 2 if provenance_lines else 1
+            index_dataframe.to_excel(
+                writer, sheet_name="01_Index", index=False, startrow=index_header_row - 1
+            )
+            _write_provenance_lines(writer.sheets["01_Index"], provenance_lines)
+            _format_index_worksheet(
+                writer.sheets["01_Index"], index_dataframe, INDEX_ROWS_V2, header_row=index_header_row
+            )
 
             simple_sheets: dict[str, pd.DataFrame] = {
                 SHEET_FINAL_SCORE: final_score_df,
@@ -802,22 +823,48 @@ def _index_dataframe(
     )
 
 
+def _provenance_index_lines(
+    provenance: RunProvenance | None, output_path: Path
+) -> list[tuple[str, str]]:
+    """Label/value pairs for the run-provenance block above the Index table (empty without provenance)."""
+    if provenance is None:
+        return []
+    lines = [
+        ("Code version", code_version_text(provenance)),
+        ("Config fingerprint", provenance.config_hash),
+        ("Generated", f"{provenance.generated_at:%Y-%m-%d %H:%M}"),
+        ("Run provenance file", provenance_sidecar_filename(output_path)),
+    ]
+    if provenance.reference_genome_check_passed is False:
+        lines.append(("Reference genome check", REFERENCE_GENOME_WARNING_TEXT))
+    return lines
+
+
+def _write_provenance_lines(worksheet: Worksheet, lines: list[tuple[str, str]]) -> None:
+    """Write the provenance block at the top of the Index sheet (rows 1..len(lines))."""
+    for row_index, (label, value) in enumerate(lines, start=1):
+        label_cell = worksheet.cell(row=row_index, column=1, value=label)
+        label_cell.font = Font(bold=True)
+        worksheet.cell(row=row_index, column=2, value=value)
+
+
 def _format_index_worksheet(
     worksheet: Worksheet,
     dataframe: pd.DataFrame,
     index_rows: tuple[tuple[str, str, str, str], ...],
+    header_row: int = 1,
 ) -> None:
     """Apply navigation links and readable formatting to the Index sheet."""
-    _format_worksheet(worksheet, dataframe)
+    _format_worksheet(worksheet, dataframe, header_row=header_row)
     for row_index, sheet_name in enumerate(
         (row[0] for row in index_rows),
-        start=2,
+        start=header_row + 1,
     ):
         cell = worksheet.cell(row=row_index, column=1)
         cell.hyperlink = f"#'{sheet_name}'!A1"
         cell.style = "Hyperlink"
 
-    for row in worksheet.iter_rows(min_row=2):
+    for row in worksheet.iter_rows(min_row=header_row + 1):
         first_cell = row[0]
         if first_cell.value in {
             "Interaction scoring columns",
