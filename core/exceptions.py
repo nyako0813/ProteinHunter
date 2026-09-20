@@ -132,6 +132,12 @@ class WordReportError(ProteinHunterError):
     default_message = "ProteinHunter could not create the Word report file."
 
 
+class NotionExportError(ProteinHunterError):
+    """Raised when the optional Notion export cannot be completed."""
+
+    default_message = "ProteinHunter could not export the report to Notion."
+
+
 __all__: tuple[str, ...] = (
     "ProteinHunterError",
     "ConfigError",
@@ -151,5 +157,6 @@ __all__: tuple[str, ...] = (
     "CacheError",
     "ScoringError",
     "ExcelOutputError",
+    "NotionExportError",
     "WordReportError",
 )

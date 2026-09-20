@@ -16,6 +16,7 @@ from core.exceptions import (
     ExcelOutputError,
     FileValidationError,
     GeneContextError,
+    NotionExportError,
     PfamAnnotationError,
     ProteinHunterError,
     ScoringError,
@@ -45,6 +46,7 @@ CUSTOM_EXCEPTIONS: tuple[type[ProteinHunterError], ...] = (
     ScoringError,
     ExcelOutputError,
     WordReportError,
+    NotionExportError,
 )
 
 BLAST_EXCEPTIONS: tuple[type[BlastError], ...] = (

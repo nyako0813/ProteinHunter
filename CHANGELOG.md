@@ -2,6 +2,35 @@
 
 ProteinHunter_v5 の変更履歴です。
 
+## 未リリース: Notion出力(第三の出力)
+
+ExcelとWordに加えて、レポートをNotionのページ・データベースとして出力できるようにする対応。
+オプトイン(`notion_export.enabled`、既定`false`)。設計は`claude/notion_export_design.md`。
+
+### Added
+
+- `output/notion_report.py`: `output/report_sections.py`の`NarrativeSection`リストをNotionブロックに変換して送る。
+  構造は 親ページ → 実行ごとのRunページ(タイトルページ・目次・5章・クエリ別順位表)→ 候補データベース
+  (クエリ・順位・最終スコア・Tier・候補ソース・候補IDのプロパティ)→ 候補ごとのページ。
+  Notionの上限に合わせて分割送信(1リクエスト100ブロック・表の行を含め900要素、rich textは2000文字)し、
+  429/5xx/ネットワークエラーはRetry-Afterを尊重した指数バックオフで再試行、送信間隔は約3リクエスト/秒に抑える。
+  APIバージョンは`2022-06-28`固定、SDK自身の自動リトライはオフ。
+- 証拠カテゴリ(5.1〜5.7)はRunページの子ページ(独立したNotionページ)にし、Runページには順位表と子ページへのリンクだけを残す。
+- 各候補に「ドメイン情報」の小節(検出されたドメイン一覧と、パイプラインがドメイン相補性の算出に使った証拠の説明)を追加。
+  共有ナラティブ層(`report_sections.py`)に入れたので、Word・Notionの両方の候補詳細に出る。
+- Notion APIはSDKのエンドポイント別ヘルパーではなく`client.request`で呼ぶ。notion-client 3.xの`databases.create`が
+  `properties`を黙って捨てるため、候補データベースが作れず候補ページも作られなかった不具合の修正
+  (`httpx.MockTransport`経由で実際のHTTPリクエストを検査するテストを追加)。
+- `config.yaml`に`notion_export.enabled`/`parent_page_id`。トークンは設定ファイルに持たず、環境変数`NOTION_TOKEN`から読む
+  (未設定なら警告してNotion出力だけをスキップ)。`config.py`で検証(有効時は32桁のページIDが必須)。
+- 新規依存: `notion-client>=3.0,<4`(Notion出力を有効にしたときだけimport)。
+- `NarrativeSection`に構造ヒント`role`/`meta`を追加(Word描画は無視)。`output/report_sections.py`に、実行結果からレポート全体を
+  組み立てる`build_run_sections`を追加し、Wordと共有。
+
+### Changed
+
+- `main.py`: ExcelとWordの後にNotion出力を呼ぶ。失敗はすべて警告ログで、ExcelとWordの出力には影響しない。
+
 ## 未リリース: Word報告書の日本語化(`report_language`)
 
 Word報告書の言語を`config.yaml`の`report_language`(`"en"`が既定、`"ja"`で日本語)で
