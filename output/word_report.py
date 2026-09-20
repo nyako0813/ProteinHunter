@@ -34,6 +34,7 @@ from docx.oxml.ns import qn
 from docx.shared import RGBColor
 from docx.text.paragraph import Paragraph
 
+from analysis.interaction_scoring import CONSERVED_QUERY_WARNING_PREFIX, is_conserved_query_visibility_warning
 from analysis.scoring_engine_config import ScoringEngineConfig, load_scoring_engine_config
 from core.exceptions import WordReportError
 from output.report_v2 import (
@@ -224,6 +225,7 @@ def _write_evidence_architecture(
     scoring_model: str,
     engine_config: ScoringEngineConfig,
     pih_bundle_configured: bool,
+    conserved_query_notes: list[str] | None = None,
 ) -> None:
     """Write the fixed-text "5. Evidence Architecture" section (5.1-5.7).
 
@@ -319,6 +321,10 @@ def _write_evidence_architecture(
         "The two signals are kept visibly separate in this report for "
         "that reason, not merged back together for convenience."
     )
+    # A known side effect of that absence, not a Negative Evidence signal:
+    # see patches/conserved_query_visibility_design.md.
+    for note in conserved_query_notes or []:
+        document.add_paragraph(note)
 
 
 # ---------------------------------------------------------------------------
@@ -488,7 +494,14 @@ def write_word_report(
         )
         _add_toc_field(document)
 
-        _write_evidence_architecture(document, scoring_model, engine_config, pih_bundle_configured)
+        conserved_query_notes = [
+            warning[len(CONSERVED_QUERY_WARNING_PREFIX):]
+            for warning in getattr(interaction_result, "warnings", None) or []
+            if is_conserved_query_visibility_warning(warning)
+        ]
+        _write_evidence_architecture(
+            document, scoring_model, engine_config, pih_bundle_configured, conserved_query_notes
+        )
         _write_candidate_ranking(document, grouped)
         _write_candidate_details(document, grouped, category_refs, evolutionary_closer, excel_filename)
 
