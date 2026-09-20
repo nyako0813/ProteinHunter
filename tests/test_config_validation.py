@@ -264,6 +264,61 @@ def test_annotation_targets_missing_subkeys_keep_defaults(tmp_path: Path) -> Non
     assert cfg.annotation_targets["negative_hit"].uniprot is True
 
 
+def _config_with_negative_sources(
+    tmp_path: Path,
+    candidate_sources: dict[str, bool],
+    *,
+    enabled: bool = True,
+    annotation_targets: dict[str, Any] | None = None,
+):
+    data = valid_config_data()
+    data["interaction_scoring"] = {"enabled": enabled, "candidate_sources": candidate_sources}
+    if annotation_targets is not None:
+        data["annotation_targets"] = annotation_targets
+    return load_config(write_config(tmp_path, data), initialize=False)
+
+
+@pytest.mark.parametrize(
+    "source", ["negative_hit", "negative_strong_hit", "negative_medium_hit", "negative_weak_hit"]
+)
+def test_enabling_a_negative_hit_source_turns_on_negative_hit_gff(tmp_path: Path, source: str) -> None:
+    """GFF annotation supplies old_locus_tag, which STRING/GEO lookups need; without it
+    candidates scored from negative_hit buckets have that evidence silently MISSING."""
+    cfg = _config_with_negative_sources(tmp_path, {source: True})
+
+    assert cfg.annotation_targets["negative_hit"].gff is True
+
+
+def test_negative_hit_gff_link_leaves_other_sheets_alone(tmp_path: Path) -> None:
+    cfg = _config_with_negative_sources(tmp_path, {"negative_hit": True})
+
+    assert cfg.annotation_targets["candidates"].gff is True
+    assert cfg.annotation_targets["candidates_relaxed"].gff is True
+    assert cfg.annotation_targets["no_hit"].gff is False
+    assert cfg.annotation_targets["positive_all_sources"].gff is False
+    assert cfg.annotation_targets["negative_unmatched"].gff is False
+
+
+def test_negative_hit_gff_stays_off_when_no_negative_source_is_enabled(tmp_path: Path) -> None:
+    cfg = _config_with_negative_sources(tmp_path, {"candidates": True, "no_hit": True})
+
+    assert cfg.annotation_targets["negative_hit"].gff is False
+
+
+def test_negative_hit_gff_stays_off_when_interaction_scoring_is_disabled(tmp_path: Path) -> None:
+    cfg = _config_with_negative_sources(tmp_path, {"negative_hit": True}, enabled=False)
+
+    assert cfg.annotation_targets["negative_hit"].gff is False
+
+
+def test_explicit_negative_hit_gff_false_wins_over_the_link(tmp_path: Path) -> None:
+    cfg = _config_with_negative_sources(
+        tmp_path, {"negative_hit": True}, annotation_targets={"negative_hit": {"gff": False}}
+    )
+
+    assert cfg.annotation_targets["negative_hit"].gff is False
+
+
 def test_annotation_targets_can_configure_candidates_relaxed(tmp_path: Path) -> None:
     """Candidates_relaxed should have its own per-sheet annotation switches."""
     data = valid_config_data()

@@ -117,6 +117,11 @@ annotation_targets:
     alphafold: false
 
   negative_hit:
+    # gff is false by default, but turns on automatically when
+    # interaction_scoring is enabled and any negative_hit candidate_sources
+    # bucket (negative_hit / negative_strong_hit / negative_medium_hit /
+    # negative_weak_hit) is on: GFF annotation supplies old_locus_tag, which
+    # the STRING/GEO evidence lookups need. Set gff here to override.
     #gff: false
     pfam: false
     uniprot: false

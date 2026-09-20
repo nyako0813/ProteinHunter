@@ -385,6 +385,15 @@ _CANDIDATE_SOURCES_FIXED_DEFAULTS: dict[str, bool] = {
     "negative_weak_hit": False,
 }
 
+#: candidate_sources buckets whose records come from the annotation_targets
+#: "negative_hit" sheet (main.SHEET_TO_ANNOTATION_TARGET maps all four to it).
+_NEGATIVE_HIT_SOURCE_KEYS: tuple[str, ...] = (
+    "negative_hit",
+    "negative_strong_hit",
+    "negative_medium_hit",
+    "negative_weak_hit",
+)
+
 #: candidate_sources buckets that 設定.xlsx's toggle actually controls.
 _CANDIDATE_SOURCES_TOGGLED: tuple[str, ...] = (
     "positive_all_sources",
@@ -614,12 +623,17 @@ def load_config(config_file: str | Path = CONFIG_FILE, initialize: bool = True) 
         ),
     )
     consider_cross_species_matches = bool(raw.get("consider_cross_species_matches", True))
-    annotation_targets = _load_annotation_targets(
-        raw.get("annotation_targets"), consider_cross_species_matches
-    )
     ortholog_filter = _load_ortholog_filter(raw.get("ortholog_filter"))
     interaction_scoring = _load_interaction_scoring(
         raw.get("interaction_scoring"), consider_cross_species_matches
+    )
+    annotation_targets = _load_annotation_targets(
+        raw.get("annotation_targets"),
+        consider_cross_species_matches,
+        negative_hit_candidates_enabled=(
+            interaction_scoring.enabled
+            and any(interaction_scoring.candidate_sources.get(key, False) for key in _NEGATIVE_HIT_SOURCE_KEYS)
+        ),
     )
 
     cache = CacheConfig(**raw["cache"])
@@ -845,6 +859,7 @@ def _validate_annotation_targets_section(raw: dict[object, object]) -> None:
 def _load_annotation_targets(
     raw_targets: object,
     consider_cross_species_matches: bool = True,
+    negative_hit_candidates_enabled: bool = False,
 ) -> AnnotationTargetsConfig:
     """Load per-sheet annotation target settings with safe defaults.
 
@@ -852,8 +867,18 @@ def _load_annotation_targets(
     top-of-file config.yaml switch) picks which gff defaults apply before
     any explicit ``raw_targets`` values are merged in -- an explicit value
     always wins over either preset.
+
+    ``negative_hit_candidates_enabled`` (interaction scoring is on and any
+    of the negative_hit candidate_sources buckets is enabled) additionally
+    defaults ``negative_hit.gff`` to True: GFF annotation is what gives a
+    record its ``old_locus_tag``, and STRING/GEO evidence is looked up by
+    that tag, so candidates scored from these buckets would otherwise have
+    that evidence silently MISSING. An explicit ``negative_hit.gff`` in
+    config.yaml still wins.
     """
     targets = dict(_annotation_target_defaults_for(consider_cross_species_matches))
+    if negative_hit_candidates_enabled and not targets["negative_hit"].gff:
+        targets["negative_hit"] = replace(targets["negative_hit"], gff=True)
     if not isinstance(raw_targets, dict):
         return AnnotationTargetsConfig(**targets)
 
