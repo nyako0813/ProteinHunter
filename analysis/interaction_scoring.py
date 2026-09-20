@@ -1322,14 +1322,14 @@ def _check_conserved_query_visibility(
             continue
         warnings.append(
             f"{CONSERVED_QUERY_WARNING_PREFIX}Query {query['query_id']} itself has a {strength} "
-            f"negative-reference BLAST hit (negative_hit_strength={strength}). Experimentally "
-            "confirmed true interaction partners of highly conserved queries (see Tier A in "
-            "claude/experimental_interactions_calibration_report.md: HdrD1-Mer, MtpA-MtpC, "
-            "NifD/K-NifI1/NifI2) are known to fall into the Negative_hit bucket for the same "
-            "reason. With the current interaction_scoring.candidate_sources settings, such "
-            "candidates are silently excluded from every output sheet regardless of their score. "
-            "Consider re-running this query with candidate_sources.negative_hit (and/or its "
-            "strong/medium/weak sub-bucket) enabled."
+            f"negative-reference BLAST hit (negative_hit_strength={strength}). Interaction "
+            "partners of broadly conserved proteins may be conserved too and so be classified "
+            "as Negative_hit as well. With the current interaction_scoring.candidate_sources "
+            "settings (negative_hit and its strong/medium/weak sub-buckets all disabled), "
+            "candidates in that bucket are excluded from every output sheet regardless of "
+            "their score. If expected partners of this query are missing from the output, "
+            "consider re-running with candidate_sources.negative_hit (or one strength "
+            "sub-bucket) enabled."
         )
 
 
