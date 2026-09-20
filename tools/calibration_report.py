@@ -16,7 +16,14 @@ Inputs
                copied into the summary; otherwise that is skipped.
 
 Outputs (in --out)
-  pairs.csv, negatives_matched.csv, calibration_summary.md
+  pairs.xlsx (sheet Pairs), negatives_matched.xlsx (sheet Negatives_Matched),
+  calibration_summary.md
+
+The two tables are separate workbooks rather than two sheets of one: they have
+different columns and are read independently (a reviewer opens one, a script
+loads one), the file names stay the ones the design names, and the overwrite
+guard stays a simple per-file check. Scores are written as numbers and missing
+values as empty cells, so the tables filter and sort in Excel as they are.
 
 Statistics use only numpy/pandas: Mann-Whitney U (exact when the smaller sample has
 at most 8 values and there are no ties, otherwise the normal approximation with tie and continuity
@@ -44,6 +51,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import yaml
+from openpyxl.styles import Font
+from openpyxl.utils import get_column_letter
 
 SCORE_COLUMNS: tuple[str, ...] = (
     "interaction_score",
@@ -80,6 +89,22 @@ VALID_TIERS = ("A", "B", "excluded")
 EXACT_MAX_N = 8  # exact p-value when the smaller sample has at most this many values (and no ties)
 EXACT_MAX_PRODUCT = 5000  # ...and n1 * n2 stays small enough for the exact counting to be cheap
 SIDECAR_SUFFIX = ".run_provenance.yaml"
+
+PAIRS_FILE = "pairs.xlsx"
+NEGATIVES_FILE = "negatives_matched.xlsx"
+SUMMARY_FILE = "calibration_summary.md"
+PAIRS_SHEET = "Pairs"
+NEGATIVES_SHEET = "Negatives_Matched"
+
+#: Columns written as numbers (blank -> empty cell) rather than text.
+NUMERIC_COLUMNS: tuple[str, ...] = (
+    "candidate_rank",
+    "final_score",
+    "interaction_score",
+    "interaction_priority_score",
+    *COMPONENT_COLUMNS,
+)
+MAX_COLUMN_WIDTH = 45
 
 PAIR_RESULT_COLUMNS: tuple[str, ...] = (
     "candidate_source",
@@ -517,6 +542,44 @@ def _effective_settings(config: Any) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Excel output
+# ---------------------------------------------------------------------------
+
+
+def _prepare_for_excel(frame: pd.DataFrame) -> pd.DataFrame:
+    """Numbers as numbers, blanks as empty cells (the matching code uses "" for "no value")."""
+    prepared = frame.copy()
+    for column in NUMERIC_COLUMNS:
+        if column in prepared.columns:
+            prepared[column] = pd.to_numeric(prepared[column], errors="coerce")
+    for column in prepared.columns:
+        if prepared[column].dtype == object:
+            prepared[column] = prepared[column].map(lambda value: None if isinstance(value, str) and value == "" else value)
+    return prepared
+
+
+def write_excel_table(frame: pd.DataFrame, path: Path, sheet_name: str) -> None:
+    """Write one table as a single-sheet workbook: bold header, frozen header row, filter, readable widths."""
+    prepared = _prepare_for_excel(frame)
+    with pd.ExcelWriter(path, engine="openpyxl") as writer:
+        prepared.to_excel(writer, sheet_name=sheet_name, index=False)
+        worksheet = writer.sheets[sheet_name]
+        worksheet.freeze_panes = "A2"
+        if len(prepared.columns) > 0:
+            last_column = get_column_letter(len(prepared.columns))
+            worksheet.auto_filter.ref = f"A1:{last_column}{max(1, len(prepared) + 1)}"
+        for cell in worksheet[1]:
+            cell.font = Font(bold=True)
+        for index, column in enumerate(prepared.columns, start=1):
+            if column in NUMERIC_COLUMNS or prepared[column].dtype.kind in "biuf":
+                width = max(len(str(column)), 10)
+            else:
+                texts = [len(str(value)) for value in prepared[column].head(200) if value is not None and not pd.isna(value)]
+                width = max([len(str(column)), *texts])
+            worksheet.column_dimensions[get_column_letter(index)].width = min(width + 2, MAX_COLUMN_WIDTH)
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -535,7 +598,7 @@ def run(
     negatives_frame = read_negatives(negatives, negatives_query)
     result_tables = read_results(results)
 
-    targets = {name: out / name for name in ("pairs.csv", "negatives_matched.csv", "calibration_summary.md")}
+    targets = {name: out / name for name in (PAIRS_FILE, NEGATIVES_FILE, SUMMARY_FILE)}
     existing = [name for name, path in targets.items() if path.exists()]
     if existing and not force:
         raise CalibrationInputError(
@@ -556,9 +619,9 @@ def run(
     )
 
     out.mkdir(parents=True, exist_ok=True)
-    matched_pairs.to_csv(targets["pairs.csv"], index=False, encoding="utf-8-sig")
-    matched_negatives.to_csv(targets["negatives_matched.csv"], index=False, encoding="utf-8-sig")
-    targets["calibration_summary.md"].write_text(summary, encoding="utf-8")
+    write_excel_table(matched_pairs, targets[PAIRS_FILE], PAIRS_SHEET)
+    write_excel_table(matched_negatives, targets[NEGATIVES_FILE], NEGATIVES_SHEET)
+    targets[SUMMARY_FILE].write_text(summary, encoding="utf-8")
     return targets
 
 

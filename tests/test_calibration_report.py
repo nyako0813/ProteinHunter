@@ -202,8 +202,8 @@ def small_case(tmp_path: Path) -> dict[str, Path]:
 
 def run_small(case: dict[str, Path], **kwargs) -> tuple[pd.DataFrame, pd.DataFrame, str]:
     cr.run(case["curated"], case["negatives"], case["results"], case["out"], negatives_query="MA_Q1", generated_at=GENERATED_AT, **kwargs)
-    pairs = pd.read_csv(case["out"] / "pairs.csv", encoding="utf-8-sig", keep_default_na=False)
-    negatives = pd.read_csv(case["out"] / "negatives_matched.csv", encoding="utf-8-sig", keep_default_na=False)
+    pairs = pd.read_excel(case["out"] / "pairs.xlsx", sheet_name="Pairs")
+    negatives = pd.read_excel(case["out"] / "negatives_matched.xlsx", sheet_name="Negatives_Matched")
     return pairs, negatives, (case["out"] / "calibration_summary.md").read_text(encoding="utf-8")
 
 
@@ -222,7 +222,7 @@ def test_pairs_are_matched_in_the_directions_whose_query_is_in_the_results(small
     assert by_key[("MA_Z1", "MA_Z2")].status == "no_query_in_results"
     assert by_key[("MA_Q1", "MA_P1/MA_P2")].status == "unresolved_multi_locus"
     assert by_key[("MA_Q1", "MA_P9")].status == "excluded"
-    assert pairs[pairs.status != "matched"]["interaction_score"].astype(str).eq("").all()
+    assert pairs[pairs.status != "matched"]["interaction_score"].isna().all()
 
 
 def test_missing_components_stay_blank_not_zero(small_case: dict[str, Path]) -> None:
@@ -230,7 +230,7 @@ def test_missing_components_stay_blank_not_zero(small_case: dict[str, Path]) -> 
 
     row = pairs[(pairs["query"] == "MA_Q2") & (pairs["candidate"] == "MA_Q1")].iloc[0]
     assert float(row.string_neighborhood) == pytest.approx(0.7)
-    assert row.coexpression_gse77738 == ""
+    assert pd.isna(row.coexpression_gse77738)
     assert row.coexpression_gse77738_status == "MISSING"
 
 
@@ -242,7 +242,7 @@ def test_negatives_are_matched_and_multi_bucket_candidates_take_the_best_row(sma
     assert float(by_tag["MA_N3"].final_score) == 35  # Negative_hit row (35) beats Candidates_relaxed (10)
     assert by_tag["MA_N3"].candidate_source == "Negative_hit"
     assert by_tag["MA_N3"].candidate_sources == "Candidates_relaxed;Negative_hit"
-    assert by_tag["MA_N4"].interaction_score == ""
+    assert pd.isna(by_tag["MA_N4"].interaction_score)
     assert set(negatives.query_old_locus_tag) == {"MA_Q1"}
 
 
@@ -386,6 +386,55 @@ def test_existing_outputs_are_not_overwritten_without_force(small_case: dict[str
     run_small(small_case, force=True)  # explicit overwrite is fine
 
 
+def test_only_the_new_outputs_count_for_the_overwrite_guard(small_case: dict[str, Path]) -> None:
+    """Leftover pairs.csv / negatives_matched.csv from before the Excel switch neither block a run nor get touched."""
+    out = small_case["out"]
+    out.mkdir()
+    legacy = {name: out / name for name in ("pairs.csv", "negatives_matched.csv")}
+    for path in legacy.values():
+        path.write_text("old,csv\n1,2\n", encoding="utf-8")
+
+    run_small(small_case)
+
+    assert (out / "pairs.xlsx").exists() and (out / "negatives_matched.xlsx").exists()
+    assert all(path.read_text(encoding="utf-8") == "old,csv\n1,2\n" for path in legacy.values())
+
+
+def test_excel_tables_are_typed_formatted_and_single_sheet(small_case: dict[str, Path]) -> None:
+    from openpyxl import load_workbook
+
+    run_small(small_case)
+
+    for name, sheet in (("pairs.xlsx", "Pairs"), ("negatives_matched.xlsx", "Negatives_Matched")):
+        workbook = load_workbook(small_case["out"] / name)
+        assert workbook.sheetnames == [sheet]
+        worksheet = workbook[sheet]
+        headers = {cell.value: cell for cell in worksheet[1]}
+        assert all(cell.font.bold for cell in headers.values())
+        assert worksheet.freeze_panes == "A2"
+        assert worksheet.auto_filter.ref.startswith("A1:")
+
+    worksheet = load_workbook(small_case["out"] / "pairs.xlsx")["Pairs"]
+    columns = {cell.value: index for index, cell in enumerate(worksheet[1], start=1)}
+    matched_row = next(r for r in range(2, worksheet.max_row + 1) if worksheet.cell(r, columns["status"]).value == "matched")
+    score = worksheet.cell(matched_row, columns["interaction_score"])
+    assert score.data_type == "n" and isinstance(score.value, (int, float))  # a number, not text
+    unmatched_row = next(r for r in range(2, worksheet.max_row + 1) if worksheet.cell(r, columns["status"]).value == "excluded")
+    assert worksheet.cell(unmatched_row, columns["interaction_score"]).value is None  # blank, not ""
+    assert worksheet.cell(unmatched_row, columns["candidate_source"]).value is None
+
+    negatives = load_workbook(small_case["out"] / "negatives_matched.xlsx")["Negatives_Matched"]
+    neg_columns = {cell.value: index for index, cell in enumerate(negatives[1], start=1)}
+    assert negatives.cell(2, neg_columns["found"]).data_type == "b"  # booleans stay booleans
+
+
+def test_empty_tables_still_produce_valid_workbooks(tmp_path: Path) -> None:
+    cr.write_excel_table(pd.DataFrame(columns=["a", "b"]), tmp_path / "empty.xlsx", "Pairs")
+
+    frame = pd.read_excel(tmp_path / "empty.xlsx", sheet_name="Pairs")
+    assert list(frame.columns) == ["a", "b"] and frame.empty
+
+
 def test_cli_main_writes_the_three_outputs_and_returns_zero(small_case: dict[str, Path], capsys: pytest.CaptureFixture[str]) -> None:
     code = cr.main(
         [
@@ -398,7 +447,7 @@ def test_cli_main_writes_the_three_outputs_and_returns_zero(small_case: dict[str
     )
 
     assert code == 0
-    assert {p.name for p in small_case["out"].iterdir()} == {"pairs.csv", "negatives_matched.csv", "calibration_summary.md"}
+    assert {p.name for p in small_case["out"].iterdir()} == {"pairs.xlsx", "negatives_matched.xlsx", "calibration_summary.md"}
     assert "calibration_summary.md" in capsys.readouterr().out
 
 
@@ -469,13 +518,13 @@ def test_reproduces_the_figures_in_the_committed_calibration_report(tmp_path: Pa
     # "coexpression_gse64349 ... (0.85 vs. 0.60)", only the Tier A pairs with a value counted
     assert "| `coexpression_gse64349` | 3, 0.85 /" in summary and "| 28, 0.60 /" in summary
 
-    pairs = pd.read_csv(tmp_path / "out/pairs.csv", encoding="utf-8-sig", keep_default_na=False)
+    pairs = pd.read_excel(tmp_path / "out/pairs.xlsx", sheet_name="Pairs")
     matched = pairs[pairs.status == "matched"]
     assert (matched.tier == "A").sum() == 8
     assert (matched.tier == "B").sum() == 17  # 12 original Tier B rows + 5 demoted from Tier A (CdhC x2, DnaK, Hsp20, MtsF)
     # interaction_score separates Tier A from the negatives: report says ~3x on the means
     tier_a = pd.to_numeric(matched[matched.tier == "A"].interaction_score)
-    negatives = pd.read_csv(tmp_path / "out/negatives_matched.csv", encoding="utf-8-sig", keep_default_na=False)
+    negatives = pd.read_excel(tmp_path / "out/negatives_matched.xlsx", sheet_name="Negatives_Matched")
     result = cr.mann_whitney(tier_a, pd.to_numeric(negatives.interaction_score))
     assert result.n1 == 8 and result.n2 == 28
     assert result.auc > 0.8
