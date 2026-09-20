@@ -64,7 +64,7 @@ tiers:
   tier1_min_categories: 3
   tier2_min_score: 50
   tier2_min_categories: 2
-  tier3_min_score: 25
+  tier3_min_score: 35
   tier3_min_categories: 1
 
 # Decimal places used when comparing scores for ranking ties.

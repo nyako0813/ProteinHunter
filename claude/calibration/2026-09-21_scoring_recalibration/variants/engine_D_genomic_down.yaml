@@ -1,0 +1,11 @@
+category_caps:
+  source_classification: 30.0
+  genomic_context: 20.0
+  functional_annotation: 20.0
+  pih_cellular_compatibility: 5.0
+  pih_evolutionary: 10.0
+  pih_direct_interaction: 20.0
+  external_ppi_evidence: 15.0
+  coexpression_evidence: 12.0
+  protein_hunter: 30.0
+  interaction: 70.0
