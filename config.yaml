@@ -9,7 +9,8 @@ project:
 input_mode: directory
 
 #他生物種の遺伝子を考慮するならtrue、考慮しないならfalse
-#このスイッチを使うときはannotaiton_targetsのgffをコメントアウトしておく必要がある
+#このスイッチは candidate_sources / ranking_metric / max_candidates_per_query の既定値を切り替える
+#(annotation_targetsのgffは、このスイッチに関係なく全シートで既定true)
 #個別選択したいところはコメントアウトせずに選択する→個別選択が優先される
 consider_cross_species_matches: true
 
@@ -85,6 +86,10 @@ annotation:
 # Annotation Targets
 # ----------------------------------------------------------
 
+# gff defaults to true on every sheet (independent of
+# consider_cross_species_matches): GFF annotation supplies old_locus_tag,
+# which STRING/GEO evidence is looked up by, and it costs ~0.2 s for the
+# whole genome. Set gff: false on a sheet only to opt out deliberately.
 annotation_targets:
   candidates:
     gff: true
@@ -99,25 +104,25 @@ annotation_targets:
     alphafold: false
 
   positive_all_sources:
-    #gff: false
+    #gff: true
     pfam: false
     uniprot: false
     alphafold: false
 
   no_hit:
-    #gff: false
+    #gff: true
     pfam: false
     uniprot: false
     alphafold: false
 
   negative_unmatched:
-    #gff: false
+    #gff: true
     pfam: false
     uniprot: false
     alphafold: false
 
   negative_hit:
-    #gff: false
+    #gff: true
     pfam: false
     uniprot: false
     alphafold: false

@@ -118,16 +118,15 @@ def test_missing_annotation_targets_uses_safe_defaults(tmp_path: Path) -> None:
     assert cfg.annotation_targets["candidates_relaxed"].pfam is True
     assert cfg.annotation_targets["candidates_relaxed"].uniprot is False
     assert cfg.annotation_targets["positive_all_sources"].pfam is True
-    # consider_cross_species_matches defaults to True (考慮する): only
-    # candidates/candidates_relaxed get gff=True by default; the other
-    # sheets stay off unless consider_cross_species_matches is set to
-    # false. See config.yaml's top-of-file switch and 設定.xlsx.
-    assert cfg.annotation_targets["positive_all_sources"].gff is False
-    assert cfg.annotation_targets["no_hit"].gff is False
+    # gff defaults to True on every sheet, whatever consider_cross_species_matches
+    # says: GFF annotation supplies old_locus_tag, which STRING/GEO evidence
+    # needs (see _load_annotation_targets).
+    assert cfg.annotation_targets["positive_all_sources"].gff is True
+    assert cfg.annotation_targets["no_hit"].gff is True
     assert cfg.annotation_targets["no_hit"].pfam is False
-    assert cfg.annotation_targets["negative_unmatched"].gff is False
+    assert cfg.annotation_targets["negative_unmatched"].gff is True
     assert cfg.annotation_targets["negative_unmatched"].uniprot is False
-    assert cfg.annotation_targets["negative_hit"].gff is False
+    assert cfg.annotation_targets["negative_hit"].gff is True
     assert cfg.annotation_targets["negative_hit"].alphafold is False
     assert cfg.ortholog_filter.negative_exclusion_mode == "any_hit"
     assert cfg.ortholog_filter.strong.min_identity == 40.0
@@ -187,6 +186,39 @@ def test_consider_cross_species_matches_false_broadens_defaults(tmp_path: Path) 
     assert cfg.interaction_scoring.max_candidates_per_query == 500
 
 
+@pytest.mark.parametrize("consider_cross_species_matches", [True, False])
+def test_gff_annotation_defaults_on_for_every_sheet_in_both_presets(
+    tmp_path: Path, consider_cross_species_matches: bool
+) -> None:
+    """Regression: gff used to be off for four sheets under the default preset, so
+    no_hit/negative_hit/... candidates had no old_locus_tag and their STRING/GEO
+    evidence was silently MISSING. It must not depend on the preset."""
+    data = valid_config_data()
+    data["consider_cross_species_matches"] = consider_cross_species_matches
+
+    cfg = load_config(write_config(tmp_path, data), initialize=False)
+
+    for sheet in (
+        "candidates",
+        "candidates_relaxed",
+        "positive_all_sources",
+        "no_hit",
+        "negative_unmatched",
+        "negative_hit",
+    ):
+        assert cfg.annotation_targets[sheet].gff is True, sheet
+
+
+def test_explicit_gff_false_still_wins_over_the_default(tmp_path: Path) -> None:
+    data = valid_config_data()
+    data["annotation_targets"] = {"no_hit": {"gff": False}}
+
+    cfg = load_config(write_config(tmp_path, data), initialize=False)
+
+    assert cfg.annotation_targets["no_hit"].gff is False
+    assert cfg.annotation_targets["negative_hit"].gff is True
+
+
 def test_consider_cross_species_matches_does_not_override_explicit_values(tmp_path: Path) -> None:
     """An explicit interaction_scoring/annotation_targets value always wins over the switch."""
     data = valid_config_data()
@@ -232,10 +264,9 @@ def test_annotation_targets_can_enable_no_hit_pfam(tmp_path: Path) -> None:
 
     cfg = load_config(config_path, initialize=False)
 
-    # gff is left unset here, so it keeps the consider_cross_species_matches
-    # default (True/考慮する -> no_hit.gff defaults to False); pfam is
-    # explicitly set above and is honored regardless.
-    assert cfg.annotation_targets["no_hit"].gff is False
+    # gff is left unset here, so it keeps its default (True on every sheet);
+    # pfam is explicitly set above and is honored regardless.
+    assert cfg.annotation_targets["no_hit"].gff is True
     assert cfg.annotation_targets["no_hit"].pfam is True
 
 
@@ -257,9 +288,8 @@ def test_annotation_targets_missing_subkeys_keep_defaults(tmp_path: Path) -> Non
     assert cfg.annotation_targets["candidates"].gff is True
     assert cfg.annotation_targets["candidates"].pfam is False
     assert cfg.annotation_targets["candidates"].uniprot is True
-    # negative_hit.gff is left unset, so it keeps the
-    # consider_cross_species_matches default (True/考慮する -> False).
-    assert cfg.annotation_targets["negative_hit"].gff is False
+    # negative_hit.gff is left unset, so it keeps its default (True).
+    assert cfg.annotation_targets["negative_hit"].gff is True
     assert cfg.annotation_targets["negative_hit"].pfam is False
     assert cfg.annotation_targets["negative_hit"].uniprot is True
 

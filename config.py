@@ -320,15 +320,15 @@ class Config:
     # the user's own comparison table). True (default) = 考慮する: the
     # "narrow" state everywhere -- candidate_sources.
     # {positive_all_sources,negative_unmatched,negative_hit} off,
-    # ranking_metric=interaction_priority_score, max_candidates_per_query=200,
-    # and annotation_targets(gff) restricted to candidates/candidates_relaxed
-    # only. False = 考慮しない: the "broaden" state everywhere -- those three
+    # ranking_metric=interaction_priority_score, max_candidates_per_query=200.
+    # False = 考慮しない: the "broaden" state everywhere -- those three
     # candidate_sources buckets on (so candidates that also match another
     # species, e.g. conserved true positives that would otherwise be
     # misclassified into Negative_hit, are not silently dropped),
-    # ranking_metric=interaction_score, max_candidates_per_query=500, and
-    # annotation_targets(gff) true on every sheet. Only supplies
-    # *defaults* for those settings -- an explicit value for one of them in
+    # ranking_metric=interaction_score, max_candidates_per_query=500.
+    # (annotation_targets(gff) used to be part of this preset; it is now on
+    # for every sheet in both states -- see _load_annotation_targets.) Only
+    # supplies *defaults* for those settings -- an explicit value for one of them in
     # config.yaml always wins over this switch, same as every other
     # optional setting in this file.
     consider_cross_species_matches: bool = True
@@ -379,16 +379,6 @@ ANNOTATION_TARGET_DEFAULTS: dict[str, AnnotationTargetConfig] = {
     ),
 }
 
-#: Sheets whose annotation_targets(gff) default stays True regardless of the
-#: consider_cross_species_matches switch -- "Candidates"/"Candidates_relaxed"
-#: are the pipeline's core positive-hit sheets, always worth GFF locus-tag
-#: enrichment. The other four sheets (positive_all_sources, no_hit,
-#: negative_unmatched, negative_hit) are the ones 設定.xlsx's
-#: "annotation_targets(gff)" row actually toggles.
-_ANNOTATION_TARGETS_GFF_ALWAYS_ON: frozenset[str] = frozenset(
-    {"candidates", "candidates_relaxed"}
-)
-
 #: candidate_sources buckets whose default stays fixed regardless of the
 #: consider_cross_species_matches switch. "candidates"/"candidates_relaxed"/
 #: "no_hit" are the pipeline's normal candidate pool and must stay on; the
@@ -410,26 +400,6 @@ _CANDIDATE_SOURCES_TOGGLED: tuple[str, ...] = (
     "negative_unmatched",
     "negative_hit",
 )
-
-
-def _annotation_target_defaults_for(consider_cross_species_matches: bool) -> dict[str, AnnotationTargetConfig]:
-    """Return the ANNOTATION_TARGET_DEFAULTS variant for one preset.
-
-    consider_cross_species_matches=True (デフォルト・考慮する): only
-    candidates/candidates_relaxed get gff=True -- matches 設定.xlsx's
-    literal "考慮する(デフォルト) -> Candidates/Candidates_relaxedのみtrue"
-    row, and the user's own confirmation that true=考慮する should be the
-    "narrow" state (both for candidate_sources and here). False
-    (前回提案・考慮しない): every sheet gets gff=True, so proteins that also
-    match another species still get GFF locus-tag context instead of being
-    dropped from annotation entirely. pfam/uniprot/alphafold are untouched
-    -- 設定.xlsx only lists gff for this row.
-    """
-    defaults: dict[str, AnnotationTargetConfig] = {}
-    for name, target in ANNOTATION_TARGET_DEFAULTS.items():
-        gff_default = name in _ANNOTATION_TARGETS_GFF_ALWAYS_ON or not consider_cross_species_matches
-        defaults[name] = target if target.gff == gff_default else replace(target, gff=gff_default)
-    return defaults
 
 
 def _candidate_source_defaults_for(consider_cross_species_matches: bool) -> dict[str, bool]:
@@ -633,9 +603,7 @@ def load_config(config_file: str | Path = CONFIG_FILE, initialize: bool = True) 
         ),
     )
     consider_cross_species_matches = bool(raw.get("consider_cross_species_matches", True))
-    annotation_targets = _load_annotation_targets(
-        raw.get("annotation_targets"), consider_cross_species_matches
-    )
+    annotation_targets = _load_annotation_targets(raw.get("annotation_targets"))
     ortholog_filter = _load_ortholog_filter(raw.get("ortholog_filter"))
     interaction_scoring = _load_interaction_scoring(
         raw.get("interaction_scoring"), consider_cross_species_matches
@@ -861,18 +829,18 @@ def _validate_annotation_targets_section(raw: dict[object, object]) -> None:
                 )
 
 
-def _load_annotation_targets(
-    raw_targets: object,
-    consider_cross_species_matches: bool = True,
-) -> AnnotationTargetsConfig:
+def _load_annotation_targets(raw_targets: object) -> AnnotationTargetsConfig:
     """Load per-sheet annotation target settings with safe defaults.
 
-    ``consider_cross_species_matches`` (see ``Config`` docstring / the
-    top-of-file config.yaml switch) picks which gff defaults apply before
-    any explicit ``raw_targets`` values are merged in -- an explicit value
-    always wins over either preset.
+    Defaults come straight from ``ANNOTATION_TARGET_DEFAULTS`` (gff on for
+    every sheet) and are independent of ``consider_cross_species_matches``:
+    GFF annotation is what gives a record its ``old_locus_tag``, which
+    STRING/GEO evidence is looked up by, so a sheet whose candidates are
+    scored without it silently loses that evidence. It is a dictionary
+    lookup (~0.2 s for every record in the genome), so there is no reason
+    to narrow it per preset. An explicit value in ``raw_targets`` wins.
     """
-    targets = dict(_annotation_target_defaults_for(consider_cross_species_matches))
+    targets = dict(ANNOTATION_TARGET_DEFAULTS)
     if not isinstance(raw_targets, dict):
         return AnnotationTargetsConfig(**targets)
 
