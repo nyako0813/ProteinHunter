@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pandas as pd
 import pytest
+from pih_fixtures import bundle_record, write_bundle, write_pih_bundle
 
 from config import (
     INTERACTION_ALPHAFOLD_DEFAULT,
@@ -3517,15 +3518,14 @@ def test_v2_mode_sequence_evidence_handles_zero_evalue() -> None:
 
 
 def _write_pih_bundle(path: Path, *, query_id: str, candidate_id: str, category_scores: list[dict]) -> None:
-    """Write a single-line PIH candidate_evidence_bundle.jsonl fixture."""
-    import json
+    """Write a single-record PIH candidate_evidence_bundle.jsonl in PIH's real (schema) shape.
 
-    record_line = {
-        "query_id": query_id,
-        "candidate_id": candidate_id,
-        "integrated_scoring": {"category_scores": category_scores},
-    }
-    path.write_text(json.dumps(record_line) + "\n", encoding="utf-8")
+    See tests/pih_fixtures.py: ``integrated_scoring`` is a list holding one
+    IntegratedScore, as PIH writes it. (This helper used to write it as a
+    dict -- a shape PIH never produces -- which is why the bridge's parsing
+    bug went unnoticed.)
+    """
+    write_pih_bundle(path, query_id=query_id, candidate_id=candidate_id, category_scores=category_scores)
 
 
 def test_pih_bridge_adds_only_non_overlapping_categories(tmp_path: Path) -> None:
@@ -3698,6 +3698,75 @@ def test_pih_bridge_malformed_line_is_skipped_with_warning(tmp_path: Path) -> No
     row = result.source_rows["Interaction_Candidates"][0]
     assert "pih_" not in row["interaction_score_reasons"]
     assert "no negative BLAST hit" in row["interaction_score_reasons"]
+
+
+def _pih_run(tmp_path: Path, bundle_records: list[dict]):
+    """Score query -> candidate with a PIH bundle made of ``bundle_records``; return (result, row)."""
+    bundle_path = write_bundle(tmp_path / "candidate_evidence_bundle.jsonl", bundle_records)
+    records = {
+        "query": record("query", description="", positive_sources_hit=[]),
+        "candidate": record("candidate", description="", positive_sources_hit=[]),
+        "relaxed": record("relaxed"),
+        "novel": record("novel"),
+    }
+    cfg = interaction_config(
+        query_proteins=(InteractionQueryConfig("query", "", ""),),
+        candidate_sources={"candidates": True},
+        scoring_model="v2_evidence_based",
+        pih_evidence_bundle=bundle_path,
+    )
+    result = run_interaction_scoring(cfg, classification(records))
+    assert result is not None
+    return result, result.source_rows["Interaction_Candidates"][0]
+
+
+def test_pih_bridge_fills_categories_from_a_real_schema_record(tmp_path: Path) -> None:
+    """Regression: PIH's integrated_scoring is a LIST; a dict-only parser imported nothing from real output."""
+    from pih_fixtures import integrated_score, score_category
+
+    categories = [
+        score_category("genomic_context", 0.8, 1.0),
+        score_category("cellular_compatibility", 1.0, 0.5),
+        score_category("evolutionary", 0.6, 1.75),
+        score_category("direct_interaction", 0.0, 0.0),  # inactive: weight 0
+    ]
+
+    result, row = _pih_run(
+        tmp_path, [bundle_record("query", "candidate", [integrated_score("query", "candidate", categories)])]
+    )
+
+    reasons = row["interaction_score_reasons"]
+    assert "pih_cellular_compatibility" in reasons
+    assert "pih_evolutionary" in reasons
+    assert "pih_direct_interaction" not in reasons  # weight 0 -> not active for this pair
+    assert "pih_genomic_context" not in reasons  # v5 has its own genomic_context
+    assert row["cellular_compatibility_score"] is not None
+    assert row["evolutionary_score"] is not None
+    assert not [warning for warning in result.warnings if "PIH" in warning or "integrated_scoring" in warning]
+
+
+def test_pih_bridge_pair_not_scored_by_pih_adds_nothing_and_does_not_warn(tmp_path: Path) -> None:
+    result, row = _pih_run(tmp_path, [bundle_record("query", "candidate", None)])
+
+    assert "pih_" not in row["interaction_score_reasons"]
+    assert row["evolutionary_score"] is None and row["cellular_compatibility_score"] is None
+    assert not [warning for warning in result.warnings if "integrated_scoring" in warning]
+
+
+def test_pih_bridge_negative_category_score_counts_as_available_with_zero_contribution(tmp_path: Path) -> None:
+    """Sign information is discarded: a negative PIH score is a present-but-zero category, not a penalty."""
+    from pih_fixtures import integrated_score, score_category
+
+    def evolutionary_score_for(normalized_score: float) -> float | None:
+        categories = [score_category("evolutionary", normalized_score, 1.0)]
+        _, row = _pih_run(
+            tmp_path, [bundle_record("query", "candidate", [integrated_score("query", "candidate", categories)])]
+        )
+        return row["evolutionary_score"]
+
+    assert evolutionary_score_for(-0.5) == 0.0  # available, contributes zero (not None/missing)
+    assert evolutionary_score_for(0.0) == 0.0
+    assert evolutionary_score_for(1.0) > 0.0
 
 
 # ---------------------------------------------------------------------------
