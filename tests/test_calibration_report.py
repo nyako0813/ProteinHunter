@@ -497,8 +497,10 @@ def test_reproduces_the_figures_in_the_committed_calibration_report(tmp_path: Pa
     results = tmp_path / "calibration_check.xlsx"
     build_workbook_from_report_csvs(results)
 
+    # The curated pairs as they were when the report was written (new confirmed pairs have been added to
+    # claude/experimental_interactions_curated.csv since); the report's figures only follow from that snapshot.
     cr.run(
-        REPO_ROOT / "claude/experimental_interactions_curated.csv",
+        REPO_ROOT / "tests/fixtures/curated_pairs_calibration_report.csv",
         REPO_ROOT / "claude/calibration/af3_negatives_MA_4115.csv",
         results,
         tmp_path / "out",
@@ -528,3 +530,31 @@ def test_reproduces_the_figures_in_the_committed_calibration_report(tmp_path: Pa
     result = cr.mann_whitney(tier_a, pd.to_numeric(negatives.interaction_score))
     assert result.n1 == 8 and result.n2 == 28
     assert result.auc > 0.8
+
+
+# ---------------------------------------------------------------------------
+# The committed curated pairs
+# ---------------------------------------------------------------------------
+
+
+def test_committed_curated_pairs_are_valid_and_have_no_duplicate_pairs() -> None:
+    frame = cr.read_curated(REPO_ROOT / "claude/experimental_interactions_curated.csv")
+
+    pairs = [frozenset((a, b)) for a, b in zip(frame["protein_a_old_locus_tag"], frame["protein_b_old_locus_tag"])]
+    assert len(pairs) == len(set(pairs)), "a pair listed twice would be counted twice (once per tier)"
+    assert set(frame["tier"]) <= {"A", "B", "excluded"}
+
+
+def test_component_a2_mcr_pairs_are_tier_a() -> None:
+    """Current Biology 2026 (PMC13432166): A2 (atwA, MA_3998) x McrA/McrB/McrG (MA_4546 / MA_4550 / MA_4547), M. acetivorans WWM73."""
+    frame = cr.read_curated(REPO_ROOT / "claude/experimental_interactions_curated.csv")
+
+    a2 = frame[frame["protein_a_old_locus_tag"] == "MA_3998"].to_dict("records")  # "class" is not a valid attribute name
+
+    assert {(r["protein_b_old_locus_tag"], r["protein_b_label"], r["tier"], r["class"]) for r in a2} == {
+        ("MA_4546", "McrA", "A", "strict"),
+        ("MA_4550", "McrB", "A", "strict"),
+        ("MA_4547", "McrG", "A", "strict"),
+    }
+    assert all("PMC13432166" in r["source"] and "WWM73" in r["confidence"] for r in a2)
+

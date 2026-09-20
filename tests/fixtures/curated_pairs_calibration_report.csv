@@ -23,10 +23,8 @@ MA_4548,McrC,MA_3992,Mmp7,strict,GFF特定(高確信度)、要確認(生物種:M
 MA_4548,McrC,MA_3993,Mmp17,strict,GFF特定、要確認(生物種),"Structure of the ATP-driven MCR activation complex, Nature 2025",B
 MA_4548,McrC,MA_4546,McrA,strict,GFF特定、要確認(生物種),"Structure of the ATP-driven MCR activation complex, Nature 2025",B
 MA_3997,Mmp3,MA_4546,McrA,strict,GFF特定、要確認(生物種),"Structure of the ATP-driven MCR activation complex, Nature 2025",B
-MA_3998,A2/AtwA,MA_4546,McrA,strict,明記済み+GFF特定(M. acetivorans WWM73でreverse pulldownにより確認、McrABG複合体として),"Component A2 is a redox-sensitive archaeal ATPase activated by methyl-coenzyme M reductase, Curr. Biol. 36(14):3595-3607, 2026 (PMC13432166); 構造: Nature 2025 (M. maripaludis)",A
+MA_3998,A2/AtwA,MA_4546,McrA,strict,GFF特定、要確認(生物種),"Structure of the ATP-driven MCR activation complex, Nature 2025",B
 MA_4548,McrC,MA_3997,Mmp3,soft,GFF特定、出典未検証,"Dissertation experimental work, 2022 (未特定)",B
 MA_3992,Mmp7,MA_4546,McrA,soft,GFF特定、出典未検証,"Dissertation experimental work, 2022 (未特定)",B
 MA_3992,Mmp7,MA_4550,McrB,soft,GFF特定、出典未検証,"Dissertation experimental work, 2022 (未特定)",B
 MA_3992,Mmp7,MA_3997,Mmp3,soft,GFF特定、出典未検証,"Dissertation experimental work, 2022 (未特定)",B
-MA_3998,A2/AtwA,MA_4550,McrB,strict,明記済み+GFF特定(M. acetivorans WWM73でreverse pulldownにより確認、McrABG複合体として),"Component A2 is a redox-sensitive archaeal ATPase activated by methyl-coenzyme M reductase, Curr. Biol. 36(14):3595-3607, 2026 (PMC13432166)",A
-MA_3998,A2/AtwA,MA_4547,McrG,strict,明記済み+GFF特定(M. acetivorans WWM73でreverse pulldownにより確認、McrABG複合体として),"Component A2 is a redox-sensitive archaeal ATPase activated by methyl-coenzyme M reductase, Curr. Biol. 36(14):3595-3607, 2026 (PMC13432166)",A
