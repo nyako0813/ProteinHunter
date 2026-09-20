@@ -1,0 +1,32 @@
+# Expected BLAST reference genome composition (checked at startup by
+# core/reference_genomes.py; see claude/negative_reference_genome_mixup_investigation.md).
+#
+# Why this exists: the pipeline only ever sees the combined FASTA, so a
+# wrong, missing, or duplicated genome folder changes every result without
+# any error. On 2026-09-20 the negative folder "Sulfolobus_solfataricus" was
+# found to hold a byte-identical copy of the positive M. maripaludis genome
+# (present since 2026-07-02), and negative/thermoplasma_acidophilum was
+# git-ignored, so other machines silently ran with fewer negative genomes.
+#
+# Each entry: folder name (label) -> RefSeq assembly folder + the organism
+# ("Genus species") that the FASTA headers must name. A finding is logged as
+# a WARNING; nothing here stops the run. Update this file in the same commit
+# as any change to data/databases/{positive,negative}.
+version: v1
+positive:
+  Methanocaldococcus_jannaschii:
+    accession: GCF_000091665.1
+    organism: Methanocaldococcus jannaschii
+  Methanococcus_maripaludis:
+    accession: GCF_002945325.1
+    organism: Methanococcus maripaludis
+negative:
+  Aeropyrum_pernix:
+    accession: GCF_000011125.1
+    organism: Aeropyrum pernix
+  Sulfolobus_solfataricus:
+    accession: GCF_000007005.1
+    organism: Saccharolobus solfataricus   # renamed from Sulfolobus solfataricus; P2 reference genome
+  thermoplasma_acidophilum:
+    accession: GCF_000195915.1
+    organism: Thermoplasma acidophilum

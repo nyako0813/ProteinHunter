@@ -1,5 +1,12 @@
 # Calibration diagnostic report: Tier A/B positive pairs vs. AlphaFold3 negatives
 
+> **注意 (2026-09-20 追記):** この報告書の実行時、`negative/Sulfolobus_solfataricus`
+> フォルダの中身は誤って *Methanococcus maripaludis*(陽性参照と同一ゲノム)だった。
+> 以下の「Negative_hit に落ちる」という主要所見と rank 分母は、その影響を強く
+> 受けている可能性が高い。修正後の再分類結果は
+> `claude/negative_reference_genome_mixup_investigation.md` を参照。
+> 本文は当時の記録として未変更。
+
 Status: **diagnostic report only, no cap/weight changes implemented**. This
 records a single, consistent pipeline run (`scoring_model: v2_evidence_based`,
 STRING + GEO coexpression both enabled, all BLAST classification buckets
