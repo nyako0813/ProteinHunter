@@ -1,5 +1,17 @@
 # Claude Code向け指示書: Rockhopperの複数サンプル・複数条件検証(Phase 6e追加調査)
 
+> **訂正 (2026-09-20)**: 本文 7行目「MA_4164/MtpA, MA_4165/MtpC」と20行目「MtpA/MtpC(MA_4164/MA_4165)」の
+> 対応は逆である可能性が高い。正しくは **MA_4165 = MtpA、MA_4164 = MtpC**
+> (`config.yaml`、`claude/experimental_interactions_calibration_report.md`、
+> `patches/claude_code_instructions_operon_investigation.md` と同じ割り当て)。根拠:
+> UniProt では MA_4165 = Q8TII4「Methylcobalamin:CoM methyltransferase isozyme A」(遺伝子名 cmtA)、
+> MA_4164 = Q8TII5「Corrinoid protein」(遺伝子名なし)。一次文献(Fu, Goettge & Metcalf,
+> J Bacteriol 2019, 201:e00130-19)の要旨は MtpA = メチルトランスフェラーゼ、MtpC = コリノイド
+> タンパク質と述べており、機能上 MA_4165 = MtpA、MA_4164 = MtpC と整合する。
+> **確度は高いが確定ではない**: 論文本文(遺伝子座番号の対応表)は出版社側の制限で取得できず、
+> 機能からの推論である。本文は当時の記録として未変更。以降の手順で使われている
+> 遺伝子座番号(MA_4164, MA_4165)そのものは影響を受けない。
+
 ## 位置づけ・目的
 
 Phase 6eの単一サンプルでの検証結果(`claude/phase6e_operon_prediction_investigation.md`)で、
