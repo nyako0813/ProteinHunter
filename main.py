@@ -6,6 +6,7 @@ Main entry point.
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 from collections.abc import Sequence
 from typing import Any
@@ -158,6 +159,74 @@ def _log_reference_genome_check(logger: Any, directories: dict[str, Path]) -> bo
     except Exception as exc:  # the check must never stop a run
         logger.warning(f"Reference genome check could not be completed: {exc}")
         return None
+
+
+def _run_notion_export(
+    logger: Any,
+    config: Any,
+    blast_classification: Any,
+    interaction_result: Any,
+    excel_path: Path,
+    provenance: Any,
+) -> None:
+    """Optionally export the report to Notion after Excel/Word. Never raises.
+
+    Off unless ``notion_export.enabled``. The token comes only from the
+    NOTION_TOKEN environment variable; without it (or without the optional
+    ``notion-client`` package) the export is skipped with a warning, and any
+    Notion failure is logged as a warning -- the Excel/Word outputs are
+    already written and must not be put at risk by an optional third output.
+    """
+    settings = config.notion_export
+    if not settings.enabled:
+        logger.info("Notion export is disabled (notion_export.enabled: false); skipping it.")
+        return
+
+    token = os.environ.get("NOTION_TOKEN", "").strip()
+    if not token:
+        logger.warning(
+            "Notion export is enabled but the NOTION_TOKEN environment variable is not set; "
+            "skipping the Notion export. The Excel and Word outputs are unaffected."
+        )
+        return
+
+    try:
+        from output.notion_report import export_run_to_notion
+        from output.report_sections import build_run_sections
+
+        sections = build_run_sections(
+            config,
+            blast_classification,
+            interaction_result,
+            excel_filename=excel_path.name,
+            provenance=provenance,
+        )
+        with logger.timer("Write Notion export"):
+            result = export_run_to_notion(
+                config,
+                sections,
+                token=token,
+                run_name=excel_path.stem,
+                log=logger.warning,
+            )
+    except ImportError as exc:
+        logger.warning(
+            f"Notion export skipped: the 'notion-client' package is not installed ({exc}). "
+            "Install it with: pip install -r requirements.txt"
+        )
+        return
+    except Exception as exc:  # optional output: report and carry on
+        logger.warning(f"Notion export failed: {exc}. The Excel and Word outputs are unaffected.")
+        return
+
+    logger.info(f"Notion Run page: {result.run_page_url or result.run_page_id}")
+    logger.info(f"Notion candidate pages created: {result.candidates_created} of {result.candidates_total}")
+    if result.failed:
+        logger.warning(
+            f"{len(result.failed)} Notion candidate page(s) could not be created"
+            + (" (export stopped early after repeated failures)" if result.aborted else "")
+            + f": {', '.join(result.failed[:5])}{' ...' if len(result.failed) > 5 else ''}"
+        )
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -703,6 +772,9 @@ def main(argv: Sequence[str] | None = None) -> None:
                     "Tier1_VeryStrong/Tier2_Strong candidate regardless of rank"
                 )
                 logger.info(f"Word report written to: {word_path}")
+
+        with logger.section("Notion export"):
+            _run_notion_export(logger, config, blast_classification, interaction_result, excel_path, provenance)
 
         with logger.section("Run provenance"):
             # Outputs are already written; a failure here must not fail the run.

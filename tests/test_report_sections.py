@@ -189,3 +189,31 @@ def test_notes_appear_after_the_negative_evidence_section_only() -> None:
     note_index = next(i for i, text in enumerate(texts) if "WP_011024006.1" in text)
     ranking_index = next(i for i, s in enumerate(sections) if s.kind == "heading" and s.text.startswith("7."))
     assert negative_heading < note_index < ranking_index
+
+
+def test_structural_hints_mark_the_details_query_and_candidate_headings() -> None:
+    sections = build("en")
+
+    details = [s for s in sections if s.role == "details"]
+    queries = [s for s in sections if s.role == "query"]
+    candidates = [s for s in sections if s.role == "candidate"]
+    assert len(details) == 1 and details[0].level == 1
+    assert [q.meta_dict() for q in queries] == [{"query_id": "MA_4115"}, {"query_id": "MA_0688"}]
+    assert [c.meta_dict()["candidate_id"] for c in candidates] == ["MA_0363", "MA_4110", "MA_0687"]
+    assert candidates[0].meta_dict() == {
+        "query_id": "MA_4115",
+        "candidate_id": "MA_0363",
+        "rank": "1",
+        "final_score": "61.2",
+        "tier": "Tier2_Strong",
+        "source": "Candidates",
+        "description": "a hypothetical enzyme",
+    }
+
+
+def test_structural_hints_are_data_values_identical_in_both_languages() -> None:
+    def hints(language: str):
+        return [(s.role, s.meta) for s in build(language) if s.role]
+
+    assert hints("en") == hints("ja")
+

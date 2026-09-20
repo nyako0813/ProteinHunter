@@ -35,18 +35,11 @@ from docx.oxml.ns import qn
 from docx.shared import RGBColor
 from docx.text.paragraph import Paragraph
 
-from analysis.interaction_scoring import CONSERVED_QUERY_WARNING_PREFIX, is_conserved_query_visibility_warning
-from analysis.scoring_engine_config import ScoringEngineConfig, load_scoring_engine_config
 from core.exceptions import WordReportError
 from core.provenance import RunProvenance
 from output.report_i18n import DEFAULT_LANGUAGE, normalize_language
-from output.report_sections import build_report_sections
-from output.report_v2 import (
-    TIER_SAFETY_NET,
-    build_workbook_sheets,
-    select_top_candidates_per_query,
-)
-from output.word_narrative import CategoryRef, NarrativeSection
+from output.report_sections import build_run_sections, category_refs_for_scoring_model
+from output.word_narrative import NarrativeSection
 
 
 # ---------------------------------------------------------------------------
@@ -172,83 +165,6 @@ def _add_toc_field(document: Document, placeholder: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Category references (which row columns feed "why ranks highly" /
-# "Biological Interpretation", and what they are called/capped at) --
-# resolved once per run from the run's actual config, per scoring_model.
-# ---------------------------------------------------------------------------
-
-
-def category_refs_for_scoring_model(
-    scoring_model: str,
-    engine_config: ScoringEngineConfig,
-    legacy_weights: Any,
-) -> tuple[CategoryRef, ...]:
-    """Resolve the CategoryRef list output/word_narrative.py should enumerate for one run.
-
-    v2_evidence_based uses the scoring engine's own category_caps (the
-    same numbers 05_Sequence_Evidence..10_Negative_Evidence categorize
-    Interaction_Evidence_Detail rows by). legacy_additive has no category
-    concept at all -- its closest analogues are the fixed
-    interaction_scoring.scoring_weights point budget, kept as separate
-    line items (e.g. co_occurrence and domain_complementarity are not
-    combined the way v2's functional_domain_score already is) since that
-    is how legacy_additive actually computes and exposes them.
-    """
-    if scoring_model == "v2_evidence_based":
-        caps = engine_config.category_caps
-        interaction_cap = (
-            caps.get("external_ppi_evidence", 0.0)
-            + caps.get("coexpression_evidence", 0.0)
-            + caps.get("pih_direct_interaction", 0.0)
-        )
-        return (
-            CategoryRef("candidate_priority_score", "sequence", "Sequence/Source Classification", caps.get("source_classification", 0.0)),
-            CategoryRef("same_gene_neighborhood_score", "genomic_context", "Genomic Context", caps.get("genomic_context", 0.0)),
-            CategoryRef("functional_domain_score", "functional_domain", "Functional/Domain", caps.get("functional_annotation", 0.0)),
-            CategoryRef("interaction_evidence_score", "interaction", "Interaction", interaction_cap),
-            CategoryRef("evolutionary_score", "evolutionary", "Evolutionary", caps.get("pih_evolutionary", 0.0)),
-            CategoryRef("cellular_compatibility_score", "cellular_compatibility", "Cellular Compatibility", caps.get("pih_cellular_compatibility", 0.0)),
-        )
-
-    weights = legacy_weights
-    return (
-        CategoryRef("candidate_priority_score", "sequence", "Sequence/Source Classification", getattr(weights, "candidate_priority", 0.0)),
-        CategoryRef("same_gene_neighborhood_score", "genomic_context", "Genomic Context", getattr(weights, "gene_neighborhood", 0.0)),
-        CategoryRef("co_occurrence_score", "functional_domain", "Co-occurrence", getattr(weights, "co_occurrence", 0.0)),
-        CategoryRef("domain_complementarity_score", "functional_domain", "Domain Complementarity", getattr(weights, "domain_complementarity", 0.0)),
-        CategoryRef("string_ppi_score", "interaction", "Interaction (STRING PPI)", getattr(weights, "external_ppi", 0.0)),
-    )
-
-
-# ---------------------------------------------------------------------------
-# Sections 7 / 8: per-query candidate ranking and details
-# ---------------------------------------------------------------------------
-
-
-def _group_by_query(rows: list[dict[str, Any]]) -> list[tuple[str, list[dict[str, Any]]]]:
-    """Group already query_id-then-rank-sorted rows into (query_id, rows) pairs.
-
-    Preserves the incoming order (see report_v2.rerank_final_score_rows)
-    rather than re-sorting -- query section order is a deliberate,
-    reproducible property of the upstream sort, not decided here.
-    """
-    groups: list[tuple[str, list[dict[str, Any]]]] = []
-    current_query: str | None = None
-    current_rows: list[dict[str, Any]] = []
-    for row in rows:
-        query_id = str(row.get("query_id") or "")
-        if query_id != current_query:
-            if current_query is not None:
-                groups.append((current_query, current_rows))
-            current_query = query_id
-            current_rows = []
-        current_rows.append(row)
-    if current_query is not None:
-        groups.append((current_query, current_rows))
-    return groups
-
-
-# ---------------------------------------------------------------------------
 # Rendering: NarrativeSection list -> python-docx
 # ---------------------------------------------------------------------------
 
@@ -354,38 +270,14 @@ def write_word_report(
     resolved_output = Path(output_path).expanduser().resolve()
     resolved_output.parent.mkdir(parents=True, exist_ok=True)
 
-    scoring_config = getattr(config, "interaction_scoring", None)
-    scoring_model = str(getattr(scoring_config, "scoring_model", "legacy_additive"))
-    engine_config = load_scoring_engine_config(getattr(scoring_config, "scoring_engine_config", None))
-    legacy_weights = getattr(scoring_config, "scoring_weights", None)
-    pih_bundle_configured = bool(getattr(scoring_config, "pih_evidence_bundle", None))
-    word_report_config = getattr(scoring_config, "word_report", None)
-    max_per_query = int(getattr(word_report_config, "max_candidates_per_query", 15))
-
     try:
-        sheets_data = build_workbook_sheets(config, blast_classification, interaction_result)
-        selected_rows = select_top_candidates_per_query(
-            sheets_data["final_score_rows"], max_per_query, TIER_SAFETY_NET
-        )
-        grouped = _group_by_query(selected_rows)
-        category_refs = category_refs_for_scoring_model(scoring_model, engine_config, legacy_weights)
-        conserved_query_notes = [
-            warning[len(CONSERVED_QUERY_WARNING_PREFIX):]
-            for warning in getattr(interaction_result, "warnings", None) or []
-            if is_conserved_query_visibility_warning(warning)
-        ]
-        sections = build_report_sections(
-            language=language,
-            generated_at=datetime.now(),
-            scoring_model=scoring_model,
-            category_caps=engine_config.category_caps,
-            pih_bundle_configured=pih_bundle_configured,
-            grouped=grouped,
-            category_refs=category_refs,
-            max_per_query=max_per_query,
+        sections = build_run_sections(
+            config,
+            blast_classification,
+            interaction_result,
             excel_filename=excel_filename,
             provenance=provenance,
-            conserved_query_notes=conserved_query_notes,
+            language=language,
         )
 
         document = Document()

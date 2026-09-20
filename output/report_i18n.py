@@ -135,6 +135,16 @@ _EN: dict[str, str] = {
         "02_Final_Score, query_id={query_id}, "
         "candidate_protein_id={candidate_id}."
     ),
+    # -- Notion export (output/notion_report.py) ---------------------------
+    "notion.run_title": "{title} — {name} ({timestamp})",
+    "notion.database_title": "Candidates",
+    "notion.prop.query": "Query",
+    "notion.prop.candidate_id": "Candidate ID",
+    "notion.details_note": (
+        "One page per candidate is in the database below. Open a page to read its "
+        "“why this candidate ranks highly” and interpretation text; filter or group "
+        "the database by query, tier or candidate source."
+    ),
     # -- narrative: why this candidate ranks highly ------------------------
     "tier_opening.Tier1_VeryStrong": (
         "This candidate reached the highest confidence tier for this query "
@@ -375,6 +385,16 @@ _JA: dict[str, str] = {
     "details.excel_ref": (
         "この候補の全データ: {excel_filename} のシート 02_Final_Score、"
         "query_id={query_id}、candidate_protein_id={candidate_id} を参照。"
+    ),
+    # -- Notion export (output/notion_report.py) ---------------------------
+    "notion.run_title": "{title} — {name}({timestamp})",
+    "notion.database_title": "候補",
+    "notion.prop.query": "クエリ",
+    "notion.prop.candidate_id": "候補ID",
+    "notion.details_note": (
+        "候補ごとのページは、下のデータベースにある。ページを開くと、その候補の"
+        "「この候補が上位にある理由」と生物学的な解釈を読める。クエリ・Tier・候補ソースで"
+        "データベースを絞り込んだりグループ化したりできる。"
     ),
     # -- narrative: why this candidate ranks highly ------------------------
     "tier_opening.Tier1_VeryStrong": (

@@ -754,3 +754,65 @@ def test_invalid_report_language_raises_config_error(tmp_path: Path, value: obje
     with pytest.raises(ConfigError, match="report_language"):
         load_config(write_config(tmp_path, data), initialize=False)
 
+
+PAGE_ID = "3e1ef408bf298005a303f93efcff9871"
+
+
+def test_notion_export_is_off_by_default(tmp_path: Path) -> None:
+    cfg = load_config(write_config(tmp_path, valid_config_data()), initialize=False)
+
+    assert cfg.notion_export.enabled is False and cfg.notion_export.parent_page_id == ""
+
+
+def test_notion_export_can_be_configured(tmp_path: Path) -> None:
+    data = valid_config_data()
+    data["notion_export"] = {"enabled": True, "parent_page_id": f" {PAGE_ID} "}
+
+    cfg = load_config(write_config(tmp_path, data), initialize=False)
+
+    assert cfg.notion_export.enabled is True and cfg.notion_export.parent_page_id == PAGE_ID
+
+
+def test_notion_export_accepts_a_hyphenated_page_id(tmp_path: Path) -> None:
+    hyphenated = "3e1ef408-bf29-8005-a303-f93efcff9871"
+    data = valid_config_data()
+    data["notion_export"] = {"enabled": True, "parent_page_id": hyphenated}
+
+    assert load_config(write_config(tmp_path, data), initialize=False).notion_export.parent_page_id == hyphenated
+
+
+def test_a_page_id_is_not_needed_while_notion_export_is_disabled(tmp_path: Path) -> None:
+    data = valid_config_data()
+    data["notion_export"] = {"enabled": False, "parent_page_id": ""}
+
+    assert load_config(write_config(tmp_path, data), initialize=False).notion_export.enabled is False
+
+
+@pytest.mark.parametrize("page_id", ["", None, "not-an-id", PAGE_ID[:-1], PAGE_ID + "0", "https://www.notion.so/" + PAGE_ID])
+def test_enabled_notion_export_requires_a_valid_page_id(tmp_path: Path, page_id: object) -> None:
+    data = valid_config_data()
+    data["notion_export"] = {"enabled": True, "parent_page_id": page_id}
+
+    with pytest.raises(ConfigError, match="notion_export.parent_page_id"):
+        load_config(write_config(tmp_path, data), initialize=False)
+
+
+@pytest.mark.parametrize(
+    "section, message",
+    [("yes", "must be a mapping"), ({"enabled": "yes"}, "notion_export.enabled"), ({"parent_page_id": 123}, "must be a string")],
+)
+def test_malformed_notion_export_sections_are_rejected(tmp_path: Path, section: object, message: str) -> None:
+    data = valid_config_data()
+    data["notion_export"] = section
+
+    with pytest.raises(ConfigError, match=message):
+        load_config(write_config(tmp_path, data), initialize=False)
+
+
+def test_the_token_has_no_config_field() -> None:
+    from dataclasses import fields
+
+    from config import NotionExportConfig
+
+    assert {f.name for f in fields(NotionExportConfig)} == {"enabled", "parent_page_id"}  # the token comes from NOTION_TOKEN only
+

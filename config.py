@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 import multiprocessing
+import re
 import yaml
 
 from core.exceptions import ConfigError
@@ -135,6 +136,20 @@ class OrthologFilterConfig:
     strong: OrthologThresholdConfig
     medium: OrthologThresholdConfig
     weak: OrthologThresholdConfig
+
+
+@dataclass(frozen=True)
+class NotionExportConfig:
+    """Optional Notion output (output/notion_report.py); off by default.
+
+    The API token is never configured here: it is read from the NOTION_TOKEN
+    environment variable at run time. ``parent_page_id`` is the page shared
+    with the integration under which each run's pages are created; it is not a
+    secret.
+    """
+
+    enabled: bool = False
+    parent_page_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -338,6 +353,8 @@ class Config:
     # one Word file; the Excel workbook stays English. See
     # output/report_i18n.py and claude/word_report_japanese_localization_design.md.
     report_language: str = "en"
+
+    notion_export: NotionExportConfig = field(default_factory=NotionExportConfig)
 
 
 # ==========================================================
@@ -641,6 +658,7 @@ def load_config(config_file: str | Path = CONFIG_FILE, initialize: bool = True) 
         logging=logging,
         consider_cross_species_matches=consider_cross_species_matches,
         report_language=str(raw.get("report_language", REPORT_LANGUAGE_DEFAULT)),
+        notion_export=_load_notion_export(raw.get("notion_export")),
     )
 
     if initialize:
@@ -657,6 +675,7 @@ def validate_config(raw: object) -> None:
     _validate_input_mode(raw)
     _validate_consider_cross_species_matches_section(raw)
     _validate_report_language(raw)
+    _validate_notion_export(raw)
     _validate_paths_section(raw)
     _validate_blast_section(raw)
     _validate_annotation_section(raw)
@@ -759,6 +778,40 @@ def _validate_report_language(raw: dict[object, object]) -> None:
             + ", ".join(f'"{code}"' for code in REPORT_LANGUAGES)
             + "."
         )
+
+
+_NOTION_PAGE_ID = re.compile(r"^(?:[0-9a-fA-F]{32}|[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})$")
+
+
+def _validate_notion_export(raw: dict[object, object]) -> None:
+    """Validate the optional notion_export section (enabled flag, and a page id when enabled)."""
+    section = raw.get("notion_export")
+    if section is None:
+        return
+    if not isinstance(section, dict):
+        raise ConfigError("config.yaml value 'notion_export' must be a mapping.")
+    enabled = section.get("enabled", False)
+    if not isinstance(enabled, bool):
+        raise ConfigError("config.yaml value 'notion_export.enabled' must be true or false.")
+    parent_page_id = section.get("parent_page_id", "")
+    if parent_page_id is None:
+        parent_page_id = ""
+    if not isinstance(parent_page_id, str):
+        raise ConfigError("config.yaml value 'notion_export.parent_page_id' must be a string.")
+    if enabled and not _NOTION_PAGE_ID.match(parent_page_id.strip()):
+        raise ConfigError(
+            "config.yaml value 'notion_export.parent_page_id' must be the 32-character Notion page id "
+            "(the hex string at the end of the page URL) when notion_export.enabled is true."
+        )
+
+
+def _load_notion_export(raw_section: object) -> NotionExportConfig:
+    if not isinstance(raw_section, dict):
+        return NotionExportConfig()
+    return NotionExportConfig(
+        enabled=bool(raw_section.get("enabled", False)),
+        parent_page_id=str(raw_section.get("parent_page_id") or "").strip(),
+    )
 
 
 def _validate_blast_section(raw: dict[object, object]) -> None:

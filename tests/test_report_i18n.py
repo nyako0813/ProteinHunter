@@ -29,9 +29,9 @@ def test_every_key_uses_the_same_placeholders_in_both_languages() -> None:
 
 
 def test_every_japanese_string_actually_contains_japanese() -> None:
-    """Catches a Japanese entry that was left as the English text (the two punctuation-only separators are exempt)."""
+    """Catches a Japanese entry that was left as the English text (separators and the placeholder-only run title are exempt)."""
     for key, japanese in STRINGS["ja"].items():
-        if key in {"sentence_joiner", "why.listing_separator"}:
+        if key in {"sentence_joiner", "why.listing_separator", "notion.run_title"}:
             continue
         assert _JAPANESE.search(japanese), key
 

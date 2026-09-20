@@ -19,6 +19,15 @@ consider_cross_species_matches: true
 #Excel出力は、この設定に関係なく英語のまま
 report_language: "en"
 
+# Notion出力(第三の出力。ExcelとWordはそのまま生成される)。既定はオフ
+# 有効にすると、実行ごとのRunページ→候補データベース→候補ごとのページを、下のページ配下に作る
+# APIトークンはここに書かない。環境変数 NOTION_TOKEN から読む(未設定なら警告してスキップ)
+# parent_page_id は出力先ページのID(URL末尾の32桁)。秘匿情報ではない。
+# このページをNotionの内部インテグレーションに共有(「接続」に追加)しておくこと
+notion_export:
+  enabled: false
+  parent_page_id: "3e1ef408bf298005a303f93efcff9871"
+
 # ----------------------------------------------------------
 # Input / Output
 # ----------------------------------------------------------

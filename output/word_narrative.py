@@ -56,7 +56,16 @@ class CategoryRef(NamedTuple):
 #   bullet_list  items
 #   table        header, rows (first row of cells is the header; all text)
 #   toc          text (placeholder shown until the reader updates the field);
-#                docx-only -- other renderers skip it
+#                the docx renderer draws a TOC field, the Notion renderer its
+#                native table-of-contents block
+#
+# Structural hints for renderers that split the report (Notion turns each
+# candidate into its own database page); the docx renderer ignores them:
+#   role         "details" on the "8. Candidate Details" heading, "query" on a
+#                per-query heading inside it, "candidate" on a candidate title
+#   meta         key/value pairs of the data behind a "query"/"candidate"
+#                heading (query_id, candidate_id, rank, final_score, tier,
+#                source, description) -- data values, never translated
 
 
 @dataclass(frozen=True)
@@ -69,10 +78,21 @@ class NarrativeSection:
     header: tuple[str, ...] = ()
     rows: tuple[tuple[str, ...], ...] = ()
     anchor: str = ""
+    role: str = ""
+    meta: tuple[tuple[str, str], ...] = ()
+
+    def meta_dict(self) -> dict[str, str]:
+        return dict(self.meta)
 
 
-def heading(text: str, level: int, anchor: str = "") -> NarrativeSection:
-    return NarrativeSection("heading", text=text, level=level, anchor=anchor)
+def heading(
+    text: str,
+    level: int,
+    anchor: str = "",
+    role: str = "",
+    meta: Sequence[tuple[str, str]] = (),
+) -> NarrativeSection:
+    return NarrativeSection("heading", text=text, level=level, anchor=anchor, role=role, meta=tuple(meta))
 
 
 def paragraph(text: str, label: str = "") -> NarrativeSection:
