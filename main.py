@@ -114,12 +114,17 @@ def _build_cdd_target_records(
     return target_records
 
 
-def _log_reference_genome_check(logger: Any, directories: dict[str, Path]) -> None:
+def _log_reference_genome_check(logger: Any, directories: dict[str, Path]) -> bool | None:
     """Log each reference genome's identity and any mismatch with config/reference_genomes.v1.yaml.
 
     Findings are warnings only: a wrong/missing/duplicated reference genome
     silently changes every classification, so it must be visible in the log,
     but a deliberate change should not be blocked. Never raises.
+
+    Returns True when the genomes match the manifest, False when findings
+    were logged, and None when the check could not verify anything (no
+    manifest and no findings, or it failed to run) -- recorded as
+    ``reference_genome_check_passed`` in the run provenance.
     """
     from core.reference_genomes import (
         DEFAULT_MANIFEST_PATH,
@@ -148,8 +153,11 @@ def _log_reference_genome_check(logger: Any, directories: dict[str, Path]) -> No
             logger.warning(f"Reference genome check: {finding}")
         if manifest is not None and not findings:
             logger.info(f"Reference genome check passed ({len(records)} genomes match {DEFAULT_MANIFEST_PATH}).")
+            return True
+        return False if findings else None
     except Exception as exc:  # the check must never stop a run
         logger.warning(f"Reference genome check could not be completed: {exc}")
+        return None
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -204,6 +212,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         from config import load_config, redundant_negative_hit_sources
         from core.cache import JsonCache
         from core.fasta_sources import DirectoryFastaResult, prepare_directory_fasta
+        from core.constants import PROJECT_ROOT
+        from core.provenance import collect_run_provenance, write_provenance_sidecar
         from output.excel import write_classification_workbook
         from output.word_report import write_word_report
 
@@ -217,6 +227,9 @@ def main(argv: Sequence[str] | None = None) -> None:
         blast_work_dir = Path("data") / "temp" / "blast"
         directory_results: dict[str, DirectoryFastaResult] = {}
         source_counts: dict[str, int] = {}
+        # Result of the startup reference-genome check, for the run provenance;
+        # stays None in file input mode (no reference directories to check).
+        reference_genome_check_passed: bool | None = None
 
         if config.input_mode == "directory":
             directory_results = {
@@ -287,7 +300,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 logger.info(f"Combined target FASTA: {target_fasta}")
                 logger.info(f"Combined positive FASTA: {positive_fasta}")
                 logger.info(f"Combined negative FASTA: {negative_fasta}")
-                _log_reference_genome_check(
+                reference_genome_check_passed = _log_reference_genome_check(
                     logger,
                     {
                         "positive": _require_path(config.paths.positive_dir, "paths.positive_dir"),
@@ -634,6 +647,20 @@ def main(argv: Sequence[str] | None = None) -> None:
         word_report_config = config.interaction_scoring.word_report
         word_output_path = config.paths.output_word or config.paths.output_excel.with_suffix(".docx")
 
+        provenance = collect_run_provenance(
+            config,
+            PROJECT_ROOT,
+            config_path=config_path,
+            reference_genome_check_passed=reference_genome_check_passed,
+        )
+        logger.info(
+            f"Run provenance: code {provenance.app_version} "
+            f"(git {provenance.git_commit or 'unknown'}"
+            f"{'+dirty' if provenance.git_dirty else ''}), config fingerprint {provenance.config_hash}"
+        )
+        if provenance.git_commit is None:
+            logger.info("git provenance unavailable (not a git checkout or git not found); continuing without it.")
+
         with logger.section("Excel output"):
             with logger.timer("Write Excel output"):
                 excel_path = write_classification_workbook(
@@ -642,6 +669,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                     output_path=config.paths.output_excel,
                     interaction_result=interaction_result,
                     word_report_filename=word_output_path.name if word_report_config.enabled else None,
+                    provenance=provenance,
                 )
 
             logger.info(f"Final annotated candidate count: {len(records)}")
@@ -667,6 +695,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                         output_path=word_output_path,
                         interaction_result=interaction_result,
                         excel_filename=excel_path.name,
+                        provenance=provenance,
                     )
                 logger.info(
                     "Word report candidates per query: up to "
@@ -674,6 +703,16 @@ def main(argv: Sequence[str] | None = None) -> None:
                     "Tier1_VeryStrong/Tier2_Strong candidate regardless of rank"
                 )
                 logger.info(f"Word report written to: {word_path}")
+
+        with logger.section("Run provenance"):
+            # Outputs are already written; a failure here must not fail the run.
+            try:
+                sidecar_path = write_provenance_sidecar(
+                    provenance, config, config.paths.output_excel, config_path=config_path
+                )
+                logger.info(f"Run provenance file written to: {sidecar_path}")
+            except Exception as exc:
+                logger.warning(f"Run provenance file could not be written: {exc}")
 
         logger.summary()
         logger.success("Protein Hunter finished successfully")

@@ -37,6 +37,12 @@ from docx.text.paragraph import Paragraph
 from analysis.interaction_scoring import CONSERVED_QUERY_WARNING_PREFIX, is_conserved_query_visibility_warning
 from analysis.scoring_engine_config import ScoringEngineConfig, load_scoring_engine_config
 from core.exceptions import WordReportError
+from core.provenance import (
+    REFERENCE_GENOME_WARNING_TEXT,
+    RunProvenance,
+    code_version_text,
+    provenance_sidecar_filename,
+)
 from output.report_v2 import (
     TIER_SAFETY_NET,
     bookmark_name,
@@ -440,12 +446,30 @@ def _write_candidate_details(
 # ---------------------------------------------------------------------------
 
 
+def _write_provenance_paragraphs(
+    document: Document, provenance: RunProvenance, excel_filename: str
+) -> None:
+    """Title-page run-provenance lines (see core/provenance.py); only called when provenance is given."""
+    document.add_paragraph(f"Code version: {code_version_text(provenance)}")
+    document.add_paragraph(f"Config fingerprint: {provenance.config_hash}")
+    if excel_filename:
+        location = provenance_sidecar_filename(excel_filename)
+    else:
+        location = "<Excel workbook stem>.run_provenance.yaml"
+    document.add_paragraph(
+        f"Full effective configuration saved alongside this report as {location}"
+    )
+    if provenance.reference_genome_check_passed is False:
+        document.add_paragraph(f"Reference genome check: {REFERENCE_GENOME_WARNING_TEXT}")
+
+
 def write_word_report(
     config: Any,
     blast_classification: Any,
     output_path: str | Path,
     interaction_result: Any | None = None,
     excel_filename: str = "",
+    provenance: RunProvenance | None = None,
 ) -> Path:
     """Write the Phase 6-8 Stage 2 single-file Word report and return its path.
 
@@ -459,6 +483,11 @@ def write_word_report(
     claude/phase678_excel_word_redesign_investigation.md item 6: reliable
     Word->Excel deep-linking to a specific row is not available, so this
     is a stable filename+id reference rather than a fragile link).
+
+    ``provenance`` (run provenance, core/provenance.py) adds the code
+    version, config fingerprint and sidecar filename to the title page (plus
+    a warning when the reference-genome check failed). Left ``None`` (the
+    default), the title page is unchanged.
     """
     resolved_output = Path(output_path).expanduser().resolve()
     resolved_output.parent.mkdir(parents=True, exist_ok=True)
@@ -487,6 +516,8 @@ def write_word_report(
         document.add_heading("ProteinHunter Candidate Report", level=0)
         document.add_paragraph(f"Report generated: {datetime.now():%Y-%m-%d %H:%M}")
         document.add_paragraph(f"Scoring model: {scoring_model}")
+        if provenance is not None:
+            _write_provenance_paragraphs(document, provenance, excel_filename)
         document.add_paragraph(
             f"Queries evaluated: {len(grouped)}. Candidates shown per query: up to "
             f"{max_per_query}, plus any additional Tier1_VeryStrong/Tier2_Strong "

@@ -154,3 +154,66 @@ def test_manifest_genomes_are_not_gitignored() -> None:
                 ignored.append(path)
 
     assert ignored == []
+
+
+# ---------------------------------------------------------------------------
+# main._log_reference_genome_check -> RunProvenance.reference_genome_check_passed
+# ---------------------------------------------------------------------------
+
+
+class RecordingLogger:
+    def __init__(self) -> None:
+        self.warnings: list[str] = []
+
+    def info(self, message: str) -> None:
+        pass
+
+    def warning(self, message: str) -> None:
+        self.warnings.append(message)
+
+
+def _run_main_check(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, manifest: dict | None) -> tuple[bool | None, RecordingLogger]:
+    import yaml
+
+    import core.reference_genomes as reference_genomes
+    from main import _log_reference_genome_check
+
+    manifest_path = tmp_path / "manifest.yaml"
+    if manifest is not None:
+        manifest_path.write_text(yaml.safe_dump(manifest))
+    monkeypatch.setattr(reference_genomes, "DEFAULT_MANIFEST_PATH", manifest_path)
+    logger = RecordingLogger()
+    result = _log_reference_genome_check(
+        logger, {"positive": tmp_path / "positive", "negative": tmp_path / "negative"}
+    )
+    return result, logger
+
+
+def test_main_check_returns_true_when_genomes_match_the_manifest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    write_genome(tmp_path, "positive", "Pos_a", "GCF_1", "Pos aaa")
+    write_genome(tmp_path, "negative", "Neg_b", "GCF_2", "Neg bbb", salt="b")
+
+    result, logger = _run_main_check(tmp_path, monkeypatch, {"version": "v1", **MANIFEST})
+
+    assert result is True
+    assert logger.warnings == []
+
+
+def test_main_check_returns_false_when_findings_were_logged(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    write_genome(tmp_path, "positive", "Pos_a", "GCF_1", "Pos aaa")
+    write_genome(tmp_path, "negative", "Neg_b", "GCF_1", "Pos aaa")  # the original mix-up
+
+    result, logger = _run_main_check(tmp_path, monkeypatch, {"version": "v1", **MANIFEST})
+
+    assert result is False
+    assert logger.warnings
+
+
+def test_main_check_returns_none_when_nothing_could_be_verified(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    write_genome(tmp_path, "positive", "Pos_a", "GCF_1", "Pos aaa")
+    write_genome(tmp_path, "negative", "Neg_b", "GCF_2", "Neg bbb", salt="b")
+
+    result, logger = _run_main_check(tmp_path, monkeypatch, None)  # no manifest, no findings
+
+    assert result is None
+    assert any("manifest not found" in w for w in logger.warnings)
