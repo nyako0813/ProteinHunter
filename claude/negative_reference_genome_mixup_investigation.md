@@ -157,7 +157,11 @@ Negative_hit バケツに入った候補は GFF 由来の `old_locus_tag` が付
 最初のキャリブレーション再実行では、修正前の Negative_hit 側の MtpC 等が STRING/GEO を
 欠いていた(その結果を破棄して全バケツ ON で再実行し、上表はそちら)。
 つまり Negative_hit バケツの真陽性は、BLAST 分類だけでなく証拠の取得面でも
-不利になっている。キャリブレーション報告書の「STRING MISSING」の一部はこれが原因の可能性がある。
+不利になっている。
+(2026-09-20 追記: 対応は別ブランチ `link-negative-hit-gff-annotation` で実装。
+`_ANNOTATION_TARGETS_GFF_ALWAYS_ON` の2バケツ限定は性能上の制限ではなく、`beec3c8` で
+`設定.xlsx` の既定プリセット(「考慮する」= Candidates/Candidates_relaxed のみ true)を
+そのまま反映したものだった。GFF 注釈は 4,627 レコードでも 0.21 秒(既定の 1,261 件で 0.20 秒)。)キャリブレーション報告書の「STRING MISSING」の一部はこれが原因の可能性がある。
 
 ## 既存の分析結論への含意
 

@@ -1,11 +1,28 @@
 # Calibration diagnostic report: Tier A/B positive pairs vs. AlphaFold3 negatives
 
-> **注意 (2026-09-20 追記):** この報告書の実行時、`negative/Sulfolobus_solfataricus`
-> フォルダの中身は誤って *Methanococcus maripaludis*(陽性参照と同一ゲノム)だった。
-> 以下の「Negative_hit に落ちる」という主要所見と rank 分母は、その影響を強く
-> 受けている可能性が高い。修正後の再分類結果は
-> `claude/negative_reference_genome_mixup_investigation.md` を参照。
-> 本文は当時の記録として未変更。
+> **訂正 (2026-09-20)**: この報告書の実行時、`negative/Sulfolobus_solfataricus` の中身は
+> 誤って *Methanococcus maripaludis*(陽性参照と同一ファイル)だった。本文は当時の記録として
+> 残し、以下のとおり訂正する。詳細と再現手順は
+> `claude/negative_reference_genome_mixup_investigation.md`。
+>
+> - **「Headline finding」(既知の真陽性は Candidates に入らず Negative_hit に落ちる)は、
+>   大部分がこの取り違えの産物だった。** 正しいゲノムで再分類すると、Tier A/B の17パートナー
+>   タンパク質のうち Candidates(strict)は 0→14、Negative_hit は 17→3
+>   (残るのは DnaK・Mer・Hsp20 で、実際に広く保存された蛋白)。strong/medium の
+>   negative_hit_strength は 15→2。「保存性の高い中核代謝タンパク質はネガティブ参照にも
+>   ヒットして除外される」という機構自体は本当に保存された蛋白には当てはまるが、
+>   Tier A の一般的な性質ではなかった。
+> - 本文中の rank 分母(2088/780/151)は誤ったゲノムでの値。修正後のバケツ件数は
+>   Candidates 127→709、Negative_hit 2253→1737、Negative_strong_hit 834→435
+>   (この報告書の実行時の値とは、その後のコード変更のため厳密には一致しない)。
+> - **影響を受けなかった結論**: `interaction_score` に関する結論(発見1: 旧来のブレンド済み
+>   スコアより Tier A / AF3陰性の分離が良い)。interaction_score は陰性参照ゲノムに依存せず、
+>   修正前後で全ペア完全に同一値だった(同一コード・同一configでの比較)。
+> - **影響を受けた結論**: `final_score`(negative_hit_strength を独立に読む)は
+>   Negative_hit だったペアで約+8点上昇し、Tier A vs AF3陰性の分離(AUC)は
+>   0.563→0.684(n が小さく参考値)。
+> - 以下の表・数値は当時の記録であり、現在のコードでは再現できない
+>   (絶対値の比較は同一コード・同一configの前後のみ有効)。
 
 Status: **diagnostic report only, no cap/weight changes implemented**. This
 records a single, consistent pipeline run (`scoring_model: v2_evidence_based`,
