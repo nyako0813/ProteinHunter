@@ -2,6 +2,36 @@
 
 ProteinHunter_v5 の変更履歴です。
 
+## 未リリース: PIHブリッジ `pih_cellular_compatibility`/`pih_evolutionary` capの再較正
+
+PIH連携ブリッジStage B1〜B3の実データ検証(`interaction_priority_score`が`pih_*`カテゴリの影響を受ける唯一の既定指標であること、
+旧cap(5/10)がTier A/Bの分離をPIH無効時より悪化させていたことを確認)を受けての再較正。分析記録:
+`claude/calibration/2026-09-24_pih_priority_score_recalibration/`。
+
+### Changed
+
+| 設定 | 旧値 | 新値 |
+|---|---:|---:|
+| `DEFAULT_CATEGORY_CAPS["pih_cellular_compatibility"]`(`analysis/scoring_engine_config.py`、`config/scoring_engine.example.yaml`) | 5 | **0** |
+| `DEFAULT_CATEGORY_CAPS["pih_evolutionary"]`(同上) | 10 | **3** |
+| `BRIDGED_PIH_CATEGORY_CAPS`(`analysis/pih_evidence_bridge.py`、ドキュメント用ミラー定数) | 5/10/20 | 0/3/20(一致を維持) |
+| `pih_direct_interaction`のcap | 20 | 20(**変更なし**、`known_interactions`/`fusion`が未curationのため評価不能) |
+
+- Tier A 10ペア全件・Tier B 5ペア・AlphaFold3陰性28件で、`pih_cellular_compatibility`∈{0,2,5,8}×`pih_evolutionary`∈{0,1,2,3,5,10}の
+  24通りをグリッドサーチ(`interaction_priority_score`のAUC)。新値(0/3)はTier A AUC 0.992(グリッド最良、PIH無効時0.985を上回る)、
+  Tier B AUC 0.635(PIH無効時と同水準)を達成。旧値(5/10)は逆にTier A 0.981・Tier B 0.569と、PIH無効時より悪化していた。
+- 実パイプラインでの前後比較: `interaction_score`/`final_score`は全ペアで完全一致(構造的に無関係、想定通り)。
+  `interaction_priority_score`のAUCはTier A 0.982→0.993、Tier B 0.571→0.632(実行結果、グリッドサーチと同方向)。
+- `category_caps`のYAML/コード両方で**0を許容するよう変更**(`analysis/scoring_engine_config.py::_positive_float`、
+  `allow_zero=True`)。cap=0は「カテゴリは登録されたまま(該当証拠があれば`evidence_category_count`等には引き続きカウントされる)
+  だがスコアへの寄与はゼロ」という意味で、カテゴリをスコープから除外すること(`INTERACTION_SCORE_COMPONENT_NAMES`、対象外)とは異なる。
+- `INTERACTION_SCORE_COMPONENT_NAMES`・A3(負値`[0,1]`切り詰め)・`pih_direct_interaction`の有効化は引き続きスコープ外。
+
+### Tests
+
+- 既存テスト815件(6 skip)は無変更で全green。`tests/test_scoring_engine_config.py::test_example_config_matches_defaults`は
+  `config/scoring_engine.example.yaml`を新値に揃えたことで、コード変更なしにそのままpassすることを確認。
+
 ## 未リリース: `rockhopper_operon_enabled` を既定でON化
 
 Phase 6f(PR #15)でRockhopperオペロン予測証拠(`rockhopper_operon`)を実装した時点では、

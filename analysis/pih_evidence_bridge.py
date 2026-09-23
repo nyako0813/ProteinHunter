@@ -61,9 +61,12 @@ PIH_CATEGORY_WEIGHTS: dict[str, float] = {
 #: analysis/scoring_engine_config.py::DEFAULT_CATEGORY_CAPS extension: the
 #: cap each bridged category may contribute to v5's total score, active
 #: only for pairs where PIH actually produced that category's evidence.
+#: Must match DEFAULT_CATEGORY_CAPS -- pih_cellular_compatibility/
+#: pih_evolutionary were recalibrated (5/10 -> 0/3) against real PIH output;
+#: see that dict's docstring for the real-data grid search this followed.
 BRIDGED_PIH_CATEGORY_CAPS: dict[str, float] = {
-    "pih_cellular_compatibility": 5.0,
-    "pih_evolutionary": 10.0,
+    "pih_cellular_compatibility": 0.0,
+    "pih_evolutionary": 3.0,
     "pih_direct_interaction": 20.0,
 }
 
