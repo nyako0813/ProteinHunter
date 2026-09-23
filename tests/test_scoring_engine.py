@@ -100,6 +100,46 @@ def test_zero_weight_component_contributes_nothing_and_does_not_activate_categor
     assert breakdown.final_score == pytest.approx(50.0)  # 0.5 normalized * 100
 
 
+def test_zero_cap_category_scores_zero_but_stays_audited_and_does_not_inflate_counts() -> None:
+    """A category configured with cap=0.0 (e.g. pih_cellular_compatibility, recalibrated
+    2026-09-24) is a deliberate "registered but never scored" state, distinct from
+    weight=0.0 (see test_zero_weight_component_contributes_nothing_...) or missing
+    evidence: the component itself is AVAILABLE with real weight/value, it just can
+    never contribute score points. It must not divide by zero, must not add to
+    total_cap/positive_raw_total (both already 0 via cap=0), and -- the part this
+    guards specifically -- must not inflate evidence_category_count /
+    available_weight_total (and therefore eligibility/tier) with evidence that
+    provably never affected the score, while remaining visible in category_scores
+    for audit.
+    """
+    components = [
+        EvidenceComponent.available("cellular_compatibility", "pih_cellular_compatibility", 1.0, 5.0),
+        EvidenceComponent.available("domain", "functional_annotation", 0.5, 20.0),
+    ]
+    engine_config = make_engine_config(
+        category_caps={
+            "functional_annotation": 20.0,
+            "pih_cellular_compatibility": 0.0,
+        }
+    )
+    breakdown = score_candidate(components, engine_config)
+
+    zero_cap = breakdown.category_scores["pih_cellular_compatibility"]
+    assert zero_cap.cap == pytest.approx(0.0)
+    assert zero_cap.available_weight == pytest.approx(5.0)  # audited: evidence was real
+    assert zero_cap.normalized_score == pytest.approx(1.0)  # audited: within-category value
+    assert zero_cap.capped_score == pytest.approx(0.0)  # but contributes nothing
+    assert zero_cap.component_count == 1
+
+    # Only functional_annotation (cap 20, nonzero) counts as "active" -- the
+    # zero-cap category must not inflate these even though it has real evidence.
+    assert breakdown.evidence_category_count == 1
+    assert breakdown.available_weight_total == pytest.approx(20.0)
+    assert breakdown.total_cap == pytest.approx(20.0)
+    assert breakdown.final_score == pytest.approx(50.0)  # unaffected by the zero-cap category
+    assert breakdown.eligible is True
+
+
 def test_multiple_negative_components_are_summed_then_capped() -> None:
     """Multiple AVAILABLE negative components sum before the cap applies."""
     components = [

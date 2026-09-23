@@ -79,8 +79,17 @@ def score_candidate(
     negative = [c for c in components if c.status is EvidenceStatus.AVAILABLE and c.is_negative]
 
     category_scores = _score_categories(positive, engine_config.category_caps)
+    # cap == 0 is a deliberate way to keep a category registered (still
+    # reported in category_scores, e.g. for audit) while it can never
+    # contribute to the score -- exclude it from "active" so it cannot
+    # inflate evidence_category_count / available_weight_total (and
+    # therefore eligibility/tier thresholds) with evidence that provably
+    # never affected positive_raw_total. total_cap/positive_raw_total are
+    # unaffected either way (a cap of 0 already contributes 0 to both).
     active_categories = {
-        category: score for category, score in category_scores.items() if score.available_weight > 0
+        category: score
+        for category, score in category_scores.items()
+        if score.available_weight > 0 and score.cap > 0
     }
 
     total_cap = sum(score.cap for score in active_categories.values())

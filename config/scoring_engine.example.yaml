@@ -34,8 +34,8 @@ category_caps:
   source_classification: 30       # BLAST positive/negative classification source
   genomic_context: 25             # GFF-based gene neighborhood distance
   functional_annotation: 20       # co_occurrence + domain_complementarity (shared cap)
-  pih_cellular_compatibility: 5   # optional ProteinInteractionHunter bridge (see interaction_scoring.pih_evidence_bundle)
-  pih_evolutionary: 10            # optional ProteinInteractionHunter bridge
+  pih_cellular_compatibility: 0   # optional ProteinInteractionHunter bridge; recalibrated from 5 -- see analysis/scoring_engine_config.py::DEFAULT_CATEGORY_CAPS
+  pih_evolutionary: 3             # optional ProteinInteractionHunter bridge; recalibrated from 10 -- see analysis/scoring_engine_config.py::DEFAULT_CATEGORY_CAPS
   pih_direct_interaction: 20      # optional ProteinInteractionHunter bridge
   external_ppi_evidence: 15       # optional STRING PPI bridge (see interaction_scoring.string_ppi_ncbi_taxon_id); provisional cap, awaiting calibration
   coexpression_evidence: 12       # optional GEO coexpression bridge (see interaction_scoring.geo_coexpression_enabled); provisional cap, awaiting calibration

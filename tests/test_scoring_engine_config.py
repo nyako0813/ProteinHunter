@@ -88,6 +88,28 @@ tie_precision: 2
     assert config.tie_precision == 2
 
 
+def test_category_caps_accept_zero_but_reject_negative(tmp_path: Path) -> None:
+    """A category cap of 0 loads fine (2026-09-24: pih_cellular_compatibility's
+    recalibrated default) -- deliberately keeps the category registered while it
+    can never contribute score -- but a negative cap is still rejected."""
+    path = tmp_path / "scoring.yaml"
+    path.write_text(
+        "category_caps:\n  source_classification: 30\n  pih_cellular_compatibility: 0\n",
+        encoding="utf-8",
+    )
+    config = load_scoring_engine_config(path)
+    assert config.category_caps["pih_cellular_compatibility"] == 0.0
+    assert config.category_caps["source_classification"] == 30.0
+
+    negative_path = tmp_path / "negative.yaml"
+    negative_path.write_text(
+        "category_caps:\n  source_classification: 30\n  pih_cellular_compatibility: -1\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="category_caps.pih_cellular_compatibility"):
+        load_scoring_engine_config(negative_path)
+
+
 def test_null_negative_penalty_cap_means_uncapped(tmp_path: Path) -> None:
     path = tmp_path / "scoring.yaml"
     path.write_text(

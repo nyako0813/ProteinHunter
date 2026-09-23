@@ -100,13 +100,38 @@ class ScoringEngineConfig:
 #: is excluded from the score denominator. Values must match
 #: analysis.pih_evidence_bridge.BRIDGED_PIH_CATEGORY_CAPS.
 #:
+#: pih_cellular_compatibility (0.0, was 5.0) and pih_evolutionary (3.0, was
+#: 10.0) were recalibrated against real PIH output (PSORTb/OrthoFinder,
+#: Methanosarcina acetivorans MA_4115 pilot) bridged into the 10-pair Tier A
+#: / 5-pair Tier B / 26-entry AlphaFold3-negative calibration set -- see
+#: claude/calibration/2026-09-24_pih_priority_score_recalibration/. At the
+#: old 5/10, interaction_priority_score's Tier A/B separation from the
+#: AF3 negatives was *worse* than with the bridge disabled entirely
+#: (Tier A/B AUC 0.981/0.569 at 5/10, vs. 0.985/0.635 with the bridge
+#: disabled): both categories' typical achieved value sits well under their
+#: old cap even for known true positives, so their unused cap headroom only
+#: dilutes the category-capped-average denominator for candidates that
+#: already scored well elsewhere. A grid search over pih_cellular_compatibility
+#: in {0, 2, 5, 8} x pih_evolutionary in {0, 1, 2, 3, 5, 10} found 0/3 gives
+#: the best Tier A AUC in the grid (0.992) while matching (not just meeting)
+#: the disabled-bridge Tier B AUC (0.635) -- the only grid point that does
+#: both. pih_cellular_compatibility=0 leaves the category registered
+#: (still visible in the breakdown, still counted toward
+#: evidence_category_count/available_weight_total when a pair has evidence
+#: for it) but contributes zero score either way -- functionally different
+#: from removing "pih_cellular_compatibility" from scope, which stays out
+#: of scope here (see INTERACTION_SCORE_COMPONENT_NAMES in
+#: analysis/interaction_scoring.py, unchanged by this recalibration).
+#: pih_direct_interaction is unchanged (20.0): no known-interaction/fusion
+#: data has been curated for this organism yet, so this category never
+#: actually fires and the grid search could not evaluate it.
+#:
 #: "external_ppi_evidence" (Phase 6a, analysis/string_ppi_bridge.py) is a
 #: PROVISIONAL cap awaiting AlphaFold3 calibration data -- 15.0 was picked
-#: as a mid-sized budget (between pih_evolutionary's 10 and
-#: pih_direct_interaction's 20), not derived from any fit. Same
-#: "present but inactive unless configured" behavior as the pih_* caps:
-#: interaction_scoring.string_ppi_ncbi_taxon_id must be set for this
-#: category to ever have available evidence.
+#: as a mid-sized budget between the other bridged-evidence caps, not
+#: derived from any fit. Same "present but inactive unless configured"
+#: behavior as the pih_* caps: interaction_scoring.string_ppi_ncbi_taxon_id
+#: must be set for this category to ever have available evidence.
 #:
 #: "coexpression_evidence" (Phase 6b, analysis/coexpression_bridge.py) is
 #: also a PROVISIONAL cap, same reasoning as external_ppi_evidence -- 12.0
@@ -139,8 +164,8 @@ DEFAULT_CATEGORY_CAPS: dict[str, float] = {
     "source_classification": 30.0,
     "genomic_context": 25.0,
     "functional_annotation": 20.0,
-    "pih_cellular_compatibility": 5.0,
-    "pih_evolutionary": 10.0,
+    "pih_cellular_compatibility": 0.0,
+    "pih_evolutionary": 3.0,
     "pih_direct_interaction": 20.0,
     "external_ppi_evidence": 15.0,
     "coexpression_evidence": 12.0,
@@ -193,7 +218,14 @@ def _parse_scoring_engine_config(raw: dict[object, object], path: Path) -> Scori
     for category, cap in raw_caps.items():
         if not isinstance(category, str) or not category:
             raise ConfigError(f"'category_caps' keys in {path} must be non-empty strings.")
-        category_caps[category] = _positive_float(cap, f"category_caps.{category}", path)
+        # allow_zero=True: a cap of 0 is a deliberate way to keep a category
+        # registered (still visible in the breakdown, still counted toward
+        # evidence_category_count/available_weight_total when a pair has
+        # evidence for it) while contributing nothing to the score -- see
+        # DEFAULT_CATEGORY_CAPS's pih_cellular_compatibility.
+        category_caps[category] = _positive_float(
+            cap, f"category_caps.{category}", path, allow_zero=True
+        )
 
     negative_penalty_cap_raw = raw.get("negative_penalty_cap", 30.0)
     negative_penalty_cap: float | None
