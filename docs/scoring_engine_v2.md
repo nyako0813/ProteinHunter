@@ -121,9 +121,13 @@ on both sides (`protein_id`, `old_locus_tag`, and a version-stripped
 
 Category caps for the bridged categories live in
 `analysis/scoring_engine_config.py::DEFAULT_CATEGORY_CAPS` /
-`config/scoring_engine.example.yaml` (`pih_cellular_compatibility: 5`,
-`pih_evolutionary: 10`, `pih_direct_interaction: 20`) and must match
-`analysis.pih_evidence_bridge.BRIDGED_PIH_CATEGORY_CAPS` --
+`config/scoring_engine.example.yaml` (`pih_cellular_compatibility: 0`,
+`pih_evolutionary: 3`, `pih_direct_interaction: 20` -- the first two
+recalibrated 2026-09-24 against real PIH output, see
+`claude/calibration/2026-09-24_pih_priority_score_recalibration/`; a cap of
+0 deliberately keeps a category registered for audit while it can never
+contribute score, see `analysis/scoring_engine.py::score_candidate`) and
+must match `analysis.pih_evidence_bridge.BRIDGED_PIH_CATEGORY_CAPS` --
 `tests/test_scoring_engine_config.py::test_example_config_matches_defaults`
 guards this so the example file cannot silently drift out of sync with the
 code again (a category with no configured cap raises a `ConfigError` the

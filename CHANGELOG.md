@@ -27,10 +27,25 @@ PIH連携ブリッジStage B1〜B3の実データ検証(`interaction_priority_sc
   だがスコアへの寄与はゼロ」という意味で、カテゴリをスコープから除外すること(`INTERACTION_SCORE_COMPONENT_NAMES`、対象外)とは異なる。
 - `INTERACTION_SCORE_COMPONENT_NAMES`・A3(負値`[0,1]`切り詰め)・`pih_direct_interaction`の有効化は引き続きスコープ外。
 
+### Fixed
+
+- **レビュー指摘への対応**: cap=0のカテゴリ(現状`pih_cellular_compatibility`のみ)は、そのペアに実際の証拠(AVAILABLE)があっても
+  `analysis/scoring_engine.py::score_candidate`の`evidence_category_count`/`available_weight_total`に**カウントされてしまっていた**
+  (スコアへの寄与はゼロだが「評価済みカテゴリ数」には入る、という不整合)。`active_categories`の判定に`cap > 0`を追加し、
+  スコアに実際に寄与しないカテゴリは適格性判定・Tier判定からも除外されるよう修正。`category_scores`辞書自体には引き続き
+  cap=0のカテゴリの記録(実際の証拠の値・重み)が残るため、監査可能性は失われない。
+  実データで確認: Tier Aの`NifD-NifK`ペアで`evidence_category_count`が修正前7→修正後6に(スコア値`final_score`は不変)。
+  既存カテゴリ(全てcap>0)には影響なし(既存テスト全815件は無変更でgreen)。
+
 ### Tests
 
 - 既存テスト815件(6 skip)は無変更で全green。`tests/test_scoring_engine_config.py::test_example_config_matches_defaults`は
   `config/scoring_engine.example.yaml`を新値に揃えたことで、コード変更なしにそのままpassすることを確認。
+- 新規2件追加(計817件): `tests/test_scoring_engine.py::test_zero_cap_category_scores_zero_but_stays_audited_and_does_not_inflate_counts`
+  (cap=0のカテゴリがゼロ除算せず安全に扱われ、スコアに寄与せず、かつ`evidence_category_count`/`available_weight_total`を
+  水増ししないことを、監査記録は保持されたままであることも含めてアサート)、
+  `tests/test_scoring_engine_config.py::test_category_caps_accept_zero_but_reject_negative`
+  (YAML経由の`category_caps`がcap=0を受理し、負値は引き続き拒否することを確認)。
 
 ## 未リリース: `rockhopper_operon_enabled` を既定でON化
 

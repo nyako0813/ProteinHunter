@@ -51,11 +51,29 @@ Tier Bがより低い(0.6269 / 0.6038)ため`cap_evo=3`を優先。
 
 - n=10(Tier A)・n=5(Tier B)・n=28(陰性)の小標本。近傍グリッドセル間の差は1〜2ペアの入れ替わりに相当し、
   「最適値」の断定はしない。
-- `pih_cellular_compatibility=0`は、カテゴリを`INTERACTION_SCORE_COMPONENT_NAMES`やスコープから除外するのとは異なる:
-  スコアへの寄与はゼロになるが、該当ペアで証拠がAVAILABLEなら`evidence_category_count`/`available_weight_total`には
-  引き続きカウントされる(`analysis/scoring_engine.py::_score_categories`の"available_weight>0なら active"という
-  判定はcapを見ない)。これはTier閾値・formal_score_available判定に極めて限定的な影響を与えうるが、今回の
-  AUC検証はスコア値自体の分離のみを見ており、この副次効果は未検証(将来の課題)。
+- **`pih_cellular_compatibility=0`はcap値の微調整ではなく、このカテゴリを`interaction_priority_score`に対して
+  恒久的に無寄与にする実質的な無効化の決定**(レビュー指摘を受けて明記)。Stage B1で見た「候補の20.47%が
+  負値(矛盾する証拠)」というデータも踏まえた判断。`INTERACTION_SCORE_COMPONENT_NAMES`によるスコープ除外
+  (Stage B3、現状維持)とは異なるレイヤーの変更だが、影響の重さとしては同種の判断であることに留意。
+
+### レビュー対応: "評価済みカテゴリ"としての水増し(修正済み)
+
+当初、`pih_cellular_compatibility=0`後も、該当ペアで証拠がAVAILABLEなら`evidence_category_count`/
+`available_weight_total`には引き続きカウントされてしまう副作用が未検証のまま残っていた
+(`analysis/scoring_engine.py::_score_categories`の"available_weight>0なら active"という判定はcapを見ていなかったため)。
+実データ(`NifD-NifK`ペア)で確認したところ、修正前は`evidence_category_count`が7のまま変化せず、
+「スコアに一切寄与しないカテゴリを評価済みとして数える」という design spec §35の誠実性要件に反する状態だった。
+
+対応: `analysis/scoring_engine.py::score_candidate`の`active_categories`判定に`cap > 0`を追加(`(b)`案を採用)。
+`DEFAULT_CATEGORY_CAPS`からキー自体を削除する`(a)`案は、実際にPIH bundleからcellular_compatibility証拠が来た
+瞬間に`ConfigError`でクラッシュする(`_score_categories`の未設定カテゴリガード)ため不採用。`(b)`はスコア値
+(`positive_raw_total`/`total_cap`、既にcap=0で0寄与)には影響せず、`evidence_category_count`/
+`available_weight_total`(ひいては適格性・Tier判定)からのみ除外する最小限の修正。監査用の`category_scores`
+辞書には引き続きcap=0カテゴリの実際の証拠内容(重み・正規化値)が残るため、監査可能性は失われない。
+
+実データでの効果確認(`NifD-NifK`): `evidence_category_count` 7→6、`available_weight_total` 42.33→37.33、
+`final_score`/`interaction_priority_score`は不変。既存カテゴリ(全てcap>0)への影響なし(既存テスト全815件green)。
+単体テスト2件追加(`tests/test_scoring_engine.py`・`tests/test_scoring_engine_config.py`)。
 - `pih_direct_interaction`(cap 20)はTier A/B/陰性のいずれにも実データが流れておらず(`known_interactions`/
   `fusion`が未curation)、このグリッドサーチでは評価不能。今回は変更していない。
 
