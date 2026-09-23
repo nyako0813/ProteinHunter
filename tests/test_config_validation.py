@@ -12,6 +12,8 @@ import yaml
 from config import load_config, redundant_negative_hit_sources
 from core.exceptions import ConfigError
 
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
 
 def valid_config_data() -> dict[str, Any]:
     """Return a complete valid config dictionary for tests."""
@@ -815,4 +817,28 @@ def test_the_token_has_no_config_field() -> None:
     from config import NotionExportConfig
 
     assert {f.name for f in fields(NotionExportConfig)} == {"enabled", "parent_page_id"}  # the token comes from NOTION_TOKEN only
+
+
+@pytest.mark.parametrize("name", ["config.yaml", "config.considering_pn.yaml", "config.without_pn.yaml"])
+def test_shipped_configs_default_rockhopper_operon_to_enabled(name: str) -> None:
+    """rockhopper_operon_enabled was flipped false -> true in the three shipped templates.
+
+    See claude/calibration/2026-09-23_rockhopper_default/ for the A/B calibration run this
+    followed: with the flag on, Tier A separation from the AlphaFold3 negatives did not
+    degrade on any score column and improved on interaction_score (AUC 0.914 -> 0.938) and
+    final_score (AUC 0.876 -> 0.900); Tier B and the negatives themselves were unaffected.
+    config.demo.yaml is deliberately left out (it also omits geo_coexpression_enabled and
+    string_ppi_ncbi_taxon_id, so this follows the same precedent).
+    """
+    cfg = load_config(REPO_ROOT / name, initialize=False)
+
+    assert cfg.interaction_scoring.rockhopper_operon_enabled is True
+
+
+def test_demo_config_is_not_touched_by_the_rockhopper_operon_default_change() -> None:
+    """config.demo.yaml has no interaction_scoring.rockhopper_operon_enabled key of its own,
+    so it still falls back to the dataclass default (False) -- unaffected by the templates above."""
+    cfg = load_config(REPO_ROOT / "config.demo.yaml", initialize=False)
+
+    assert cfg.interaction_scoring.rockhopper_operon_enabled is False
 

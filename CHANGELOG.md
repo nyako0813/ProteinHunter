@@ -2,6 +2,41 @@
 
 ProteinHunter_v5 の変更履歴です。
 
+## 未リリース: `rockhopper_operon_enabled` を既定でON化
+
+Phase 6f(PR #15)でRockhopperオペロン予測証拠(`rockhopper_operon`)を実装した時点では、
+`interaction_scoring.rockhopper_operon_enabled`はテストでのみ有効化されており、config.yaml等の
+テンプレートでは既定OFFのまま出荷されていた(有効化するM5コミットはpushされたがマージされずに残っていた)。
+今回、Tier A正例・AlphaFold3陰性データでの分離への影響を実データで検証した上で、既定を反転する。
+分析記録: `claude/calibration/2026-09-23_rockhopper_default/`(`before/`が旧既定false、直下が新既定true)。
+
+### Changed
+
+| 設定 | 旧値 | 新値 |
+|---|---|---|
+| `interaction_scoring.rockhopper_operon_enabled`(`config.yaml` / `config.considering_pn.yaml` / `config.without_pn.yaml`) | false(未設定) | true |
+
+- `config/scoring_engine.example.yaml`は対象外(category caps/tier閾値の別設定系統で、そもそも`rockhopper_operon_enabled`という
+  キーを持たない)。`config.demo.yaml`も対象外(`geo_coexpression_enabled`/`string_ppi_ncbi_taxon_id`も設定しておらず、既存の
+  慣例を踏襲)。
+- 検証方法: `claude/experimental_interactions_curated.csv`のTier A/B双方に登場する27遺伝子座
+  (+ 陰性データの基準クエリMA_4115)を`query_proteins`に列挙し、`rockhopper_operon_enabled: false`/`true`のみを変えた2回の
+  フル実行(同一コード・同一candidate_sources/max_candidates_per_query)を`tools/calibration_report.py`で比較。
+  マッチ件数(Tier A 20件・Tier B 35件・陰性21件)は両実行で完全一致(候補バケット分類自体は変えないため)。
+  Tier Aの`interaction_score`(AUC 0.914→0.938)・`final_score`(AUC 0.876→0.900)は分離が改善し、他の全スコア列・Tier B・陰性側の
+  平均/中央値/AUCはいずれも不変(=陰性側のスコアを一切押し上げない)。悪化した列は無い。
+- 影響を受けるのは、既存のキュレーション済み複合体(Mcr、Nif等)を含む一部のTier Aペアのみ
+  (`data/cache/rockhopper_operons.json`が実際にカバーする4条件分)。それ以外のペアはMISSING(未評価)のままで、
+  スコアは変わらない。
+
+### Tests
+
+- `tests/test_config_validation.py`に`test_shipped_configs_default_rockhopper_operon_to_enabled`(3テンプレート共通)と
+  `test_demo_config_is_not_touched_by_the_rockhopper_operon_default_change`を追加し、実際に出荷される設定ファイルの
+  既定値そのものをピン留めする。旧デフォルト(無効)は`config.py`のデータクラス既定値として変わらず残り、既存の
+  `test_rockhopper_operon_not_run_when_disabled`等のOFF経路テストはそのまま有効(合成configで明示的にOFFを指定しているため、
+  テンプレートの既定値変更の影響を受けない)。
+
 ## 未リリース: PIHブリッジのバグ修正(`integrated_scoring`の形)
 
 `analysis/pih_evidence_bridge.py`(Phase 4)は、PIHの`candidate_evidence_bundle.jsonl`を実際の出力と異なる形で読んでいた。
